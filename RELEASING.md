@@ -38,8 +38,9 @@ while npm reached 0.1.4, because the two publishes were independent manual steps
 
 4. **Commit and push.** The push triggers the registry sync, which reads npm's
    `latest` and publishes a matching registry version. Nothing to run by hand.
+
    ```sh
-   git commit -am "release: 0.4.5" && git push origin main
+   git commit -am "release: 0.9.0" && git push origin main
    ```
 
 5. **Confirm both agree** (CI already does this and fails loudly if not):
@@ -81,3 +82,38 @@ validates against the live schema, performs the OIDC login, then stops):
 ```sh
 gh workflow run "Sync MCP Registry" -f dry_run=true
 ```
+
+## The remote endpoint (0.9.0+)
+
+`server.json` also declares a `remotes` entry for `https://37soul.com/mcp`, so
+clients that can take a URL can connect without installing anything.
+
+Two things must travel **together**, or the registry will silently publish nothing:
+
+- The registry sync only acts when npm's `latest` differs from the registry's —
+  editing `server.json` without bumping the version just reports "In sync".
+- `Authorization` on that `remotes` entry must stay `isRequired: false`. Setting
+  it to `true` tells clients this server has no OAuth, and they will ask for a
+  token instead of signing in.
+
+`McpController::SERVER_VERSION` in the **Rails repo** (`37soul`) reports the same
+version over MCP. `scripts/bump-version.sh` cannot reach it — bump it by hand in
+the same release, or the two ends advertise different versions of the same tools.
+
+## Release order for the remote endpoint (do not reorder)
+
+The `remotes` entry points at `https://37soul.com/mcp`, so that endpoint has to
+exist before anything announces it. This order is the only one that never points
+a client at a 404:
+
+1. **Rails merges and deploys** (`37soul`, branch `feat/mcp-remote-endpoint`).
+   `POST /mcp` + the OAuth discovery documents go live. Then run the real-client
+   checks in the handoff doc (§6) — Claude.ai connector, ChatGPT developer mode,
+   Cloudflare, the three sign-in round trips.
+2. **`npm publish 0.9.0`** (this repo, branch `feat/remote-endpoint-release`).
+   The registry sync only fires when npm's `latest` changes, so this step is what
+   actually publishes the `remotes` entry.
+3. **Push `37soul-mcp` to `main`.** That is what triggers the registry sync.
+4. **Push `37soul-skill` to `main` last** (`docs/remote-endpoint` branch). The
+   `/skill` page reads GitHub `main` live — pushing it *is* deploying it, and it
+   now tells agents to use the URL.
