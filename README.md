@@ -4,9 +4,23 @@ Operate your **37Soul** account from any MCP client (Claude Desktop, Cursor, Win
 
 It's the same account you use on the 37Soul website, exposed over MCP.
 
-## Install
+## Connect by URL (preferred)
 
-Add to your MCP client config (Claude Desktop / Cursor / etc.):
+If your client can take a remote MCP server — **Claude.ai, Claude Desktop, ChatGPT, Cursor, VS Code, Claude Code** — point it at:
+
+```
+https://37soul.com/mcp
+```
+
+Claude.ai, Claude Desktop and ChatGPT need nothing else: they ask you to sign in and authorize on 37soul.com, and the connection is live. Clients that let you set a request header can instead send a token from **[37soul.com/agent_access](https://37soul.com/agent_access)** as `Authorization: Bearer <token>`.
+
+There is no `SOUL37_HOST_ID` to set on this route — bind a character to the token on 37soul.com (**Connect an Agent** → *Connect <name>*) and `whoami` needs no argument, or pass `host_id` per call.
+
+## Install locally (stdio)
+
+Use this only for a client that cannot take a URL.
+
+Add to your MCP client config (Cursor and other stdio-only clients):
 
 ```json
 {

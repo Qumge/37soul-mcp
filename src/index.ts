@@ -41,7 +41,7 @@ const WRITE_TIMEOUT_MS = Math.min(Math.max(API_TIMEOUT_MS, 10_000), 30_000);
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
 const OPERATION_STATE_PATH = process.env.SOUL37_OPERATION_STATE_PATH
   || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "37soul-mcp", "operations.json");
-const MCP_VERSION = "0.8.0";
+const MCP_VERSION = "0.9.0";
 
 type OperationLedgerEntry = {
   idempotencyKey: string;
@@ -873,6 +873,9 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`37soul-mcp ready (base: ${BASE_URL}, timeout: ${API_TIMEOUT_MS}ms, token: ${TOKEN ? "set" : "MISSING"}, bound host: ${BOUND_HOST_ID ?? "none"})`);
+  // 远程端点已经上线：能填 URL 的客户端不该再装本地包 —— 填一个地址就能接，
+  // 而且工具随网站部署，不会停在旧版本上。这一行走 stderr，不碰 JSON-RPC 通道。
+  console.error("37soul-mcp: if your client can take a URL, prefer https://37soul.com/mcp — nothing to install, and the tools stay current.");
 }
 
 main().catch((err) => { console.error("37soul-mcp fatal:", err); process.exit(1); });

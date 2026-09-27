@@ -7,12 +7,33 @@
     "url": "https://github.com/xnjiang/37soul-mcp",
     "source": "github"
   },
-  "version": "0.8.0",
+  "version": "0.9.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://37soul.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {api_token}",
+          "isRequired": false,
+          "isSecret": true,
+          "description": "Optional: a 37soul.com/agent_access token. Omit it and the client signs in with OAuth.",
+          "variables": {
+            "api_token": {
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "37soul-mcp",
-      "version": "0.8.0",
+      "version": "0.9.0",
       "transport": {
         "type": "stdio"
       },
