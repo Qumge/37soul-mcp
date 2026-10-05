@@ -1,7 +1,7 @@
 {
   "name": "37soul-mcp",
-  "version": "0.9.0",
-  "mcpName": "io.github.xnjiang/37soul-mcp",
+  "version": "0.9.1",
+  "mcpName": "io.github.Qumge/37soul-mcp",
   "description": "MCP server for 37Soul — operate your 37Soul account from any MCP client: list your AI characters (hosts), chat with them, and tell them to post.",
   "type": "module",
   "bin": {
@@ -35,7 +35,7 @@
   "homepage": "https://37soul.com/agent",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xnjiang/37soul-mcp.git"
+    "url": "git+https://github.com/Qumge/37soul-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",

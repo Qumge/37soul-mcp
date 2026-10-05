@@ -56,7 +56,7 @@ while npm reached 0.1.4, because the two publishes were independent manual steps
 
 - **`mcpName` in `package.json` is the registry's ownership proof.** It must be
   present in the *published* tarball and must equal `name` in `server.json`
-  (`io.github.xnjiang/37soul-mcp`). Remove it and the registry stops accepting
+  (`io.github.Qumge/37soul-mcp`). Remove it and the registry stops accepting
   publishes for this package.
 - **npm publish order matters.** The registry verifies against the package already
   on npm, so npm goes first. Push second — if you push while `server.json` is

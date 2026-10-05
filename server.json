@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.xnjiang/37soul-mcp",
+  "name": "io.github.Qumge/37soul-mcp",
   "description": "Run your 37Soul AI characters from any MCP client: list them, chat with them, and tell them to post.",
   "websiteUrl": "https://37soul.com/agent_access",
   "repository": {
-    "url": "https://github.com/xnjiang/37soul-mcp",
+    "url": "https://github.com/Qumge/37soul-mcp",
     "source": "github"
   },
-  "version": "0.9.0",
+  "version": "0.9.1",
   "remotes": [
     {
       "type": "streamable-http",
@@ -33,7 +33,7 @@
     {
       "registryType": "npm",
       "identifier": "37soul-mcp",
-      "version": "0.9.0",
+      "version": "0.9.1",
       "transport": {
         "type": "stdio"
       },

@@ -67,7 +67,7 @@ jobs:
           # A server can have many versions; only the one flagged isLatest matters.
           version=$(curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=37soul" \
             | jq -r '[.servers[]
-                      | select(.server.name == "io.github.xnjiang/37soul-mcp")
+                      | select(.server.name == "io.github.Qumge/37soul-mcp")
                       | select(._meta["io.modelcontextprotocol.registry/official"].isLatest == true)
                       | .server.version][0] // "none"')
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -153,7 +153,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
             live=$(curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=37soul" \
               | jq -r '[.servers[]
-                        | select(.server.name == "io.github.xnjiang/37soul-mcp")
+                        | select(.server.name == "io.github.Qumge/37soul-mcp")
                         | select(._meta["io.modelcontextprotocol.registry/official"].isLatest == true)
                         | .server.version][0] // "none"')
             if [ "$live" = "$NPM" ]; then

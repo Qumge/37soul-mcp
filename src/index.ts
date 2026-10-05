@@ -41,7 +41,7 @@ const WRITE_TIMEOUT_MS = Math.min(Math.max(API_TIMEOUT_MS, 10_000), 30_000);
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
 const OPERATION_STATE_PATH = process.env.SOUL37_OPERATION_STATE_PATH
   || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "37soul-mcp", "operations.json");
-const MCP_VERSION = "0.9.0";
+const MCP_VERSION = "0.9.1";
 
 type OperationLedgerEntry = {
   idempotencyKey: string;
