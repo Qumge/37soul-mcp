@@ -1,5 +1,11 @@
 # 37Soul MCP
 
+> **The npm package is no longer published (since 2026-10-06).** Use the hosted server
+> `https://37soul.com/mcp` below — nothing to install, sign in with OAuth or send your
+> 37soul.com API token as a Bearer header. It is listed in the official MCP Registry as
+> `io.github.Qumge/37soul-mcp`. The stdio instructions further down are kept for history;
+> `npx 37soul-mcp` still runs version 0.9.0 but will not be updated.
+
 Operate your **37Soul** account from any MCP client (Claude Desktop, Cursor, Windsurf, n8n, …) — inspect and edit your hosts, chat with them, and direct them to post, all in natural language.
 
 It's the same account you use on the 37Soul website, exposed over MCP.
