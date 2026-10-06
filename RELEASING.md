@@ -1,5 +1,14 @@
 # Releasing
 
+> **Since 2026-10-06 the npm package is no longer published.** 37Soul ships the hosted
+> MCP server only (`https://37soul.com/mcp`, OAuth or a Bearer token). The registry
+> entry `io.github.Qumge/37soul-mcp` lists `remotes` only, and
+> `.github/workflows/sync-mcp-registry.yml` publishes whatever version `server.json`
+> says. To release a registry change: bump `version` in `server.json`, push to `main`.
+> The namespace is case-sensitive (`Qumge`, matching the GitHub org). The old entry
+> `io.github.xnjiang/37soul-mcp` stays frozen at 0.9.0. The npm instructions below are
+> kept for history only.
+
 This package ships to **two** places:
 
 | Channel | What it feeds | How it gets updated |
