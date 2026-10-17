@@ -184,55 +184,101 @@ export async function installRuntime(deps: {
   version: string;
   nodePath: string;
   log?: (line: string) => void;
-}): Promise<{ dir: string; launcher: string }> {
+}): Promise<{ dir: string; launcher: string; mode: "bundle" | "deps" }> {
   const dir = runtimeDir(deps.home, deps.version);
   const launcher = runtimeLauncher(deps.home, deps.version);
   const marker = path.join(dir, ".installed");
 
   try {
-    await stat(marker);
-    return { dir, launcher }; // 这个版本已经装过；重复 install 是幂等的
+    const existing = JSON.parse(await readFile(marker, "utf8")) as { mode?: string };
+    return { dir, launcher, mode: existing.mode === "deps" ? "deps" : "bundle" }; // 幂等
   } catch {
     // 没装过
   }
 
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  for (const entry of ["dist", "package.json", "package-lock.json"]) {
-    await cp(path.join(deps.sourceRoot, entry), path.join(dir, entry), { recursive: true, force: true }).catch(() => {});
-  }
-  // 运行依赖（@modelcontextprotocol/sdk、zod 及其传递依赖）：整个 node_modules 一起搬，
-  // 缺依赖比多几 MB 严重得多。
-  await cp(path.join(deps.sourceRoot, "node_modules"), path.join(dir, "node_modules"), { recursive: true, force: true }).catch(() => {});
+  // ⚠️ npm/npx 会把依赖提升到包目录之外（~/.npm/_npx/<hash>/node_modules），包目录里
+  // 根本没有 node_modules —— 所以优先用 esbuild 打好的自包含 bundle（只有两个文件），
+  // 复制失败必须报错，绝不能吞掉后留下一个起不来的 runtime。
+  const bundleCli = path.join(deps.sourceRoot, "dist", "bundle", "cli.js");
+  const bundleIndex = path.join(deps.sourceRoot, "dist", "bundle", "index.js");
+  const hasBundle = (await existsFile(bundleCli)) && (await existsFile(bundleIndex));
+  const hasDeps = await existsDirectory(path.join(deps.sourceRoot, "node_modules"));
 
-  await mkdir(path.dirname(launcher), { recursive: true });
+  if (!hasBundle && !hasDeps) {
+    throw new Error(
+      `cannot install the 37soul runtime from ${deps.sourceRoot}: no dist/bundle (run \`npm run bundle\`) and no ` +
+        "node_modules next to the package (npm/npx hoists dependencies outside the package directory). " +
+        "Install a published build, or run from a checkout with `npm install && npm run build && npm run bundle`.",
+    );
+  }
+
+  await mkdir(path.join(dir, "dist"), { recursive: true, mode: 0o700 });
+
+  let mode: "bundle" | "deps";
+  if (hasBundle) {
+    mode = "bundle";
+    // 只放两个自包含文件：不依赖外部模块，启动也更快。
+    await cp(bundleCli, path.join(dir, "dist", "cli.js"));
+    await cp(bundleIndex, path.join(dir, "dist", "index.js"));
+  } else {
+    mode = "deps";
+    await cp(path.join(deps.sourceRoot, "dist"), path.join(dir, "dist"), { recursive: true, force: true });
+    await cp(path.join(deps.sourceRoot, "node_modules"), path.join(dir, "node_modules"), { recursive: true, force: true });
+  }
+
+  await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
   await writeFile(launcher, launcherScript(deps.nodePath), { mode: 0o755 });
-  await chmod(launcher, 0o755).catch(() => {});
-  await writeFile(marker, `${JSON.stringify({ version: deps.version, installed_at: new Date().toISOString(), node_path: deps.nodePath })}\n`, { mode: 0o600 });
-  deps.log?.(`  runtime installed at ${dir}`);
-  return { dir, launcher };
+  await chmod(launcher, 0o755);
+  await writeFile(
+    marker,
+    `${JSON.stringify({ version: deps.version, mode, installed_at: new Date().toISOString(), node_path: deps.nodePath })}\n`,
+    { mode: 0o600 },
+  );
+  deps.log?.(`  runtime installed at ${dir} (${mode})`);
+  return { dir, launcher, mode };
 }
 
 export function launcherScript(recordedNode: string): string {
   const escaped = recordedNode.replace(/'/g, "'\\''");
   return `#!/bin/bash
 # 37soul runtime launcher —— 运行期解析 node：安装路径不随 nvm/npx 缓存失效。
+# ⚠️ 只用 [ -x ] 判断可执行，绝不跑 "$NODE" -v：hook 每次调工具都会经过这里，
+# 多起一次 node 就是每次多付 ~20ms。顺序：SOUL37_NODE → 安装时记录的 node
+# → PATH → nvm/常见路径（记录优先，免得 PATH 上的老版本 node 抢在前面）。
 set -euo pipefail
 HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 ENTRY="\${SOUL37_ENTRY:-dist/cli.js}"
 NODE="\${SOUL37_NODE:-}"
-if [ -z "$NODE" ]; then NODE="$(command -v node 2>/dev/null || true)"; fi
-if [ -z "$NODE" ] || ! "$NODE" -v >/dev/null 2>&1; then
-  for candidate in '${escaped}' "$HOME"/.nvm/versions/node/*/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
-    if [ -x "$candidate" ] && "$candidate" -v >/dev/null 2>&1; then NODE="$candidate"; break; fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then NODE='${escaped}'; fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then NODE="$(command -v node 2>/dev/null || true)"; fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    if [ -x "$candidate" ]; then NODE="$candidate"; break; fi
   done
 fi
-if [ -z "$NODE" ]; then
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
   echo "37soul: no working node found (set SOUL37_NODE, or install Node)" >&2
   exit 127
 fi
 exec "$NODE" "$ROOT/$ENTRY" "$@"
 `;
+}
+
+async function existsFile(file: string): Promise<boolean> {
+  try {
+    return (await stat(file)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function existsDirectory(dir: string): Promise<boolean> {
+  try {
+    return (await stat(dir)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** 设备码登录：拿码 → 让用户去浏览器 → 轮询换 token。 */

@@ -104,13 +104,17 @@ node dist/cli.js uninstall        # removes only what it wrote (install-manifest
 
 The collector keeps its state in `~/.37soul` (config, spool, queue, cache, logs;
 `config.json` is mode 0600, every edit of a user file is backed up first as
-`<file>.37soul-<timestamp>.bak`). **Runtime is copied to a fixed location**: the installer
-puts `dist/` plus its dependencies under `~/.37soul/runtime/<version>/` and points hooks,
-launchd and Codex's MCP command at `bin/37soul` there — a launcher that resolves `node`
-at run time (PATH → the recorded install-time path → `~/.nvm/versions/node/*` → common
-locations). Clearing the npx cache or switching Node versions no longer breaks capture;
-`37soul doctor` checks the launcher, a working node, and the service file. The copy is
-~50 MB from a full checkout (much less from a published package).
+`<file>.37soul-<timestamp>.bak`). **Runtime is copied to a fixed location**: `npm run bundle`
+(esbuild) produces two self-contained files — `dist/bundle/cli.js` and `dist/bundle/index.js`
+(~0.9 MB total, no `node_modules`) — and the installer copies exactly those two under
+`~/.37soul/runtime/<version>/dist/`, pointing hooks, launchd and Codex's MCP command at
+`bin/37soul` there. The launcher resolves `node` at run time **without spawning it first**:
+`SOUL37_NODE` → the recorded install-time path → `PATH` → `~/.nvm/versions/node/*` and
+common locations (recorded wins, so an old PATH node cannot shadow it). Clearing the npx
+cache or switching Node versions no longer breaks capture; `37soul doctor` checks the
+launcher, a working node, and the service file. If the source has no bundles (a raw
+checkout), the installer falls back to copying `dist/` + `node_modules`; if neither is
+available it fails loudly instead of installing a runtime that cannot start.
 
 Codex's MCP server is written automatically with the token that was just issued
 (`codex mcp add 37soul --env SOUL37_API_TOKEN=… -- <runtime>/bin/37soul`), so there is no

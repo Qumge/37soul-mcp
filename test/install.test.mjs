@@ -5,9 +5,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   install,
@@ -22,7 +23,7 @@ import {
   hookCommand,
 } from "../dist/install.js";
 import { plistPath, renderPlist, systemdPath } from "../dist/service.js";
-import { runtimeDir, runtimeLauncher } from "../dist/install.js";
+import { installRuntime, runtimeDir, runtimeLauncher } from "../dist/install.js";
 import { loadConfig } from "../dist/agentd/state.js";
 import { runDoctor } from "../dist/doctor.js";
 
@@ -70,10 +71,11 @@ function deviceFlowFetch({ polls = [{ status: 201, body: { tokens: [{ agent_kind
 }
 
 function fakeSourceRoot() {
+  // 模拟发布包布局：只有 esbuild 打好的 dist/bundle（自包含），没有 node_modules。
   const dir = mkdtempSync(path.join(tmpdir(), "37soul-pkg-"));
-  mkdirSync(path.join(dir, "dist"), { recursive: true });
-  mkdirSync(path.join(dir, "node_modules", "@modelcontextprotocol", "sdk"), { recursive: true });
-  writeFileSync(path.join(dir, "dist", "cli.js"), "// built cli\n");
+  mkdirSync(path.join(dir, "dist", "bundle"), { recursive: true });
+  writeFileSync(path.join(dir, "dist", "bundle", "cli.js"), "// bundled cli\n");
+  writeFileSync(path.join(dir, "dist", "bundle", "index.js"), "// bundled index\n");
   writeFileSync(path.join(dir, "package.json"), `${JSON.stringify({ name: "37soul-mcp", version: "0.11.0" }, null, 2)}\n`);
   return dir;
 }
@@ -294,14 +296,15 @@ test("hook command in settings points at the fixed runtime launcher, not the npx
   h.cleanup();
 });
 
-test("install: copies the runtime to a fixed location and writes a node-resolving launcher", async () => {
+test("install: copies the bundled runtime to a fixed location and writes a fast node-resolving launcher", async () => {
   const h = harness();
   await install(h.deps, { agents: ["claude-code"] });
 
   const dir = runtimeDir(h.home, "0.11.0");
   const launcher = runtimeLauncher(h.home, "0.11.0");
-  assert.ok(statSync(path.join(dir, "dist", "cli.js")).isFile(), "dist copied");
-  assert.ok(statSync(path.join(dir, "node_modules", "@modelcontextprotocol", "sdk")).isDirectory(), "deps copied");
+  assert.ok(statSync(path.join(dir, "dist", "cli.js")).isFile(), "bundled cli copied");
+  assert.ok(statSync(path.join(dir, "dist", "index.js")).isFile(), "bundled mcp server copied");
+  assert.equal(statSync(path.join(dir, "node_modules"), { throwIfNoEntry: false }), undefined, "bundles need no node_modules");
   assert.ok(statSync(path.join(dir, ".installed")).isFile());
 
   const script = readFileSync(launcher, "utf8");
@@ -310,12 +313,117 @@ test("install: copies the runtime to a fixed location and writes a node-resolvin
   assert.ok(script.includes(h.deps.nodePath), "records the install-time node as a fallback");
   assert.ok(script.includes(".nvm/versions/node/*/bin/node"), "survives nvm version switches");
   assert.ok(script.includes("SOUL37_ENTRY:-dist/cli.js"));
+  // 审查修复：每个 hook 都要付启动器开销，绝不额外起一个 node 做版本检查
+  // （`command -v node` 是 shell 内建查找，不算）。
+  const flagged = script
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .filter((line) => line.includes(" -v") && !line.includes("command -v"));
+  assert.deepEqual(flagged, [], "must not spawn node just to validate it");
+  const recordedIndex = script.indexOf(h.deps.nodePath);
+  const pathIndex = script.indexOf("command -v node");
+  assert.ok(recordedIndex !== -1 && pathIndex !== -1 && recordedIndex < pathIndex,
+    "recorded node wins over PATH (an old PATH node must not shadow it)");
 
   // 重复安装幂等：再跑一次不炸、路径不变。
   await install(h.deps, { agents: ["claude-code"] });
   assert.ok(statSync(launcher).isFile());
   h.cleanup();
 });
+
+test("install: hoisted npm layout (bundles only, no node_modules) serves MCP through the launcher", async () => {
+  const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const bundleRoot = path.join(repoRoot, "dist", "bundle");
+  assert.ok(statSync(path.join(bundleRoot, "cli.js")).isFile(), "`npm run bundle` must run before this test");
+
+  // 模拟 npm/npx 的真实布局：依赖被提升出去，包目录里只有 dist/bundle。
+  const sourceRoot = mkdtempSync(path.join(tmpdir(), "37soul-packed-"));
+  mkdirSync(path.join(sourceRoot, "dist", "bundle"), { recursive: true });
+  copyFileSync(path.join(bundleRoot, "cli.js"), path.join(sourceRoot, "dist", "bundle", "cli.js"));
+  copyFileSync(path.join(bundleRoot, "index.js"), path.join(sourceRoot, "dist", "bundle", "index.js"));
+
+  const home = mkdtempSync(path.join(tmpdir(), "37soul-hoisted-"));
+  const runtime = await installRuntime({ home, sourceRoot, version: "0.11.0", nodePath: process.execPath });
+  assert.equal(runtime.mode, "bundle");
+  assert.equal(statSync(path.join(runtime.dir, "node_modules"), { throwIfNoEntry: false }), undefined);
+
+  const result = await mcpInitialize(runtime.launcher, {
+    SOUL37_ENTRY: "dist/index.js",
+    SOUL37_API_TOKEN: "tok_test",
+    SOUL37_BASE_URL: "http://127.0.0.1:1",
+  });
+  assert.equal(result.serverInfo.name, "37soul");
+
+  rmSync(sourceRoot, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("install: refuses a source layout with neither bundles nor dependencies instead of installing a broken runtime", async () => {
+  const sourceRoot = mkdtempSync(path.join(tmpdir(), "37soul-broken-"));
+  mkdirSync(path.join(sourceRoot, "dist"), { recursive: true });
+  writeFileSync(path.join(sourceRoot, "dist", "cli.js"), "// tsc output that needs hoisted deps\n");
+  const home = mkdtempSync(path.join(tmpdir(), "37soul-broken-home-"));
+
+  await assert.rejects(
+    () => installRuntime({ home, sourceRoot, version: "0.11.0", nodePath: process.execPath }),
+    /node_modules|npm run bundle/,
+  );
+
+  rmSync(sourceRoot, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("install: falls back to copying dist + node_modules for a checkout without bundles", async () => {
+  const sourceRoot = mkdtempSync(path.join(tmpdir(), "37soul-checkout-"));
+  mkdirSync(path.join(sourceRoot, "dist"), { recursive: true });
+  mkdirSync(path.join(sourceRoot, "node_modules", "some-dep"), { recursive: true });
+  writeFileSync(path.join(sourceRoot, "dist", "cli.js"), "// tsc cli\n");
+  writeFileSync(path.join(sourceRoot, "node_modules", "some-dep", "index.js"), "// dep\n");
+  const home = mkdtempSync(path.join(tmpdir(), "37soul-checkout-home-"));
+
+  const runtime = await installRuntime({ home, sourceRoot, version: "0.11.0", nodePath: process.execPath });
+
+  assert.equal(runtime.mode, "deps");
+  assert.ok(statSync(path.join(runtime.dir, "node_modules", "some-dep", "index.js")).isFile());
+
+  rmSync(sourceRoot, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+async function mcpInitialize(entry, env = {}) {
+  const { spawn } = await import("node:child_process");
+  return new Promise((resolve, reject) => {
+    const child = spawn(entry, [], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+    let buffer = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("initialize timed out"));
+    }, 10000);
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      for (const line of buffer.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const message = JSON.parse(line);
+          if (message.id === 1 && message.result) {
+            clearTimeout(timer);
+            child.kill();
+            resolve(message.result);
+          }
+        } catch {
+          // partial line
+        }
+      }
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } })}\n`,
+    );
+  });
+}
 
 test("install: configures Codex MCP with the issued token via env (no manual login)", async () => {
   const h = harness();
