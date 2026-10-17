@@ -9,10 +9,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { runHook, wrapAdditionalContext } from "../dist/hook.js";
+import { runHook, runHookCommand, wrapAdditionalContext } from "../dist/hook.js";
 import { cachePath, refreshBrief, ensureExclude } from "../dist/agentd/brief-cache.js";
 import { dataRoot } from "../dist/install.js";
-import { saveConfig } from "../dist/agentd/state.js";
+import { loadState, saveConfig, saveState } from "../dist/agentd/state.js";
+import { spoolFile } from "../dist/agentd/spool.js";
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-hook-"));
@@ -241,4 +242,133 @@ test("wrapAdditionalContext: exactly the wire shape Claude Code records", () => 
   assert.deepEqual(wrapper, {
     hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "hello" },
   });
+});
+
+// ── v2：hook 命令（spool 写入 / 事件映射 / 暂停 / 静默） ─────────────────────
+
+test('hook command: a tool event lands in the spool as one JSON line, stdout stays empty', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const io = capture();
+
+  const code = await runHookCommand({
+    home,
+    agentKind: 'claude-code',
+    event: 'PostToolUse',
+    fetch: async () => ({ ok: true, status: 200, async json() { return { text: 'brief' }; } }),
+    stdin: JSON.stringify({
+      session_id: 's1',
+      cwd: '/tmp/nimbus',
+      tool_name: 'Edit',
+      tool_input: { file_path: 'app/models/foo.rb' },
+      tool_response: { is_error: false },
+    }),
+    stdout: io.stdout,
+    stderr: io.stderr,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(io.out, []);
+  const lines = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].kind, 'tool');
+  assert.equal(lines[0].via, 'hook');
+  assert.equal(lines[0].tool.name, 'Edit');
+  assert.equal(lines[0].tool.input_summary, 'app/models/foo.rb');
+  assert.equal(lines[0].cwd, '/tmp/nimbus');
+  cleanup();
+});
+
+test('hook command: Stop records the assistant text from last_assistant_message', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'Stop',
+    fetch: async () => { throw new Error('must not be called'); },
+    stdin: JSON.stringify({ session_id: 's1', last_assistant_message: '好，收工。' }),
+    stdout: io.stdout, stderr: io.stderr,
+  });
+
+  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(line.kind, 'message');
+  assert.equal(line.role, 'assistant');
+  assert.equal(line.text, '好，收工。');
+  cleanup();
+});
+
+test('hook command: SessionStart writes session_start and injects the brief', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'SessionStart',
+    fetch: async () => ({ ok: true, status: 200, async json() { return { text: '=== brief ===' }; } }),
+    stdin: JSON.stringify({ session_id: 's1', cwd: '/tmp/nimbus', hook_event_name: 'SessionStart', source: 'startup' }),
+    stdout: io.stdout, stderr: io.stderr,
+    getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
+  });
+
+  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(line.kind, 'session_start');
+  assert.equal(line.source, 'startup');
+  const wrapper = JSON.parse(io.out[0]);
+  assert.equal(wrapper.hookSpecificOutput.additionalContext, '=== brief ===');
+  cleanup();
+});
+
+test('hook command: PreCompact writes a compact event and a reinject marker', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'PreCompact',
+    fetch: async () => { throw new Error('must not be called'); },
+    stdin: JSON.stringify({ session_id: 's1' }),
+    stdout: io.stdout, stderr: io.stderr,
+  });
+
+  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(line.kind, 'compact');
+  const marker = JSON.parse(readFileSync(path.join(dataRoot(home), 'state', 's1.json'), 'utf8'));
+  assert.equal(marker.needs_reinject, true);
+  cleanup();
+});
+
+test('hook command: pause means nothing is captured at all', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const state = await loadState(dataRoot(home));
+  state.paused = true;
+  await saveState(dataRoot(home), state);
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'UserPromptSubmit',
+    fetch: async () => { throw new Error('must not be called'); },
+    stdin: JSON.stringify({ session_id: 's1', prompt: 'hi' }),
+    stdout: io.stdout, stderr: io.stderr,
+  });
+
+  let spooled = '';
+  try { spooled = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8'); } catch { spooled = ''; }
+  assert.equal(spooled, '');
+  assert.deepEqual(io.out, []);
+  cleanup();
+});
+
+test('hook command: malformed stdin exits 0 with empty stdout', async () => {
+  const { home, cleanup } = tempHome();
+  const io = capture();
+  const code = await runHookCommand({
+    home, agentKind: 'claude-code', event: 'Stop',
+    fetch: async () => { throw new Error('must not be called'); },
+    stdin: '{ not json', stdout: io.stdout, stderr: io.stderr,
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(io.out, []);
+  cleanup();
 });

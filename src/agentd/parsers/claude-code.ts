@@ -141,7 +141,7 @@ export function createClaudeCodeParser(opts: { externalId?: string } = {}): Tran
 }
 
 export function textEvent(role: "user" | "assistant", text: string, at?: string): ParsedEvent {
-  return { role, text: truncate(text, MAX_EVENT_TEXT), at: isoOrNow(at) };
+  return { role, text: truncate(text, MAX_EVENT_TEXT), at: isoOrNow(at), via: "transcript" };
 }
 
 export function toolEvent(
@@ -155,6 +155,7 @@ export function toolEvent(
     role: "tool",
     text: "",
     at: isoOrNow(at),
+    via: "transcript",
     tool: {
       name: truncate(name, 200),
       input_summary: truncate(inputSummary ?? "", MAX_TOOL_SUMMARY),

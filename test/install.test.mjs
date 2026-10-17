@@ -5,12 +5,14 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
   install,
+  installManifestPath,
+  planInstall,
   uninstall,
   detectAgents,
   dataRoot,
@@ -137,7 +139,7 @@ test("install: an expired or cancelled login fails before touching any config", 
   cancelled.cleanup();
 });
 
-test("install: backs up once, keeps unrelated hooks, and reinstallation stays idempotent", async () => {
+test("install: backs up with a timestamp before every change, keeps unrelated hooks, and stays idempotent", async () => {
   const h = harness();
   const settings = claudeSettingsPath(h.home);
   const original = {
@@ -158,8 +160,18 @@ test("install: backs up once, keeps unrelated hooks, and reinstallation stays id
     1,
   );
   assert.equal(document.hooks.SessionStart[0].hooks[0].command, "echo mine");
+  // v2 §6.1：Claude Code 订阅整套事件（SessionStart/UserPromptSubmit/PostToolUse/Stop/PreCompact/SessionEnd）。
+  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "PreCompact", "SessionEnd"]) {
+    const mine = (document.hooks[event] ?? []).filter((entry) =>
+      entry.hooks.some((hook) => hook.command.includes("hook --agent claude-code")),
+    );
+    assert.equal(mine.length, 1, `${event} should have exactly one of our entries`);
+    assert.match(mine[0].hooks[0].command, new RegExp(`--event ${event}\\b`));
+  }
 
-  const backup = JSON.parse(readFileSync(`${settings}.37soul.bak`, "utf8"));
+  const backups = readdirSync(path.dirname(settings)).filter((name) => name.startsWith("settings.json.37soul-"));
+  assert.ok(backups.length >= 1, "at least one timestamped backup");
+  const backup = JSON.parse(readFileSync(path.join(path.dirname(settings), backups.sort()[0]), "utf8"));
   assert.deepEqual(backup, original, "backup holds the pre-install file");
 
   const instructions = readFileSync(claudeInstructionsPath(h.home), "utf8");
@@ -257,5 +269,40 @@ test("hook command in settings points at the absolute cli.js path", async () => 
 
   assert.equal(command, hookCommand(h.deps, "claude-code"));
   assert.ok(command.startsWith('"/usr/local/bin/node" "/opt/37soul/dist/cli.js"'));
+  h.cleanup();
+});
+
+test("install: --plan lists the files it would touch and writes nothing", async () => {
+  const h = harness();
+
+  const plan = await planInstall(h.deps, { agents: ["claude-code"] });
+
+  assert.deepEqual(plan.agents, ["claude-code"]);
+  assert.ok(plan.files.some((file) => file.endsWith(".claude/settings.json")));
+  assert.ok(plan.files.some((file) => file.endsWith("CLAUDE.md")));
+  assert.ok(plan.files.some((file) => file.endsWith("config.json")));
+  assert.ok(plan.files.some((file) => file.endsWith("install-manifest.json")));
+  assert.ok(plan.serviceFile);
+  assert.equal(statSync(claudeSettingsPath(h.home), { throwIfNoEntry: false }), undefined);
+  assert.equal(statSync(dataRoot(h.home), { throwIfNoEntry: false }), undefined, "plan must not create the data root");
+  h.cleanup();
+});
+
+test("install: records an install manifest and defaults Codex to transcript fallback", async () => {
+  const h = harness();
+
+  await install(h.deps, { agents: ["claude-code", "codex"] });
+
+  const manifest = JSON.parse(readFileSync(installManifestPath(h.home), "utf8"));
+  const kinds = manifest.entries.map((entry) => entry.kind);
+  assert.ok(kinds.includes("hooks"));
+  assert.ok(kinds.includes("fragment"));
+  assert.ok(kinds.includes("config"));
+  assert.ok(kinds.includes("service"));
+  const hooksEntry = manifest.entries.find((entry) => entry.kind === "hooks");
+  assert.ok(hooksEntry.events.includes("SessionStart") && hooksEntry.events.includes("SessionEnd"));
+
+  const config = await loadConfig(dataRoot(h.home));
+  assert.deepEqual(config.transcript_fallback, ["codex"], "Codex hook needs trust; fallback until verified");
   h.cleanup();
 });

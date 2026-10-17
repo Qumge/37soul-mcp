@@ -71,33 +71,42 @@ platform generates their replies, in their own voice.
 ## Local capture (same soul across every agent on this machine)
 
 Everything above keeps **one soul** per 37Soul token. The local collector in this repo adds
-**work continuity** and makes the whole thing hands-free:
+**work continuity** and makes the whole thing hands-free. Since v2 (design 2026-10-17)
+capture is **hook-first**: every agent hook calls one command, `37soul hook --agent <kind>
+--event <EventName>`, which parses the payload and appends one line to a local spool
+(`~/.37soul/spool/<agent>/<session>.jsonl`) in under 50 ms — no network on ordinary events.
+A background daemon (`agentd`) reads the spool, assigns sequence numbers, collects git
+state and uploads in batches; it also refreshes `brief.md` files for rules-based agents.
 
-- `claude-code` (tier A): a `SessionStart` hook asks for a brief and injects it as context;
-  a background daemon (`agentd`) reads this machine's Claude Code session records and uploads
-  them incrementally. Chat turns become relationship memory; work turns become a versioned
-  handoff per repository + branch.
-- `codex` (tier B): `~/.codex/AGENTS.md` tells Codex to read `.37soul/brief.md` at the start
-  of work; `agentd` refreshes that file after new uploads. Codex hooks need an explicit trust
-  step on 0.162 and are intentionally not wired up yet.
-- Nothing installed? Call **`resume`** before starting work and write the handoff yourself
-  with **`checkpoint`** — both exist on the hosted `/mcp` and in this package, same schemas.
+- `claude-code`: SessionStart hook injects the brief (`hookSpecificOutput.additionalContext`,
+  the format Claude Code records), and the full event set (UserPromptSubmit / PostToolUse /
+  Stop / PreCompact / SessionEnd) feeds the spool. "Context was compacted" re-injects the
+  brief automatically.
+- `codex`: hooks in 0.162 need an explicit trust step, so the installer defaults Codex to
+  the **transcript fallback** (`agentd` reads `~/.codex/sessions/*.jsonl`, started off for
+  other agents). `~/.codex/AGENTS.md` carries the instructions.
+- `resume` / `checkpoint` still work from any MCP client with nothing installed, and
+  `resume` now **claims** the handoff: when two agents are open on the same branch, the
+  second one is told another agent is working on it instead of repeating the work.
 
 Try it from a checkout (this is the honest path until the package is published):
 
 ```bash
 npm install && npm run build
-node dist/cli.js install          # device-code login, writes config, installs the service
-node dist/cli.js doctor           # configuration + token + session directories + last upload
+node dist/cli.js install --plan   # list the files it would touch; writes nothing
+node dist/cli.js install          # device-code login, writes config + hooks, installs the service
+node dist/cli.js doctor           # config + token + hook activity + spool backlog + last upload
 node dist/cli.js status
 node dist/cli.js pause [--repo <path>]   # pause everything, or one repo
 node dist/cli.js resume
-node dist/cli.js uninstall        # removes only what it wrote
+node dist/cli.js uninstall        # removes only what it wrote (install-manifest.json)
 ```
 
-The collector keeps its state in `~/.37soul` (config, queue, cache, logs; `config.json` is
-mode 0600). Raw session records live on the server for 30 days; relationship memory and work
-handoffs do not expire, and work text never enters her posts, replies or memory.
+The collector keeps its state in `~/.37soul` (config, spool, queue, cache, logs;
+`config.json` is mode 0600, every edit of a user file is backed up first as
+`<file>.37soul-<timestamp>.bak`). Raw session records live on the server for 30 days;
+relationship memory and work handoffs do not expire, and work text never enters her
+posts, replies or memory.
 
 ## Tools
 

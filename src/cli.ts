@@ -15,9 +15,9 @@ import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
-import { install, status as statusReport, uninstall } from "./install.js";
+import { install, planInstall, status as statusReport, uninstall } from "./install.js";
 import { runDoctor } from "./doctor.js";
-import { runHook } from "./hook.js";
+import { runHookCommand } from "./hook.js";
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -60,7 +60,16 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
   switch (command) {
     case "install": {
       const agents = flagValue(rest, "--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
-      const result = await install(deps, { agents });
+      const fallback = flagValue(rest, "--fallback")?.split(",").map((s) => s.trim()).filter(Boolean);
+      // v2 §6.1：--plan 只打印要动哪些文件，不写入任何东西。
+      if (rest.includes("--plan")) {
+        const plan = await planInstall(deps, { agents });
+        io.stdout(`would connect: ${plan.agents.join(", ") || "(none detected)"}\n`);
+        io.stdout(`would touch:\n${plan.files.map((file) => `  ${file}`).join("\n")}\n`);
+        if (plan.serviceFile) io.stdout(`would install the background service: ${plan.serviceFile}\n`);
+        return 0;
+      }
+      const result = await install(deps, { agents, fallback });
       io.stdout(`\nConnected: ${result.installed.map((entry) => entry.agentKind).join(", ")}\n`);
       const doctor = await runDoctor(deps);
       for (const check of doctor.checks) {
@@ -111,10 +120,12 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     }
     case "hook": {
       const agentKind = flagValue(rest, "--agent") ?? "claude-code";
+      const event = flagValue(rest, "--event") ?? "SessionStart";
       const stdin = await io.stdin();
-      return runHook({
+      return runHookCommand({
         home,
         agentKind,
+        event,
         fetch: globalThis.fetch,
         stdin,
         stdout: (text) => io.stdout(text),
@@ -150,6 +161,8 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
       machineId: config.machine_id,
       tokens: config.tokens,
       home,
+      // v2 §6.2：hook 是主路径；会话记录兜底只对显式开启的 Agent 生效。
+      transcriptFallback: config.transcript_fallback ?? [],
     },
     { log: logger, fetch: globalThis.fetch, getGitState },
   );

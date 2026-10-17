@@ -15,6 +15,7 @@ import path from "node:path";
 import { mkdir, open, readFile, readdir, rm } from "node:fs/promises";
 import { createClaudeCodeParser } from "./parsers/claude-code.js";
 import { createCodexParser } from "./parsers/codex.js";
+import { createSpoolParser, spoolFiles, trimSpool } from "./spool.js";
 import { readIncrement, type ReadIncrementResult } from "./reader.js";
 import { getGitState, type GitStateResult } from "./git-state.js";
 import { UploadQueue, uploadId, type QueuedUpload } from "./queue.js";
@@ -29,6 +30,8 @@ export interface SessionSource {
   agentKind: string;
   file: string;
   externalId?: string;
+  /** spool = hook 写入（主路径）；transcript = 会话记录兜底解析。 */
+  parser?: "spool" | "transcript";
 }
 
 export interface DaemonConfig {
@@ -38,6 +41,8 @@ export interface DaemonConfig {
   /** agent_kind → bearer token；缺一个就停那个 Agent。 */
   tokens: Record<string, string>;
   home: string;
+  /** v2 §6.2：默认关闭的会话记录兜底；列在这里的 Agent 才扫记录目录。 */
+  transcriptFallback?: string[];
   pollIntervalMs?: number;
   idleFlushMs?: number;
   batchLimit?: number;
@@ -84,7 +89,7 @@ export interface Daemon {
 export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemon {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? { info: () => {}, error: () => {} };
-  const discover = deps.discover ?? (() => discoverSessionSources(config.home));
+  const discover = deps.discover ?? defaultDiscover(config);
   const gitState = deps.getGitState ?? ((cwd: string) => getGitState(cwd));
   const readFn = deps.readIncrement ?? readIncrement;
   const queue = deps.queue ?? new UploadQueue({ root: config.root, now, log });
@@ -133,9 +138,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     const existing = sessions.get(key);
     if (existing) return existing;
 
-    const parser = source.agentKind === "codex"
-      ? createCodexParser({ externalId: source.externalId })
-      : createClaudeCodeParser({ externalId: source.externalId });
+    const parser = source.parser === "spool"
+      ? createSpoolParser({ externalId: source.externalId })
+      : source.agentKind === "codex"
+        ? createCodexParser({ externalId: source.externalId })
+        : createClaudeCodeParser({ externalId: source.externalId });
     const runtime: SessionRuntime = {
       key,
       source,
@@ -179,7 +186,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
       }
       runtime.metadata = { ...runtime.metadata, ...result.metadata };
       runtime.cursor = result.nextCursor;
-      await maybeFlush(runtime);
+      // v2 §6.2：收到 session_end / compact 立即上传，不等空闲窗口。
+      const immediate = result.events.some((event) => event.kind === "session_end" || event.kind === "compact");
+      await maybeFlush(runtime, { immediate });
     }
 
     // 文件这轮没出现（Agent 关了）：缓冲还留着，按空闲规则收尾。
@@ -188,10 +197,11 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     }
   }
 
-  async function maybeFlush(runtime: SessionRuntime): Promise<void> {
+  async function maybeFlush(runtime: SessionRuntime, opts: { immediate?: boolean } = {}): Promise<void> {
     const idle = now() - runtime.lastEventAt;
     const wantsSessionEnd = idle >= sessionEndMs && !runtime.sessionEndSent && runtime.cursor !== null;
     if (
+      (opts.immediate && runtime.events.length > 0) ||
       runtime.events.length >= batchLimit ||
       (runtime.events.length > 0 && idle >= idleFlushMs) ||
       wantsSessionEnd
@@ -389,6 +399,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     await scan();
     await processQueue();
     await refreshDueBriefs();
+    // v2 §6.2：spool 总量超过 50MB 时丢最早的（诊断留给 caller 的 log）。
+    await trimSpool(config.root, undefined, log).catch(() => {});
   }
 
   return {
@@ -460,6 +472,35 @@ async function isStaleLock(file: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
     return true;
   }
+}
+
+/** 默认的会话发现：spool（hook 主路径）+ 被显式开启的会话记录兜底。 */
+export function defaultDiscover(config: DaemonConfig): () => Promise<SessionSource[]> {
+  return async () => {
+    const sources: SessionSource[] = [];
+
+    // hook 写进 spool 的会话（主路径）。
+    for (const agentKind of Object.keys(config.tokens)) {
+      for (const file of await spoolFiles(config.root, agentKind)) {
+        sources.push({
+          agentKind,
+          file,
+          externalId: path.basename(file, ".jsonl"),
+          parser: "spool",
+        });
+      }
+    }
+
+    // 会话记录兜底（v2 §6.2：默认关闭，config.transcript_fallback 里列出的才扫）。
+    const fallback = new Set(config.transcriptFallback ?? []);
+    if (fallback.size > 0) {
+      for (const source of await discoverSessionSources(config.home)) {
+        if (fallback.has(source.agentKind)) sources.push({ ...source, parser: "transcript" });
+      }
+    }
+
+    return sources;
+  };
 }
 
 /** 默认的会话文件发现：Claude Code 的 projects 下每个 jsonl，Codex 的 sessions 下递归的 rollout-*.jsonl。 */

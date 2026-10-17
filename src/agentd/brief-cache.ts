@@ -47,7 +47,8 @@ const EXCLUDE_ENTRY = ".37soul/";
 
 export function cachePath(root: string, repoKey: string, branch?: string | null): string {
   const safe = (value: string) => value.replace(/[^A-Za-z0-9._-]+/g, "_");
-  return path.join(root, "cache", `${safe(repoKey)}__${safe(branch || "-")}.md`);
+  // v2 §6.3：缓存按 repo_key / branch 分层 —— worktree 和分支之间不互相读到过期简报。
+  return path.join(root, "cache", safe(repoKey), `${safe(branch || "-")}.md`);
 }
 
 export function etagPath(root: string, repoKey: string, branch?: string | null): string {

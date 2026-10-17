@@ -10,6 +10,12 @@ export type IngestibleAgentKind = "claude-code" | "codex" | "pi" | "gemini-cli";
 
 export type EventRole = "user" | "assistant" | "tool";
 
+/** v2 §5.1：事件种类。缺省时按内容推断（有 tool → tool，否则 message）。 */
+export type EventKind = "message" | "tool" | "session_start" | "session_end" | "compact";
+
+/** v2 §5.1：事件来源。hook 为主，transcript 是会话记录兜底。 */
+export type EventVia = "hook" | "transcript";
+
 export interface ToolInfo {
   name: string;
   input_summary: string;
@@ -22,10 +28,13 @@ export interface NormalizedEvent {
   seq: number;
   /** ISO8601 UTC。 */
   at: string;
+  /** v2：session_start / session_end / compact 只有 seq/at/kind/via。 */
+  kind?: EventKind;
+  via?: EventVia;
   role?: EventRole;
   text?: string;
   tool?: ToolInfo;
-  /** 会话结束标记：占一个正常 seq，不进分类/聊天。 */
+  /** v1 兼容字段（旧会话记录里的结束标记）。新事件一律用 kind。 */
   event_type?: "session_end";
 }
 

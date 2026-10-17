@@ -19,20 +19,17 @@ export interface EditResult {
   backup?: string;
 }
 
-export async function backupOnce(file: string): Promise<string | undefined> {
+/** v2 §6.1：每次改动前备份成 `<原文件名>.37soul-<时间戳>.bak`（不覆盖旧备份）。 */
+export async function backupWithTimestamp(file: string, now = new Date()): Promise<string | undefined> {
   try {
     await stat(file);
   } catch {
     return undefined; // 还没这个文件，没什么可备
   }
-  const backup = `${file}.37soul.bak`;
-  try {
-    await stat(backup);
-    return backup; // 已经备过 —— 别覆盖
-  } catch {
-    await copyFile(file, backup);
-    return backup;
-  }
+  const stamp = now.toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+  const backup = `${file}.37soul-${stamp}.bak`;
+  await copyFile(file, backup);
+  return backup;
 }
 
 async function readTextOrEmpty(file: string): Promise<string> {
@@ -71,7 +68,7 @@ export async function editJsonFile(
   const shouldWrite = mutate(document);
   if (shouldWrite === false) return { changed: false };
 
-  const backup = opts.backup === false ? undefined : await backupOnce(file);
+  const backup = opts.backup === false ? undefined : await backupWithTimestamp(file);
   await writeJsonFile(file, document, opts.mode ?? 0o600);
   return { changed: true, backup };
 }
@@ -99,7 +96,7 @@ export async function editManagedFragment(
   }
 
   if (updated === existing) return { changed: false };
-  const backup = opts.backup === false || existing === "" ? undefined : await backupOnce(file);
+  const backup = opts.backup === false || existing === "" ? undefined : await backupWithTimestamp(file);
   await writeFile(file, updated, { mode: 0o644 });
   return { changed: true, backup };
 }
@@ -113,7 +110,7 @@ export async function removeManagedFragment(file: string): Promise<EditResult> {
 
   let updated = `${existing.slice(0, begin)}${existing.slice(end + END_MARKER.length)}`;
   updated = updated.replace(/\n{3,}/g, "\n\n");
-  const backup = await backupOnce(file);
+  const backup = await backupWithTimestamp(file);
   await writeFile(file, updated, { mode: 0o644 });
   return { changed: true, backup };
 }

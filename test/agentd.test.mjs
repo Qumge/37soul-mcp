@@ -12,6 +12,7 @@ import path from "node:path";
 import { createDaemon, discoverSessionSources, acquireLock } from "../dist/agentd/daemon.js";
 import { UploadQueue, uploadId } from "../dist/agentd/queue.js";
 import { createRotatingLogger } from "../dist/agentd/logger.js";
+import { appendSpoolRecord } from "../dist/agentd/spool.js";
 import { loadState, saveState, emptyState } from "../dist/agentd/state.js";
 
 const T0 = Date.parse("2026-10-17T05:00:00.000Z");
@@ -447,4 +448,65 @@ test("discovery: finds Claude sessions and Codex rollouts, skips everything else
     ],
   );
   rmSync(home, { recursive: true, force: true });
+});
+
+test("daemon: hook spool is the primary source, assigns seq, and session_end flushes immediately", async () => {
+  const root = tempDir();
+  const home = tempDir();
+  const fetchImpl = fakeFetch(() => ({ status: 202, body: {} }));
+
+  await appendSpoolRecord(root, "claude-code", "s1", {
+    at: new Date(T0).toISOString(), kind: "message", role: "user", text: "hi", cwd: "/tmp/nimbus",
+  });
+  await appendSpoolRecord(root, "claude-code", "s1", { at: new Date(T0 + 1000).toISOString(), kind: "session_end" });
+
+  const daemon = createDaemon(
+    { root, apiBaseUrl: "https://api.test", machineId: "machine-1", tokens: { "claude-code": "t" }, home },
+    {
+      now: () => T0 + 1000,
+      fetch: fetchImpl,
+      log: { info: () => {}, error: () => {} },
+      getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
+      acquireLock: async () => async () => {},
+    },
+  );
+
+  await daemon.tick();
+
+  assert.equal(fetchImpl.calls.length, 1, "session_end must flush without waiting for idle");
+  const body = fetchImpl.calls[0].body;
+  assert.deepEqual(body.events.map((e) => [e.seq, e.kind]), [[1, "message"], [2, "session_end"]]);
+  assert.equal(body.events[0].text, "hi");
+
+  rmSync(root, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("daemon: transcript fallback stays off unless the agent is listed", async () => {
+  const home = tempDir();
+  const file = path.join(home, ".claude", "projects", "-tmp-nimbus", "fallback.jsonl");
+  writeSession(file, [userRecord("兜底才看得到", T0)]);
+
+  const offRoot = tempDir();
+  const offFetch = fakeFetch(() => ({ status: 202, body: {} }));
+  const off = createDaemon(
+    { root: offRoot, apiBaseUrl: "https://api.test", machineId: "m1", tokens: { "claude-code": "t" }, home, transcriptFallback: [], batchLimit: 1 },
+    { now: () => T0, fetch: offFetch, log: { info: () => {}, error: () => {} }, getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }), acquireLock: async () => async () => {} },
+  );
+  await off.tick();
+  assert.equal(offFetch.calls.length, 0, "fallback off by default");
+
+  const onRoot = tempDir();
+  const onFetch = fakeFetch(() => ({ status: 202, body: {} }));
+  const on = createDaemon(
+    { root: onRoot, apiBaseUrl: "https://api.test", machineId: "m1", tokens: { "claude-code": "t" }, home, transcriptFallback: ["claude-code"], batchLimit: 1 },
+    { now: () => T0, fetch: onFetch, log: { info: () => {}, error: () => {} }, getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }), acquireLock: async () => async () => {} },
+  );
+  await on.tick();
+  assert.equal(onFetch.calls.length, 1);
+  assert.equal(onFetch.calls[0].body.events[0].via, "transcript");
+
+  rmSync(home, { recursive: true, force: true });
+  rmSync(offRoot, { recursive: true, force: true });
+  rmSync(onRoot, { recursive: true, force: true });
 });

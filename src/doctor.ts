@@ -7,6 +7,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
 import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand } from "./install.js";
+import { spoolStats } from "./agentd/spool.js";
 
 export interface DoctorDeps {
   home: string;
@@ -80,6 +81,27 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       .sort()
       .at(-1);
     checks.push({ name: `${agentKind}: last upload`, ok: Boolean(lastUpload), detail: lastUpload ?? "never (nothing captured yet)" });
+  }
+
+  // v2 §6.2/§6.1：hook 最近一次触发（spool 写入时间）、spool 积压量，以及
+  // 「hook 长时间没动静」时的兜底提示。
+  const spool = await spoolStats(root);
+  checks.push({ name: "spool backlog", ok: true, detail: `${(spool.bytes / 1024).toFixed(1)} KB` });
+  for (const agentKind of Object.keys(config.tokens)) {
+    const stats = spool.agents[agentKind];
+    const recent = Boolean(stats?.lastModifiedMs) && Date.now() - stats.lastModifiedMs < 24 * 3600 * 1000;
+    checks.push({
+      name: `${agentKind}: hook activity`,
+      ok: recent,
+      detail: stats?.lastModifiedMs ? `last event ${new Date(stats.lastModifiedMs).toISOString()}` : "no hook events yet",
+    });
+    if (!recent && !(config.transcript_fallback ?? []).includes(agentKind)) {
+      checks.push({
+        name: `${agentKind}: transcript fallback`,
+        ok: true,
+        detail: `hooks have not fired recently — enable with \`37soul install --agents ${agentKind} --fallback ${agentKind}\``,
+      });
+    }
   }
 
   const ok = checks.filter((check) => check.fatal).every((check) => check.ok);

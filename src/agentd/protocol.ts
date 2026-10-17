@@ -19,6 +19,11 @@ export const LIMITS = {
   maxDirtyFiles: 50,
 } as const;
 
+/** v2 §5.1：服务端认的事件种类与来源。 */
+export const EVENT_KINDS = ["message", "tool", "session_start", "session_end", "compact"] as const;
+export const EVENT_VIAS = ["hook", "transcript"] as const;
+export const MARKER_KINDS = ["session_start", "session_end", "compact"] as const;
+
 export class ProtocolError extends Error {
   constructor(message: string) {
     super(message);
@@ -90,6 +95,14 @@ export function validateBatch(events: NormalizedEvent[]): void {
     if (typeof event.at !== "string" || Number.isNaN(Date.parse(event.at))) {
       throw new ProtocolError(`event ${event.seq} has an invalid timestamp`);
     }
+    if (event.kind !== undefined && !(EVENT_KINDS as readonly string[]).includes(event.kind)) {
+      throw new ProtocolError(`event ${event.seq} has an unknown kind ${String(event.kind)}`);
+    }
+    if (event.via !== undefined && !(EVENT_VIAS as readonly string[]).includes(event.via)) {
+      throw new ProtocolError(`event ${event.seq} has an unknown via ${String(event.via)}`);
+    }
+    // v2 标记事件（只有 seq/at/kind/via）与 v1 的 event_type 结束标记都可以这么收尾。
+    if (event.kind !== undefined && (MARKER_KINDS as readonly string[]).includes(event.kind)) continue;
     if (event.event_type === "session_end") continue;
 
     if (event.role !== "user" && event.role !== "assistant" && event.role !== "tool") {
