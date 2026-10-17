@@ -17,6 +17,8 @@ export interface DoctorDeps {
   runCommand: (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
   nodePath: string;
   cliScriptPath: string;
+  /** 和 install 用同一个平台判断（测试里注入 darwin，CI 跑在 Linux 上）。 */
+  platform?: NodeJS.Platform;
 }
 
 export interface DoctorCheck {
@@ -125,7 +127,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   // 服务文件（装了的话）必须存在、且引用的是固定启动器而不是 npx 缓存。
   const manifest = await readManifest(deps.home);
   if (manifest.entries.some((entry) => entry.kind === "service")) {
-    const platform = process.platform;
+    const platform = deps.platform ?? process.platform;
     const serviceFile = platform === "darwin" ? plistPath(deps.home) : systemdPath(deps.home);
     const text = await readTextSafe(serviceFile);
     const ok = text.includes(launcher ?? "\u0000") && text.length > 0;
