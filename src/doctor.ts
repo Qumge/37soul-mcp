@@ -176,6 +176,10 @@ async function dirCheck(name: string, dir: string): Promise<DoctorCheck> {
 async function resolveWorkingNode(recorded: string | undefined, home: string): Promise<string | null> {
   const candidates: string[] = [];
   if (recorded) candidates.push(recorded);
+  // 与启动器一致：记录路径之后先看 PATH，再看 nvm / 常见安装位置。
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (dir) candidates.push(path.join(dir, "node"));
+  }
   try {
     const versions = (await readdir(path.join(home, ".nvm", "versions", "node"))).sort().reverse();
     candidates.push(...versions.map((version) => path.join(home, ".nvm", "versions", "node", version, "bin", "node")));
