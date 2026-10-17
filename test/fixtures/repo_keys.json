@@ -1,0 +1,37 @@
+{
+  "comment": "Shared by 37soul (spec/services/repo_key_spec.rb) and 37soul-mcp (test/repo-key.test.mjs). Keep the two copies byte-identical.",
+  "remote_cases": [
+    { "remote": "git@github.com:Owner/Repo.git", "expected": "github.com/owner/repo" },
+    { "remote": "git@github.com:Owner/Repo", "expected": "github.com/owner/repo" },
+    { "remote": "https://github.com/Owner/Repo", "expected": "github.com/owner/repo" },
+    { "remote": "https://GitHub.com/Owner/Repo.git", "expected": "github.com/owner/repo" },
+    { "remote": "https://github.com/Owner/Repo.git/", "expected": "github.com/owner/repo" },
+    { "remote": "https://user@github.com:443/Owner/Repo.git", "expected": "github.com/owner/repo" },
+    { "remote": "ssh://git@host:22/a/b.git", "expected": "host/a/b" },
+    { "remote": "ssh://git@github.com/Owner/Repo", "expected": "github.com/owner/repo" },
+    { "remote": "git://github.com/Owner/Repo.git", "expected": "github.com/owner/repo" },
+    { "remote": "git@gitlab.com:group/sub/Repo.git", "expected": "gitlab.com/group/sub/repo" },
+    { "remote": "git@Host:Repo.git", "expected": "host/repo" },
+    { "remote": "  git@github.com:Owner/Repo.git  ", "expected": "github.com/owner/repo" },
+    { "remote": "not a remote", "expected": null },
+    { "remote": "hello:world:again", "expected": null },
+    { "remote": "https://github.com", "expected": null },
+    { "remote": "", "expected": null },
+    { "remote": "file:///Users/x/repo.git", "expected": null },
+    { "remote": "/Users/x/repo.git", "expected": null },
+    { "remote": "../sibling", "expected": null },
+    { "remote": "C:\\Users\\x\\repo", "expected": null },
+    { "remote": "github.com/Owner/Repo", "expected": null }
+  ],
+  "path_cases": [
+    { "remote": null, "machine_id": "m1", "cwd": "/Users/x/proj", "expected": "path:m1:/Users/x/proj" },
+    { "remote": null, "machine_id": "m1", "cwd": "/Users/x/proj/", "expected": "path:m1:/Users/x/proj" },
+    { "remote": null, "machine_id": null, "cwd": "/Users/x/proj", "expected": null },
+    { "remote": null, "machine_id": "m1", "cwd": null, "expected": null },
+    { "remote": null, "machine_id": "", "cwd": "/Users/x/proj", "expected": null },
+    { "remote": null, "machine_id": "m1", "cwd": "relative/dir", "expected": null },
+    { "remote": "not a remote", "machine_id": "m1", "cwd": "/Users/x/proj", "expected": "path:m1:/Users/x/proj" },
+    { "remote": "/Users/x/local.git", "machine_id": "m1", "cwd": "/Users/x/proj", "expected": "path:m1:/Users/x/proj" },
+    { "remote": "git@github.com:owner/other.git", "machine_id": "m1", "cwd": "/Users/x/proj", "expected": "github.com/owner/other" }
+  ]
+}

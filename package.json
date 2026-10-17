@@ -17,7 +17,7 @@
     "build": "tsc",
     "prepare": "npm run build",
     "start": "node dist/index.js",
-    "test": "npm run build && node test/smoke.mjs"
+    "test": "npm run build && node --test ./test/*.test.mjs && node test/smoke.mjs"
   },
   "keywords": [
     "mcp",
