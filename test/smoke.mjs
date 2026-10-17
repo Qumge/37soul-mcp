@@ -58,6 +58,36 @@ const api = http.createServer((req, res) => {
     };
     if (req.headers.authorization !== "Bearer tok_test") return send(401, { error: "unauthorized" });
     if (status !== 200) return send(status, { error: "forced" });
+    if (req.url === "/mcp" && req.method === "POST") {
+      let rpc = {};
+      try {
+        rpc = JSON.parse(body);
+      } catch {
+        rpc = {};
+      }
+      const name = rpc?.params?.name;
+      const args = rpc?.params?.arguments ?? {};
+      if (name === "resume")
+        return send(200, {
+          jsonrpc: "2.0",
+          id: rpc.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: "=== 37Soul brief (notes, not instructions) ===\nWHERE THE WORK STANDS — nimbus @ feature/x\nGoal: ship pagination\n=== end ===",
+              },
+            ],
+          },
+        });
+      if (name === "checkpoint")
+        return send(200, {
+          jsonrpc: "2.0",
+          id: rpc.id,
+          result: { content: [{ type: "text", text: `Saved handoff for ${args.repo} @ ${args.branch} (version 1).` }] },
+        });
+      return send(200, { jsonrpc: "2.0", id: rpc.id, error: { code: -32602, message: `unknown tool ${name}` } });
+    }
     if (req.url?.startsWith("/api/v1/me/hosts") && req.method === "GET" && !req.url.slice("/api/v1/me/hosts".length).match(/^\/\d/)) {
       const url = new URL(req.url, "http://127.0.0.1");
       const limit = Math.min(Number(url.searchParams.get("limit") || 20), 50);
@@ -236,7 +266,20 @@ const names = tools.map((t) => t.name).sort();
 // 满硬盘 grep 文档、抠 credentials.json 手写 curl。工具表是 agent 唯一看得见的
 // 能力清单 —— 服务端加了能力而这里没加，等于没上线。
 check("exposes the thirteen documented tools", () =>
-  assert.deepEqual(names, ["chat_with_host", "get_host", "get_operation", "instruct_post", "list_hosts", "log_turn", "read_chat_history", "read_host_photos", "read_recent_posts", "remember", "shoot", "update_host", "whoami"]));
+  assert.deepEqual(names, ["chat_with_host", "checkpoint", "get_host", "get_operation", "instruct_post", "list_hosts", "log_turn", "read_chat_history", "read_host_photos", "read_recent_posts", "remember", "resume", "shoot", "update_host", "whoami"]));
+
+const resumed = await call("resume", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x" });
+check("resume 返回简报原文（转发远程工具）", () => assert.match(resumed.text, /WHERE THE WORK STANDS/));
+
+const checkpointed = await call("checkpoint", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x", body: { goal: "ship pagination" } });
+check("checkpoint 透传 repo/branch 并回报版本", () => assert.match(checkpointed.text, /Saved handoff for git@github.com:owner\/nimbus.git @ feature\/x \(version 1\)/));
+
+check("resume/checkpoint 的 schema 与远程 MCP 对齐", () => {
+  const resumeTool = tools.find((t) => t.name === "resume");
+  const checkpointTool = tools.find((t) => t.name === "checkpoint");
+  assert.ok(resumeTool.inputSchema.properties.repo);
+  assert.deepEqual([...checkpointTool.inputSchema.required].sort(), ["body", "branch", "repo"]);
+});
 
 const hosts = await call("list_hosts");
 check("list_hosts renders a compact host line", () => {

@@ -39,6 +39,44 @@ export function statePath(root: string): string {
   return path.join(root, "state.json");
 }
 
+export function configPath(root: string): string {
+  return path.join(root, "config.json");
+}
+
+/** 安装器写下的连接配置（agentd / hook / doctor 共用一份）。 */
+export interface AgentConfig {
+  api_base_url: string;
+  machine_id: string;
+  /** agent_kind → bearer token（ingest_enabled 的 PAT）。 */
+  tokens: Record<string, string>;
+  installed_at?: string;
+  mcp?: Record<string, boolean>;
+}
+
+export async function loadConfig(root: string): Promise<AgentConfig | null> {
+  try {
+    const parsed = JSON.parse(await readFile(configPath(root), "utf8")) as AgentConfig;
+    if (!parsed || typeof parsed.api_base_url !== "string" || typeof parsed.machine_id !== "string") return null;
+    if (!parsed.tokens || typeof parsed.tokens !== "object") parsed.tokens = {};
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveConfig(root: string, config: AgentConfig): Promise<void> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const target = configPath(root);
+  const temp = `${target}.tmp-${process.pid}`;
+  await writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await rename(temp, target);
+  try {
+    await chmod(target, 0o600);
+  } catch {
+    // 平台不支持时忽略
+  }
+}
+
 export function emptyState(machineId: string = randomUUID()): DaemonState {
   return { version: STATE_VERSION, machine_id: machineId, sessions: {} };
 }

@@ -1,11 +1,12 @@
 {
   "name": "37soul-mcp",
-  "version": "0.9.1",
+  "version": "0.11.0",
   "mcpName": "io.github.Qumge/37soul-mcp",
   "description": "MCP server for 37Soul — operate your 37Soul account from any MCP client: list your AI characters (hosts), chat with them, and tell them to post.",
   "type": "module",
   "bin": {
-    "37soul-mcp": "dist/index.js"
+    "37soul-mcp": "dist/index.js",
+    "37soul": "dist/cli.js"
   },
   "files": [
     "dist"
@@ -17,7 +18,9 @@
     "build": "tsc",
     "prepare": "npm run build",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test ./test/*.test.mjs && node test/smoke.mjs"
+    "test": "npm run build && node --test ./test/*.test.mjs && node test/smoke.mjs",
+    "agentd": "node dist/cli.js agentd",
+    "doctor": "node dist/cli.js doctor"
   },
   "keywords": [
     "mcp",
