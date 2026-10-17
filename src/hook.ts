@@ -26,7 +26,7 @@ export interface HookDeps {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   getGitState?: (cwd: string) => Promise<GitStateResult>;
-  /** 整体预算，默认 300ms（设计 §11 的验收指标）。 */
+  /** 整体预算，默认 250ms。 */
   timeoutMs?: number;
 }
 
@@ -43,7 +43,11 @@ export function wrapAdditionalContext(text: string): string {
 }
 
 export async function runHook(deps: HookDeps): Promise<number> {
-  const timeoutMs = deps.timeoutMs ?? 300;
+  // ⚠️ 250 而不是设计里的 300：300 是「API 超时」的候选值，而验收指标是「hook 让
+  // 启动变慢不超过 300ms」——整体预算。API 在 300ms 才放弃时，缓存兜底 + 打印会
+  // 把它推过 300（实测 301.5ms）。250 给本地收尾留出余量，而 brief 的 P95 只有
+  // ~14ms，真实请求几乎永远用不到这个上限。
+  const timeoutMs = deps.timeoutMs ?? 250;
 
   let payload: HookPayload;
   try {
