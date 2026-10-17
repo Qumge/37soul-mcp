@@ -3,11 +3,12 @@
  * 最近一次上传是什么时候。输出是给人看的；返回 ok=false 时 CLI 以非零退出。
  */
 
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
-import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand } from "./install.js";
+import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
 import { spoolStats } from "./agentd/spool.js";
+import { plistPath, systemdPath } from "./service.js";
 
 export interface DoctorDeps {
   home: string;
@@ -83,6 +84,51 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     checks.push({ name: `${agentKind}: last upload`, ok: Boolean(lastUpload), detail: lastUpload ?? "never (nothing captured yet)" });
   }
 
+  // 审查修复 1：hook 和后台服务都指向固定 runtime 的启动器 —— 这两条路径必须还在。
+  const launcher = config.launcher;
+  let launcherOk = false;
+  if (launcher) {
+    try {
+      launcherOk = (await stat(launcher)).isFile();
+    } catch {
+      launcherOk = false;
+    }
+  }
+  checks.push({
+    name: "runtime: launcher",
+    ok: launcherOk,
+    detail: launcher
+      ? launcherOk
+        ? launcher
+        : `${launcher} is missing — rerun \`37soul install\``
+      : "not installed — rerun `37soul install`",
+    fatal: !launcherOk,
+  });
+
+  // node 解析：记录路径失效时启动器会运行期换一个；doctor 替它先试一遍。
+  const node = await resolveWorkingNode(config.node_path, deps.home);
+  checks.push({
+    name: "runtime: node",
+    ok: Boolean(node),
+    detail: node ?? "no working node found (set SOUL37_NODE or install Node)",
+    fatal: !node,
+  });
+
+  // 服务文件（装了的话）必须存在、且引用的是固定启动器而不是 npx 缓存。
+  const manifest = await readManifest(deps.home);
+  if (manifest.entries.some((entry) => entry.kind === "service")) {
+    const platform = process.platform;
+    const serviceFile = platform === "darwin" ? plistPath(deps.home) : systemdPath(deps.home);
+    const text = await readTextSafe(serviceFile);
+    const ok = text.includes(launcher ?? "\u0000") && text.length > 0;
+    checks.push({
+      name: "runtime: service",
+      ok,
+      detail: ok ? serviceFile : text === "" ? `${serviceFile} is missing — rerun \`37soul install\`` : `${serviceFile} does not point at the runtime launcher`,
+      fatal: !ok,
+    });
+  }
+
   // v2 §6.2/§6.1：hook 最近一次触发（spool 写入时间）、spool 积压量，以及
   // 「hook 长时间没动静」时的兜底提示。
   const spool = await spoolStats(root);
@@ -123,5 +169,37 @@ async function dirCheck(name: string, dir: string): Promise<DoctorCheck> {
     return { name, ok: info.isDirectory(), detail: dir };
   } catch {
     return { name, ok: false, detail: `${dir} (not found — has this agent run yet?)` };
+  }
+}
+
+/** 启动器会按同样顺序试 node；doctor 只做无损探测，不执行 node。 */
+async function resolveWorkingNode(recorded: string | undefined, home: string): Promise<string | null> {
+  const candidates: string[] = [];
+  if (recorded) candidates.push(recorded);
+  try {
+    const versions = (await readdir(path.join(home, ".nvm", "versions", "node"))).sort().reverse();
+    candidates.push(...versions.map((version) => path.join(home, ".nvm", "versions", "node", version, "bin", "node")));
+  } catch {
+    // 没有 nvm
+  }
+  candidates.push("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node");
+
+  for (const candidate of candidates) {
+    try {
+      const info = await stat(candidate);
+      if (info.isFile()) return candidate;
+    } catch {
+      // 下一个
+    }
+  }
+  return null;
+}
+
+async function readManifest(home: string): Promise<{ entries: Array<{ kind?: string }> }> {
+  try {
+    const parsed = JSON.parse(await readTextSafe(installManifestPath(home))) as { entries?: Array<{ kind?: string }> };
+    return { entries: Array.isArray(parsed.entries) ? parsed.entries : [] };
+  } catch {
+    return { entries: [] };
   }
 }

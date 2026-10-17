@@ -7,6 +7,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +28,8 @@ export interface CliIO {
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
-  ingsoul install [--agents claude-code,codex]   connect the agents on this machine
+  37soul install [--agents claude-code,codex] [--plan] [--fallback codex]
+                                                connect the agents on this machine
   37soul doctor                                  check configuration and credentials
   37soul status                                  show machine, tokens, last uploads
   37soul pause [--repo <path|repo-key>]          pause capture (all, or one repo)
@@ -250,7 +252,17 @@ export function processIO(): CliIO {
 }
 
 // 仅在作为可执行入口运行时自动执行（被测试 import 时不动）。
-const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// ⚠️ 用 realpath 比较：macOS 的 /tmp 是 /private/tmp 的符号链接，直接比较会让
+// 经启动器/临时目录调用时「静默什么都不做」。
+const invokedDirectly = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return path.resolve(entry) === fileURLToPath(import.meta.url);
+  }
+})();
 if (invokedDirectly) {
   main(process.argv.slice(2), processIO()).then(
     (code) => {

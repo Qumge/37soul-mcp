@@ -17,9 +17,15 @@ export interface ServiceSpec {
   scriptPath: string;
   logPath: string;
   platform?: NodeJS.Platform;
+  /** 固定 runtime 的启动器：优先用它当命令（运行期解析 node）。 */
+  launcherPath?: string;
 }
 
 export type RunCommand = (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+function serviceArgs(spec: ServiceSpec): string[] {
+  return spec.launcherPath ? [spec.launcherPath, "agentd"] : [spec.nodePath, spec.scriptPath, "agentd"];
+}
 
 export function plistPath(home: string): string {
   return path.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
@@ -39,7 +45,7 @@ export function escapeXml(value: string): string {
 }
 
 export function renderPlist(spec: ServiceSpec): string {
-  const args = [spec.nodePath, spec.scriptPath, "agentd"]
+  const args = serviceArgs(spec)
     .map((argument) => `        <string>${escapeXml(argument)}</string>`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -73,7 +79,7 @@ Description=37Soul local agent capture (agentd)
 After=network-online.target
 
 [Service]
-ExecStart=${[spec.nodePath, spec.scriptPath, "agentd"].map(quote).join(" ")}
+ExecStart=${serviceArgs(spec).map(quote).join(" ")}
 Restart=always
 RestartSec=5
 

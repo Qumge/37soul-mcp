@@ -450,10 +450,12 @@ test("discovery: finds Claude sessions and Codex rollouts, skips everything else
   rmSync(home, { recursive: true, force: true });
 });
 
-test("daemon: hook spool is the primary source, assigns seq, and session_end flushes immediately", async () => {
+test("daemon: hook spool is the primary source, assigns seq, and session_end flushes + refreshes the brief immediately", async () => {
   const root = tempDir();
   const home = tempDir();
   const fetchImpl = fakeFetch(() => ({ status: 202, body: {} }));
+  let clock = T0 + 1000;
+  const refreshed = [];
 
   await appendSpoolRecord(root, "claude-code", "s1", {
     at: new Date(T0).toISOString(), kind: "message", role: "user", text: "hi", cwd: "/tmp/nimbus",
@@ -463,20 +465,35 @@ test("daemon: hook spool is the primary source, assigns seq, and session_end flu
   const daemon = createDaemon(
     { root, apiBaseUrl: "https://api.test", machineId: "machine-1", tokens: { "claude-code": "t" }, home },
     {
-      now: () => T0 + 1000,
+      now: () => clock,
       fetch: fetchImpl,
       log: { info: () => {}, error: () => {} },
       getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
       acquireLock: async () => async () => {},
+      refreshBrief: async (target) => {
+        refreshed.push(target);
+        return { text: "brief", fromCache: false };
+      },
     },
   );
 
   await daemon.tick();
 
-  assert.equal(fetchImpl.calls.length, 1, "session_end must flush without waiting for idle");
-  const body = fetchImpl.calls[0].body;
+  const uploads = fetchImpl.calls.filter((call) => call.url.includes("/api/v1/me/transcripts"));
+  assert.equal(uploads.length, 1, "session_end must flush without waiting for idle");
+  const body = uploads[0].body;
   assert.deepEqual(body.events.map((e) => [e.seq, e.kind]), [[1, "message"], [2, "session_end"]]);
   assert.equal(body.events[0].text, "hi");
+
+  // 审查修复 3：session_end 上传成功后立刻刷一次 brief.md —— 这就是「退出 Claude
+  // Code 立刻打开 Codex 说继续」能读到新简报的原因。
+  assert.equal(refreshed.length, 1, "immediate refresh after a marker upload");
+  assert.equal(refreshed[0].repoKey, "path:machine-1:/tmp/nimbus");
+
+  // 总结防抖 + 模型跑完之后（这里按 150 秒近似）再刷一次，把整理好的交接单落盘。
+  clock += 151_000;
+  await daemon.tick();
+  assert.equal(refreshed.length, 2, "post-summary refresh");
 
   rmSync(root, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });

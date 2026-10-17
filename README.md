@@ -104,7 +104,22 @@ node dist/cli.js uninstall        # removes only what it wrote (install-manifest
 
 The collector keeps its state in `~/.37soul` (config, spool, queue, cache, logs;
 `config.json` is mode 0600, every edit of a user file is backed up first as
-`<file>.37soul-<timestamp>.bak`). Raw session records live on the server for 30 days;
+`<file>.37soul-<timestamp>.bak`). **Runtime is copied to a fixed location**: the installer
+puts `dist/` plus its dependencies under `~/.37soul/runtime/<version>/` and points hooks,
+launchd and Codex's MCP command at `bin/37soul` there — a launcher that resolves `node`
+at run time (PATH → the recorded install-time path → `~/.nvm/versions/node/*` → common
+locations). Clearing the npx cache or switching Node versions no longer breaks capture;
+`37soul doctor` checks the launcher, a working node, and the service file. The copy is
+~50 MB from a full checkout (much less from a published package).
+
+Codex's MCP server is written automatically with the token that was just issued
+(`codex mcp add 37soul --env SOUL37_API_TOKEN=… -- <runtime>/bin/37soul`), so there is no
+`codex mcp login` step. And `brief.md` is not left waiting for the 3-minute debounce: a
+`session_end`/`compact` upload refreshes it immediately, and once more after the handoff
+summarization lands — quitting Claude Code and opening Codex right away reads the new
+brief (with the fallback section until the summary arrives).
+
+Raw session records live on the server for 30 days;
 relationship memory and work handoffs do not expire, and work text never enters her
 posts, replies or memory.
 

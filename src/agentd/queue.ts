@@ -24,6 +24,8 @@ export interface QueuedUpload {
   seqTo: number;
   events: NormalizedEvent[];
   gitState?: GitState | null;
+  /** v2/审查修复 3：这一批里有 session_end / compact —— 上传成功后要立刻刷新 brief.md。 */
+  containsMarkers?: boolean;
   createdAt: number;
   attempts: number;
   nextAttemptAt: number;
@@ -207,6 +209,7 @@ export function splitUpload(item: QueuedUpload): QueuedUpload[] {
     events,
     attempts: 0,
     nextAttemptAt: item.nextAttemptAt,
+    containsMarkers: events.some((event) => event.kind === "session_end" || event.kind === "compact" || event.event_type === "session_end"),
     lastError: `split after 413 (${item.seqFrom}-${item.seqTo})`,
   }));
 }

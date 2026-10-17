@@ -111,7 +111,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
 
   const sessions = new Map<string, SessionRuntime>();
   const blockedAgents = new Set<string>();
-  const pendingRefreshes = new Map<string, { at: number; target: BriefTarget }>();
+  const pendingRefreshes = new Map<string, { target: BriefTarget; due: number[] }>();
   let state: DaemonState | null = null;
   let releaseLock: (() => Promise<void>) | null = null;
 
@@ -253,6 +253,9 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     }
 
     const createdAt = now();
+    const containsMarkers = events.some(
+      (event) => event.kind === "session_end" || event.kind === "compact" || event.event_type === "session_end",
+    );
     const makeItem = (batch: NormalizedEvent[], seqFrom: number, seqTo: number): QueuedUpload => ({
       id: uploadId(runtime.key, seqFrom, seqTo),
       sessionKey: runtime.key,
@@ -269,6 +272,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
       seqTo,
       events: batch,
       gitState: git?.git_state ?? null,
+      containsMarkers,
       createdAt,
       attempts: 0,
       nextAttemptAt: createdAt,
@@ -331,6 +335,24 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
             };
             await save(config.root, daemonState());
             log.info(`${item.id}: ${outcome.status}`);
+
+            // 审查修复 3：会话结束/压缩的批次一上传成功就刷新 brief.md（这就是
+            // 「退出 Claude Code 立刻打开 Codex 说继续」能成立的原因），
+            // 并在总结防抖（2 分钟）过后再刷一次把整理好的交接单落盘。
+            if (item.containsMarkers && item.repo) {
+              const key = repoKey({ remote: item.repo.remote, machineId: config.machineId, cwd: item.session.cwd });
+              if (key) {
+                const target: BriefTarget = {
+                  agentKind: item.agentKind,
+                  repoKey: key,
+                  remote: item.repo.remote,
+                  branch: item.repo.branch ?? null,
+                  cwd: item.session.cwd ?? null,
+                };
+                scheduleBriefRefresh(target, 0);
+                scheduleBriefRefresh(target, 150_000);
+              }
+            }
             break;
           }
           case "size_limit": {
@@ -376,15 +398,24 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     if (mustRepeat && pass < 2) await processQueue(pass + 1);
   }
 
-  function scheduleBriefRefresh(target: BriefTarget): void {
+  // 审查修复 3：一个目标可以排多个刷新时刻 —— session_end/compact 上传成功后
+  // 立刻刷一次（Codex 马上就能读到），总结跑完（约 2 分钟后）再刷一次，
+  // 普通上传仍然是 3 分钟后一次。
+  function scheduleBriefRefresh(target: BriefTarget, delayMs: number = briefRefreshMs): void {
     const key = `${target.repoKey}@${target.branch ?? "-"}`;
-    pendingRefreshes.set(key, { at: now() + briefRefreshMs, target });
+    const entry = pendingRefreshes.get(key) ?? { target, due: [] };
+    entry.target = target; // 保留最新一次拿到的 branch/head
+    const due = now() + delayMs;
+    if (!entry.due.some((candidate) => Math.abs(candidate - due) < 1000)) entry.due.push(due);
+    pendingRefreshes.set(key, entry);
   }
 
   async function refreshDueBriefs(): Promise<void> {
     for (const [key, entry] of [...pendingRefreshes.entries()]) {
-      if (entry.at > now()) continue;
-      pendingRefreshes.delete(key);
+      const dueNow = entry.due.filter((candidate) => candidate <= now());
+      if (dueNow.length === 0) continue;
+      entry.due = entry.due.filter((candidate) => candidate > now());
+      if (entry.due.length === 0) pendingRefreshes.delete(key);
       try {
         const result = await refresh(entry.target);
         log.info(`brief refreshed for ${key}${result.fromCache ? " (from local cache)" : ""}`);

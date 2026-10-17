@@ -53,6 +53,10 @@ export interface AgentConfig {
   mcp?: Record<string, boolean>;
   /** v2 §6.2：会话记录兜底解析的 Agent 列表（hook 是主路径；默认只给 Codex）。 */
   transcript_fallback?: string[];
+  /** 审查修复 1：固定 runtime 目录与启动器（hook / 服务都指向它，不随 npx 缓存失效）。 */
+  runtime_dir?: string;
+  launcher?: string;
+  node_path?: string;
 }
 
 export async function loadConfig(root: string): Promise<AgentConfig | null> {

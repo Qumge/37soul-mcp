@@ -21,8 +21,10 @@ import {
   codexInstructionsPath,
   hookCommand,
 } from "../dist/install.js";
-import { plistPath, systemdPath } from "../dist/service.js";
+import { plistPath, renderPlist, systemdPath } from "../dist/service.js";
+import { runtimeDir, runtimeLauncher } from "../dist/install.js";
 import { loadConfig } from "../dist/agentd/state.js";
+import { runDoctor } from "../dist/doctor.js";
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-install-"));
@@ -67,6 +69,15 @@ function deviceFlowFetch({ polls = [{ status: 201, body: { tokens: [{ agent_kind
   });
 }
 
+function fakeSourceRoot() {
+  const dir = mkdtempSync(path.join(tmpdir(), "37soul-pkg-"));
+  mkdirSync(path.join(dir, "dist"), { recursive: true });
+  mkdirSync(path.join(dir, "node_modules", "@modelcontextprotocol", "sdk"), { recursive: true });
+  writeFileSync(path.join(dir, "dist", "cli.js"), "// built cli\n");
+  writeFileSync(path.join(dir, "package.json"), `${JSON.stringify({ name: "37soul-mcp", version: "0.11.0" }, null, 2)}\n`);
+  return dir;
+}
+
 function harness(overrides = {}) {
   const { home, cleanup } = overrides.home ? { home: overrides.home, cleanup: () => {} } : tempHome();
   mkdirSync(path.join(home, ".claude"), { recursive: true });
@@ -86,6 +97,8 @@ function harness(overrides = {}) {
     cliScriptPath: "/opt/37soul/dist/cli.js",
     agentdScriptPath: "/opt/37soul/dist/cli.js",
     platform: overrides.platform ?? "darwin",
+    runtimeSourceRoot: overrides.runtimeSourceRoot ?? fakeSourceRoot(),
+    runtimeVersion: "0.11.0",
     now: () => Date.parse("2026-10-17T06:00:00.000Z"),
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -200,24 +213,31 @@ test("install: credentials file is mode 0600", async () => {
   h.cleanup();
 });
 
-test("install: writes the macOS LaunchAgent with absolute argv and XML escaping", async () => {
-  const h = harness({ nodePath: "/Applications/Node & Friends/node" });
+test("install: writes the macOS LaunchAgent pointing at the fixed runtime launcher, with XML escaping", async () => {
+  const h = harness();
   await install(h.deps, { agents: ["claude-code"] });
 
+  const launcher = runtimeLauncher(h.home, "0.11.0");
   const plist = readFileSync(plistPath(h.home), "utf8");
-  assert.ok(plist.includes("<string>/Applications/Node &amp; Friends/node</string>"));
-  assert.ok(plist.includes("<string>/opt/37soul/dist/cli.js</string>"));
+  assert.ok(plist.includes(`<string>${launcher}</string>`), "service must run the runtime launcher");
+  assert.ok(plist.includes("<string>agentd</string>"));
+  assert.ok(plist.includes("<string>/opt/37soul/dist/cli.js</string>") === false, "must not point into the checkout/npx cache");
   const load = h.commands.find((argv) => argv[0] === "launchctl");
   assert.deepEqual(load, ["launchctl", "load", "-w", plistPath(h.home)]);
+
+  // 转义本身单独钉住（路径里可能有 & / < / 空格）。
+  const escaped = renderPlist({ home: h.home, nodePath: "/n & n", scriptPath: "/s <x>", launcherPath: "/l & <l>", logPath: "/tmp/l" });
+  assert.ok(escaped.includes("<string>/l &amp; &lt;l&gt;</string>"));
   h.cleanup();
 });
 
 test("install: writes a systemd user unit on Linux and enables it", async () => {
-  const h = harness({ platform: "linux", nodePath: "/usr/bin/node with space" });
+  const h = harness({ platform: "linux" });
   await install(h.deps, { agents: ["claude-code"] });
 
+  const launcher = runtimeLauncher(h.home, "0.11.0");
   const unit = readFileSync(systemdPath(h.home), "utf8");
-  assert.ok(unit.includes('ExecStart="/usr/bin/node with space" "/opt/37soul/dist/cli.js" "agentd"'));
+  assert.ok(unit.includes(`ExecStart="${launcher}" "agentd"`));
   assert.ok(h.commands.some((argv) => argv.join(" ") === "systemctl --user enable --now 37soul-agentd.service"));
   h.cleanup();
 });
@@ -258,17 +278,76 @@ test("uninstall: removes only our entries and is idempotent", async () => {
   h.cleanup();
 });
 
-test("hook command in settings points at the absolute cli.js path", async () => {
+test("hook command in settings points at the fixed runtime launcher, not the npx/checkout paths", async () => {
   const h = harness();
   await install(h.deps, { agents: ["claude-code"] });
 
+  const launcher = runtimeLauncher(h.home, "0.11.0");
   const document = JSON.parse(readFileSync(claudeSettingsPath(h.home), "utf8"));
   const command = document.hooks.SessionStart.find((entry) =>
     entry.hooks.some((hook) => hook.command.includes("hook --agent claude-code")),
   ).hooks[0].command;
 
-  assert.equal(command, hookCommand(h.deps, "claude-code"));
-  assert.ok(command.startsWith('"/usr/local/bin/node" "/opt/37soul/dist/cli.js"'));
+  assert.equal(command, hookCommand({ ...h.deps, launcher }, "claude-code", "SessionStart"));
+  assert.ok(command.startsWith(`"${launcher}"`));
+  assert.ok(!command.includes("/opt/37soul"), "must not reference the transient source path");
+  h.cleanup();
+});
+
+test("install: copies the runtime to a fixed location and writes a node-resolving launcher", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+
+  const dir = runtimeDir(h.home, "0.11.0");
+  const launcher = runtimeLauncher(h.home, "0.11.0");
+  assert.ok(statSync(path.join(dir, "dist", "cli.js")).isFile(), "dist copied");
+  assert.ok(statSync(path.join(dir, "node_modules", "@modelcontextprotocol", "sdk")).isDirectory(), "deps copied");
+  assert.ok(statSync(path.join(dir, ".installed")).isFile());
+
+  const script = readFileSync(launcher, "utf8");
+  assert.ok(script.startsWith("#!/bin/bash"));
+  assert.ok(script.includes('command -v node'), "resolves node at run time");
+  assert.ok(script.includes(h.deps.nodePath), "records the install-time node as a fallback");
+  assert.ok(script.includes(".nvm/versions/node/*/bin/node"), "survives nvm version switches");
+  assert.ok(script.includes("SOUL37_ENTRY:-dist/cli.js"));
+
+  // 重复安装幂等：再跑一次不炸、路径不变。
+  await install(h.deps, { agents: ["claude-code"] });
+  assert.ok(statSync(launcher).isFile());
+  h.cleanup();
+});
+
+test("install: configures Codex MCP with the issued token via env (no manual login)", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["codex"] });
+
+  const codexAdd = h.commands.find((argv) => argv[0] === "codex" && argv[1] === "mcp" && argv[2] === "add");
+  assert.ok(codexAdd, "codex mcp add must run");
+  assert.ok(codexAdd.includes("--env"));
+  assert.ok(codexAdd.includes("SOUL37_API_TOKEN=TOKEN-CODEX"));
+  assert.ok(codexAdd.includes("SOUL37_ENTRY=dist/index.js"));
+  assert.ok(codexAdd.includes("--"));
+  assert.ok(codexAdd.at(-1) === runtimeLauncher(h.home, "0.11.0"), "runs the fixed runtime launcher");
+  h.cleanup();
+});
+
+test("doctor: checks that the runtime launcher, node and service paths still exist", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+
+  const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
+  const doctorDeps = { ...h.deps, fetch: fetchImpl };
+  const healthy = await runDoctor(doctorDeps);
+  const byName = (report) => Object.fromEntries(report.checks.map((c) => [c.name, c]));
+  assert.equal(byName(healthy)["runtime: launcher"].ok, true);
+  assert.equal(byName(healthy)["runtime: node"].ok, true);
+  assert.equal(byName(healthy)["runtime: service"].ok, true);
+
+  rmSync(runtimeLauncher(h.home, "0.11.0"), { force: true });
+  const broken = await runDoctor(doctorDeps);
+  assert.equal(byName(broken)["runtime: launcher"].ok, false);
+  assert.equal(byName(broken)["runtime: launcher"].detail.includes("37soul install"), true);
+  assert.equal(broken.ok, false, "a broken runtime must fail doctor loudly");
   h.cleanup();
 });
 

@@ -5,7 +5,7 @@
  * fake 运行时驱动整条链路，不需要真的登录一次。
  */
 
-import { mkdir, rm, stat } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   editJsonFile,
@@ -52,6 +52,12 @@ export interface InstallDeps {
   log?: (line: string) => void;
   /** 交互选择；非交互环境默认全选检测到的。 */
   select?: (detected: string[]) => Promise<string[]>;
+  /** 运行文件复制来源（含 dist/、package.json、node_modules/）；默认由 cliScriptPath 推断。 */
+  runtimeSourceRoot?: string;
+  /** 包版本，用来定 runtime 目录名；默认读 sourceRoot/package.json。 */
+  runtimeVersion?: string;
+  /** installRuntime 之后填上：固定 runtime 里的启动器路径。 */
+  launcher?: string;
 }
 
 export interface InstalledAgent {
@@ -93,9 +99,26 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
   }
   files.push(configPath(dataRoot(deps.home)), installManifestPath(deps.home));
 
+  const runtimeMeta = await resolveRuntimeMeta(deps);
+  const runtime = runtimeDir(deps.home, runtimeMeta.version);
+  files.push(runtime);
+
   const platform = deps.platform ?? process.platform;
   const serviceFile = platform === "darwin" ? plistPath(deps.home) : platform === "linux" ? systemdPath(deps.home) : null;
   return { detected, agents, files, serviceFile };
+}
+
+async function resolveRuntimeMeta(deps: InstallDeps): Promise<{ sourceRoot: string; version: string }> {
+  const sourceRoot = deps.runtimeSourceRoot ?? path.dirname(path.dirname(deps.cliScriptPath));
+  let version = deps.runtimeVersion;
+  if (!version) {
+    try {
+      version = (JSON.parse(await readFile(path.join(sourceRoot, "package.json"), "utf8")) as { version?: string }).version;
+    } catch {
+      version = undefined;
+    }
+  }
+  return { sourceRoot, version: version || "0.0.0" };
 }
 
 const AGENT_HOMES: Record<string, string> = {
@@ -134,8 +157,82 @@ export function codexInstructionsPath(home: string): string {
   return path.join(home, ".codex", "AGENTS.md");
 }
 
-export function hookCommand(deps: Pick<InstallDeps, "nodePath" | "cliScriptPath">, agentKind: string, event = "SessionStart"): string {
+export function hookCommand(deps: Pick<InstallDeps, "nodePath" | "cliScriptPath" | "launcher">, agentKind: string, event = "SessionStart"): string {
+  // 有固定 runtime 时指向启动器（运行期解析 node）；否则退回安装时的绝对路径。
+  if (deps.launcher) return `"${deps.launcher}" hook --agent ${agentKind} --event ${event}`;
   return `"${deps.nodePath}" "${deps.cliScriptPath}" hook --agent ${agentKind} --event ${event}`;
+}
+
+export function runtimeDir(home: string, version: string): string {
+  return path.join(dataRoot(home), "runtime", version);
+}
+
+export function runtimeLauncher(home: string, version: string): string {
+  return path.join(runtimeDir(home, version), "bin", "37soul");
+}
+
+/**
+ * 把运行文件复制到固定位置 `~/.37soul/runtime/<version>/`（审查修复 1）：
+ * npx 的 `~/.npm/_npx/<hash>/` 缓存会被清、nvm 的 node 路径换个版本就失效，
+ * hook 和 launchd 都不能直接指向那里。启动器在**运行期**解析 node：
+ * 先 PATH、再安装时记录的位置、再常见路径和 `~/.nvm/versions/node/*`，
+ * 所以 node 升级也不会让 hook 报错。
+ */
+export async function installRuntime(deps: {
+  home: string;
+  sourceRoot: string;
+  version: string;
+  nodePath: string;
+  log?: (line: string) => void;
+}): Promise<{ dir: string; launcher: string }> {
+  const dir = runtimeDir(deps.home, deps.version);
+  const launcher = runtimeLauncher(deps.home, deps.version);
+  const marker = path.join(dir, ".installed");
+
+  try {
+    await stat(marker);
+    return { dir, launcher }; // 这个版本已经装过；重复 install 是幂等的
+  } catch {
+    // 没装过
+  }
+
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const entry of ["dist", "package.json", "package-lock.json"]) {
+    await cp(path.join(deps.sourceRoot, entry), path.join(dir, entry), { recursive: true, force: true }).catch(() => {});
+  }
+  // 运行依赖（@modelcontextprotocol/sdk、zod 及其传递依赖）：整个 node_modules 一起搬，
+  // 缺依赖比多几 MB 严重得多。
+  await cp(path.join(deps.sourceRoot, "node_modules"), path.join(dir, "node_modules"), { recursive: true, force: true }).catch(() => {});
+
+  await mkdir(path.dirname(launcher), { recursive: true });
+  await writeFile(launcher, launcherScript(deps.nodePath), { mode: 0o755 });
+  await chmod(launcher, 0o755).catch(() => {});
+  await writeFile(marker, `${JSON.stringify({ version: deps.version, installed_at: new Date().toISOString(), node_path: deps.nodePath })}\n`, { mode: 0o600 });
+  deps.log?.(`  runtime installed at ${dir}`);
+  return { dir, launcher };
+}
+
+export function launcherScript(recordedNode: string): string {
+  const escaped = recordedNode.replace(/'/g, "'\\''");
+  return `#!/bin/bash
+# 37soul runtime launcher —— 运行期解析 node：安装路径不随 nvm/npx 缓存失效。
+set -euo pipefail
+HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+ENTRY="\${SOUL37_ENTRY:-dist/cli.js}"
+NODE="\${SOUL37_NODE:-}"
+if [ -z "$NODE" ]; then NODE="$(command -v node 2>/dev/null || true)"; fi
+if [ -z "$NODE" ] || ! "$NODE" -v >/dev/null 2>&1; then
+  for candidate in '${escaped}' "$HOME"/.nvm/versions/node/*/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    if [ -x "$candidate" ] && "$candidate" -v >/dev/null 2>&1; then NODE="$candidate"; break; fi
+  done
+fi
+if [ -z "$NODE" ]; then
+  echo "37soul: no working node found (set SOUL37_NODE, or install Node)" >&2
+  exit 127
+fi
+exec "$NODE" "$ROOT/$ENTRY" "$@"
+`;
 }
 
 /** 设备码登录：拿码 → 让用户去浏览器 → 轮询换 token。 */
@@ -219,20 +316,26 @@ async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook
   const instructions = await editManagedFragment(claudeInstructionsPath(deps.home), INSTRUCTIONS_FRAGMENT);
 
   let mcp = false;
+  const addArgs = [
+    "claude",
+    "mcp",
+    "add",
+    "--transport",
+    "http",
+    "--scope",
+    "user",
+    "37soul",
+    `${deps.apiBase}/mcp`,
+    "--header",
+    `Authorization: Bearer ${token}`,
+  ];
   try {
-    const result = await deps.runCommand([
-      "claude",
-      "mcp",
-      "add",
-      "--transport",
-      "http",
-      "--scope",
-      "user",
-      "37soul",
-      `${deps.apiBase}/mcp`,
-      "--header",
-      `Authorization: Bearer ${token}`,
-    ]);
+    let result = await deps.runCommand(addArgs);
+    if (result.code !== 0) {
+      // 重新安装时同名 server 已存在：先移除再写。
+      await deps.runCommand(["claude", "mcp", "remove", "--scope", "user", "37soul"]).catch(() => {});
+      result = await deps.runCommand(addArgs);
+    }
     mcp = result.code === 0;
     if (!mcp) deps.log?.(`  claude mcp add did not succeed (${result.stderr || result.stdout}); add the remote MCP server by hand if you want resume/checkpoint.`);
   } catch (error) {
@@ -242,19 +345,40 @@ async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook
   return { hook: true, instructions: instructions.changed || true, mcp };
 }
 
-async function configureCodex(deps: InstallDeps, _token: string): Promise<{ hook: boolean; instructions: boolean; mcp: boolean }> {
+async function configureCodex(deps: InstallDeps, token: string): Promise<{ hook: boolean; instructions: boolean; mcp: boolean }> {
   // Codex 选 B 档（实测：hook 需要 trust 才执行，未端到端验证；设计 §6.4.1）：
-  // 只写全局指令片段 + 一个不带 token 的 MCP 服务器（用 `codex mcp login 37soul`
-  // 走 OAuth 自己拿凭据 —— 我们不去猜 config.toml 的格式）。
+  // 全局指令片段 + 一个 **stdio MCP server**。审查修复 2：实测 `codex mcp add --env`
+  // 会把 token 直接写进 config.toml（`[mcp_servers.37soul.env]`），不需要用户再跑
+  // `codex mcp login` —— 安装器用刚发好的那枚 token 一次写完，全程无感。
   await editManagedFragment(codexInstructionsPath(deps.home), INSTRUCTIONS_FRAGMENT);
 
   let mcp = false;
-  try {
-    const result = await deps.runCommand(["codex", "mcp", "add", "37soul", "--url", `${deps.apiBase}/mcp`]);
-    mcp = result.code === 0;
-    if (mcp) deps.log?.("  codex: run `codex mcp login 37soul` once to authorize the MCP server (OAuth).");
-  } catch (error) {
-    deps.log?.(`  codex mcp add failed: ${(error as Error).message}`);
+  if (deps.launcher) {
+    const addArgs = [
+      "codex",
+      "mcp",
+      "add",
+      "37soul",
+      "--env",
+      `SOUL37_API_TOKEN=${token}`,
+      // 启动器默认跑 cli.js；给 MCP server 换成 index.js。
+      "--env",
+      "SOUL37_ENTRY=dist/index.js",
+      "--",
+      deps.launcher
+    ];
+    try {
+      let result = await deps.runCommand(addArgs);
+      if (result.code !== 0) {
+        // 重新安装时同名 server 已存在：先移除再写，等于刷新 token。
+        await deps.runCommand(["codex", "mcp", "remove", "37soul"]).catch(() => {});
+        result = await deps.runCommand(addArgs);
+      }
+      mcp = result.code === 0;
+      if (!mcp) deps.log?.(`  codex mcp add did not succeed (${result.stderr || result.stdout}); add the MCP server by hand if you want resume/checkpoint.`);
+    } catch (error) {
+      deps.log?.(`  codex mcp add failed: ${(error as Error).message}`);
+    }
   }
 
   return { hook: false, instructions: true, mcp };
@@ -277,6 +401,24 @@ export async function install(
 
   const root = dataRoot(deps.home);
   const existing = (await loadConfig(root)) ?? null;
+
+  // 审查修复 1：先把运行文件复制到固定 runtime，再写任何会长期存在的路径引用
+  // （hook 配置、launchd/systemd、Codex 的 MCP 命令）。
+  const runtimeMeta = await resolveRuntimeMeta(deps);
+  const runtime = await installRuntime({
+    home: deps.home,
+    sourceRoot: runtimeMeta.sourceRoot,
+    version: runtimeMeta.version,
+    nodePath: deps.nodePath,
+    log,
+  });
+  const runtimeDeps: InstallDeps = {
+    ...deps,
+    launcher: runtime.launcher,
+    cliScriptPath: runtime.launcher,
+    agentdScriptPath: runtime.launcher,
+  };
+
   const config: AgentConfig = {
     api_base_url: deps.apiBase,
     machine_id: existing?.machine_id ?? cryptoRandomId(),
@@ -286,13 +428,16 @@ export async function install(
     // v2 §6.2：hook 是主路径；Codex 的 hook 还要 trust，先默认走会话记录兜底，
     // 等真机验证通过后再关。用户显式传 --fallback 时以传入为准。
     transcript_fallback: opts.fallback ?? existing?.transcript_fallback ?? (selected.includes("codex") ? ["codex"] : []),
+    runtime_dir: runtime.dir,
+    launcher: runtime.launcher,
+    node_path: deps.nodePath,
   };
   await saveConfig(root, config);
 
   const results: InstalledAgent[] = [];
   for (const agentKind of selected) {
     const token = tokens[agentKind];
-    const configured = agentKind === "claude-code" ? await configureClaude(deps, token) : await configureCodex(deps, token);
+    const configured = agentKind === "claude-code" ? await configureClaude(runtimeDeps, token) : await configureCodex(runtimeDeps, token);
     config.mcp = { ...(config.mcp ?? {}), [agentKind]: configured.mcp };
     results.push({ agentKind, hook: configured.hook, instructions: configured.instructions, mcp: configured.mcp });
     log(`  ${agentKind}: hook=${configured.hook ? "yes" : "no (transcript fallback)"} instructions=yes mcp=${configured.mcp ? "yes" : "no"}`);
@@ -304,7 +449,8 @@ export async function install(
     const spec: ServiceSpec = {
       home: deps.home,
       nodePath: deps.nodePath,
-      scriptPath: deps.agentdScriptPath,
+      scriptPath: runtime.launcher,
+      launcherPath: runtime.launcher,
       logPath: path.join(root, "agentd.log"),
       platform: deps.platform,
     };
@@ -320,12 +466,14 @@ export async function install(
 
   // v2 §6.1：把自己写了哪些文件、哪些键记进 manifest，供 doctor / uninstall 使用。
   const entries: Array<Record<string, unknown>> = [];
+  entries.push({ file: runtime.dir, kind: "runtime", version: runtimeMeta.version });
   if (selected.includes("claude-code")) {
     entries.push({ agent: "claude-code", file: claudeSettingsPath(deps.home), kind: "hooks", events: CLAUDE_HOOK_EVENTS.map((entry) => entry.event) });
     entries.push({ agent: "claude-code", file: claudeInstructionsPath(deps.home), kind: "fragment" });
   }
   if (selected.includes("codex")) {
     entries.push({ agent: "codex", file: codexInstructionsPath(deps.home), kind: "fragment" });
+    entries.push({ agent: "codex", file: path.join(deps.home, ".codex", "config.toml"), kind: "mcp" });
   }
   entries.push({ file: configPath(root), kind: "config" });
   if (serviceFile) entries.push({ file: serviceFile, kind: "service" });
