@@ -5,7 +5,7 @@
  * fake 运行时驱动整条链路，不需要真的登录一次。
  */
 
-import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readFile, readlink, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   editJsonFile,
@@ -56,6 +56,8 @@ export interface InstallDeps {
   runtimeSourceRoot?: string;
   /** 包版本，用来定 runtime 目录名；默认读 sourceRoot/package.json。 */
   runtimeVersion?: string;
+  /** false = 设备码登录时不自动打开浏览器（测试 / 无图形界面）。 */
+  openBrowser?: boolean;
   /** installRuntime 之后填上：固定 runtime 里的启动器路径。 */
   launcher?: string;
 }
@@ -101,7 +103,7 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
 
   const runtimeMeta = await resolveRuntimeMeta(deps);
   const runtime = runtimeDir(deps.home, runtimeMeta.version);
-  files.push(runtime);
+  files.push(runtime, binLinkPath(deps.home));
 
   const platform = deps.platform ?? process.platform;
   const serviceFile = platform === "darwin" ? plistPath(deps.home) : platform === "linux" ? systemdPath(deps.home) : null;
@@ -109,7 +111,11 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
 }
 
 async function resolveRuntimeMeta(deps: InstallDeps): Promise<{ sourceRoot: string; version: string }> {
-  const sourceRoot = deps.runtimeSourceRoot ?? path.dirname(path.dirname(deps.cliScriptPath));
+  // tsc 产物在 <pkg>/dist/cli.js；发布包（install.sh 下载的 tarball）里跑的是
+  // <pkg>/dist/bundle/cli.js —— 两种都要回到 <pkg>。
+  const scriptDir = path.dirname(deps.cliScriptPath);
+  const sourceRoot =
+    deps.runtimeSourceRoot ?? (path.basename(scriptDir) === "bundle" ? path.dirname(path.dirname(scriptDir)) : path.dirname(scriptDir));
   let version = deps.runtimeVersion;
   if (!version) {
     try {
@@ -227,7 +233,7 @@ export async function installRuntime(deps: {
   }
 
   await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
-  await writeFile(launcher, launcherScript(deps.nodePath), { mode: 0o755 });
+  await writeFile(launcher, launcherScript(deps.nodePath, dir), { mode: 0o755 });
   await chmod(launcher, 0o755);
   await writeFile(
     marker,
@@ -238,16 +244,20 @@ export async function installRuntime(deps: {
   return { dir, launcher, mode };
 }
 
-export function launcherScript(recordedNode: string): string {
+export function launcherScript(recordedNode: string, runtimeRoot?: string): string {
   const escaped = recordedNode.replace(/'/g, "'\\''");
+  // ⚠️ ROOT 写死成绝对路径：经 ~/.local/bin/37soul 这条软链调用时，BASH_SOURCE 是
+  // 链接本身，按它推 ROOT 会推到 ~/.local。写死还顺便省掉每次 hook 两个子 shell。
+  const rootLine = runtimeRoot
+    ? `ROOT='${runtimeRoot.replace(/'/g, "'\\''")}'`
+    : 'HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"\nROOT="$(cd "$HERE/.." && pwd)"';
   return `#!/bin/bash
 # 37soul runtime launcher —— 运行期解析 node：安装路径不随 nvm/npx 缓存失效。
 # ⚠️ 只用 [ -x ] 判断可执行，绝不跑 "$NODE" -v：hook 每次调工具都会经过这里，
 # 多起一次 node 就是每次多付 ~20ms。顺序：SOUL37_NODE → 安装时记录的 node
 # → PATH → nvm/常见路径（记录优先，免得 PATH 上的老版本 node 抢在前面）。
 set -euo pipefail
-HERE="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+${rootLine}
 ENTRY="\${SOUL37_ENTRY:-dist/cli.js}"
 NODE="\${SOUL37_NODE:-}"
 if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then NODE='${escaped}'; fi
@@ -263,6 +273,56 @@ if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
 fi
 exec "$NODE" "$ROOT/$ENTRY" "$@"
 `;
+}
+
+/** `~/.local/bin/37soul`：让网页上写的 `37soul doctor` 这类命令直接能用。 */
+export function binLinkPath(home: string): string {
+  return path.join(home, ".local", "bin", "37soul");
+}
+
+/**
+ * 指向固定 runtime 的启动器。只覆盖「不存在」或「本来就是我们的链接」——
+ * 用户自己放在那里的同名文件绝不动。返回是否已经指向我们。
+ */
+export async function linkBin(home: string, launcher: string, log?: (line: string) => void): Promise<boolean> {
+  const link = binLinkPath(home);
+  await mkdir(path.dirname(link), { recursive: true });
+  try {
+    const info = await lstat(link);
+    if (!info.isSymbolicLink()) {
+      log?.(`  ${link} already exists and is not ours; leaving it alone (run ${launcher} directly).`);
+      return false;
+    }
+    const target = await readlink(link);
+    if (!isOurRuntimePath(home, path.resolve(path.dirname(link), target))) {
+      log?.(`  ${link} points somewhere else; leaving it alone (run ${launcher} directly).`);
+      return false;
+    }
+    await unlink(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await symlink(launcher, link);
+  return true;
+}
+
+function isOurRuntimePath(home: string, target: string): boolean {
+  const runtimeRoot = path.join(dataRoot(home), "runtime") + path.sep;
+  return target.startsWith(runtimeRoot);
+}
+
+async function unlinkBin(home: string): Promise<boolean> {
+  const link = binLinkPath(home);
+  try {
+    const info = await lstat(link);
+    if (!info.isSymbolicLink()) return false;
+    const target = await readlink(link);
+    if (!isOurRuntimePath(home, path.resolve(path.dirname(link), target))) return false;
+    await unlink(link);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function existsFile(file: string): Promise<boolean> {
@@ -307,6 +367,11 @@ export async function deviceLogin(deps: InstallDeps, agents: string[]): Promise<
   log(`  Open:  ${device.verification_url}`);
   log(`  Code:  ${device.user_code}`);
   log("");
+  // 尽量替用户打开浏览器；打不开就靠上面那行链接（SSH、无图形界面时）。
+  const opener = (deps.platform ?? process.platform) === "darwin" ? "open" : (deps.platform ?? process.platform) === "linux" ? "xdg-open" : null;
+  if (opener && deps.openBrowser !== false) {
+    await deps.runCommand([opener, device.verification_url]).catch(() => undefined);
+  }
 
   const deadline = now() + (device.expires_in ?? 600) * 1000;
   for (;;) {
@@ -510,9 +575,16 @@ export async function install(
     }
   }
 
+  const linked = await linkBin(deps.home, runtime.launcher, log).catch((error) => {
+    log(`  could not link ${binLinkPath(deps.home)}: ${(error as Error).message}`);
+    return false;
+  });
+  if (linked) log(`  command linked: ${binLinkPath(deps.home)}`);
+
   // v2 §6.1：把自己写了哪些文件、哪些键记进 manifest，供 doctor / uninstall 使用。
   const entries: Array<Record<string, unknown>> = [];
   entries.push({ file: runtime.dir, kind: "runtime", version: runtimeMeta.version });
+  if (linked) entries.push({ file: binLinkPath(deps.home), kind: "bin_link" });
   if (selected.includes("claude-code")) {
     entries.push({ agent: "claude-code", file: claudeSettingsPath(deps.home), kind: "hooks", events: CLAUDE_HOOK_EVENTS.map((entry) => entry.event) });
     entries.push({ agent: "claude-code", file: claudeInstructionsPath(deps.home), kind: "fragment" });
@@ -543,15 +615,23 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
   // 1. Claude 的 hook 条目：只删命令里带我们标记的那一条。
   const settings = claudeSettingsPath(deps.home);
   try {
+    // ⚠️ 每个事件都要清：只清 SessionStart 会把 PostToolUse 等条目留下来，指向
+    // 已经删掉的 runtime —— 之后用户每调一次工具都会看到 hook 报错。
     const result = await editJsonFile(settings, (document) => {
-      const list: any[] = Array.isArray(document.hooks?.SessionStart) ? document.hooks.SessionStart : [];
-      const keep = list.filter(
-        (entry) => !(Array.isArray(entry?.hooks) && entry.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("hook --agent claude-code"))),
-      );
-      if (keep.length === list.length) return false;
-      if (keep.length === 0) delete document.hooks.SessionStart;
-      else document.hooks.SessionStart = keep;
-      return true;
+      if (!document.hooks || typeof document.hooks !== "object") return false;
+      let changed = false;
+      for (const event of Object.keys(document.hooks)) {
+        const list: any[] = Array.isArray(document.hooks[event]) ? document.hooks[event] : [];
+        const keep = list.filter(
+          (entry) => !(Array.isArray(entry?.hooks) && entry.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("hook --agent claude-code"))),
+        );
+        if (keep.length === list.length) continue;
+        changed = true;
+        if (keep.length === 0) delete document.hooks[event];
+        else document.hooks[event] = keep;
+      }
+      if (changed && Object.keys(document.hooks).length === 0) delete document.hooks;
+      return changed;
     });
     if (result.changed) removed.push("claude settings hook");
   } catch {
@@ -575,6 +655,8 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
       // 运行时没装，无所谓
     }
   }
+
+  if (await unlinkBin(deps.home)) removed.push(path.relative(deps.home, binLinkPath(deps.home)));
 
   // 4. 后台服务 + 数据目录。
   await removeService(

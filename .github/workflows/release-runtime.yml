@@ -1,0 +1,47 @@
+name: Release runtime
+
+# Publishes the self-contained installer runtime that https://37soul.com/install.sh
+# downloads (no npm registry involved since 2026-10-06). Trigger: push a tag vX.Y.Z
+# that matches package.json. Asset names carry no version, so the site can always
+# fetch releases/latest/download/37soul-runtime.tgz (+ .sha256).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Tag must match package.json
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json ${version}" >&2
+            exit 1
+          fi
+
+      - run: npm test
+
+      - run: ./scripts/pack-runtime.sh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/37soul-runtime.tgz release/37soul-runtime.tgz.sha256 \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Installer runtime for https://37soul.com/install.sh — run: curl -fsSL https://37soul.com/install.sh | bash"

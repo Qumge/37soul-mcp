@@ -54,8 +54,16 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     // 配置痕迹
     if (agentKind === "claude-code") {
       const settings = await readTextSafe(claudeSettingsPath(deps.home));
+      // 显示/比对的是 settings 里**应该**有的那条（指向固定 runtime 的启动器），
+      // 不是当前进程的路径 —— 经 install.sh 安装时当前进程跑在一个马上会被删掉的临时目录里。
+      const expected = hookCommand({ ...deps, launcher: config.launcher }, agentKind);
       const hookPresent = settings.includes("hook --agent claude-code");
-      checks.push({ name: `${agentKind}: SessionStart hook`, ok: hookPresent, detail: hookPresent ? hookCommand(deps, agentKind) : "missing" });
+      const hookCurrent = config.launcher ? settings.includes(JSON.stringify(expected).slice(1, -1)) : hookPresent;
+      checks.push({
+        name: `${agentKind}: SessionStart hook`,
+        ok: hookPresent && hookCurrent,
+        detail: !hookPresent ? "missing" : hookCurrent ? expected : "points at an old path — rerun `37soul install`",
+      });
       const instructions = await readTextSafe(claudeInstructionsPath(deps.home));
       checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: claudeInstructionsPath(deps.home) });
       checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered — resume/checkpoint over MCP unavailable" });

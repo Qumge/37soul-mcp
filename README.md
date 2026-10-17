@@ -7,11 +7,14 @@
 > `npx 37soul-mcp` still runs version 0.9.0 but will not be updated.
 >
 > This repository now also contains the **local collector** (`37soul install` / `agentd` /
-> SessionStart hook) that makes the same soul, relationship and work handoff travel between
-> Claude Code, Codex and any MCP client on one machine. It ships in this repo's `bin` as
-> `37soul`, but **publishing it to npm is a separate release step that has not happened yet** —
-> until then, run it from a checkout (see *Local capture* below); do not expect
-> `npx 37soul install` to work from the public registry.
+> hooks) that makes the same soul, relationship and work handoff travel between Claude Code,
+> Codex and any MCP client on one machine. It is **not distributed through npm**: install it
+> with one line from 37soul.com, which downloads this repo's GitHub release and verifies its
+> checksum:
+>
+> ```bash
+> curl -fsSL https://37soul.com/install.sh | bash
+> ```
 
 Operate your **37Soul** account from any MCP client (Claude Desktop, Cursor, Windsurf, n8n, …) — inspect and edit your hosts, chat with them, and direct them to post, all in natural language.
 
@@ -89,17 +92,35 @@ state and uploads in batches; it also refreshes `brief.md` files for rules-based
   `resume` now **claims** the handoff: when two agents are open on the same branch, the
   second one is told another agent is working on it instead of repeating the work.
 
-Try it from a checkout (this is the honest path until the package is published):
+Install (macOS / Linux, Node.js 18+):
 
 ```bash
-npm install && npm run build
-node dist/cli.js install --plan   # list the files it would touch; writes nothing
-node dist/cli.js install          # device-code login, writes config + hooks, installs the service
-node dist/cli.js doctor           # config + token + hook activity + spool backlog + last upload
-node dist/cli.js status
-node dist/cli.js pause [--repo <path>]   # pause everything, or one repo
-node dist/cli.js resume
-node dist/cli.js uninstall        # removes only what it wrote (install-manifest.json)
+curl -fsSL https://37soul.com/install.sh | bash                 # browser sign-in, hooks + MCP, background service
+curl -fsSL https://37soul.com/install.sh | bash -s -- --plan     # list the files it would touch; writes nothing
+```
+
+The runtime lands in `~/.37soul/runtime/<version>/` (two self-contained esbuild files and a
+launcher) and is linked as `~/.local/bin/37soul`:
+
+```bash
+37soul doctor           # config + token + hook activity + spool backlog + last upload
+37soul status
+37soul pause [--repo <path>]   # pause everything, or one repo
+37soul resume
+37soul uninstall        # removes only what it wrote (install-manifest.json), including the link
+```
+
+From a checkout: `npm install && npm run build && npm run bundle && node dist/cli.js install`.
+
+### Releasing the runtime
+
+`install.sh` (served by the 37soul Rails app from `public/install.sh`) always fetches
+`releases/latest/download/37soul-runtime.tgz` plus its `.sha256`. To ship a new runtime, bump
+`package.json`, then push a matching tag — `.github/workflows/release-runtime.yml` runs the
+tests, packs the tarball with `scripts/pack-runtime.sh` and publishes the release:
+
+```bash
+git tag v0.11.0 && git push origin v0.11.0
 ```
 
 The collector keeps its state in `~/.37soul` (config, spool, queue, cache, logs;

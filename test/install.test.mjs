@@ -5,7 +5,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ import {
   hookCommand,
 } from "../dist/install.js";
 import { plistPath, renderPlist, systemdPath } from "../dist/service.js";
-import { installRuntime, runtimeDir, runtimeLauncher } from "../dist/install.js";
+import { installRuntime, runtimeDir, runtimeLauncher, binLinkPath, linkBin } from "../dist/install.js";
 import { loadConfig } from "../dist/agentd/state.js";
 import { runDoctor } from "../dist/doctor.js";
 
@@ -101,6 +101,7 @@ function harness(overrides = {}) {
     platform: overrides.platform ?? "darwin",
     runtimeSourceRoot: overrides.runtimeSourceRoot ?? fakeSourceRoot(),
     runtimeVersion: "0.11.0",
+    openBrowser: overrides.openBrowser ?? false,
     now: () => Date.parse("2026-10-17T06:00:00.000Z"),
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -492,4 +493,88 @@ test("install: records an install manifest and defaults Codex to transcript fall
   const config = await loadConfig(dataRoot(h.home));
   assert.deepEqual(config.transcript_fallback, ["codex"], "Codex hook needs trust; fallback until verified");
   h.cleanup();
+});
+
+test("uninstall: clears our entries from every Claude hook event, not just SessionStart", async () => {
+  const h = harness();
+  const settings = claudeSettingsPath(h.home);
+  const userStop = { hooks: [{ type: "command", command: "say done" }] };
+  writeFileSync(settings, `${JSON.stringify({ hooks: { Stop: [userStop] } }, null, 2)}\n`);
+
+  await install(h.deps, { agents: ["claude-code"] });
+  const installed = JSON.parse(readFileSync(settings, "utf8"));
+  assert.ok(installed.hooks.PostToolUse, "install wires PostToolUse");
+
+  await uninstall(h.deps);
+  const document = JSON.parse(readFileSync(settings, "utf8"));
+  const leftovers = Object.values(document.hooks ?? {}).flat().filter((entry) =>
+    entry.hooks.some((hook) => hook.command.includes("hook --agent claude-code")),
+  );
+  assert.deepEqual(leftovers, [], "no 37soul hook left behind in any event");
+  assert.deepEqual(document.hooks.Stop, [userStop], "user hook untouched");
+  h.cleanup();
+});
+
+test("install: links ~/.local/bin/37soul to the runtime launcher and uninstall removes only that link", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+  const link = binLinkPath(h.home);
+  assert.equal(readlinkSync(link), runtimeLauncher(h.home, "0.11.0"));
+
+  await install(h.deps, { agents: ["claude-code"] }); // 幂等
+  assert.equal(readlinkSync(link), runtimeLauncher(h.home, "0.11.0"));
+
+  await uninstall(h.deps);
+  assert.equal(lstatSync(link, { throwIfNoEntry: false }), undefined);
+  h.cleanup();
+});
+
+test("install: never overwrites a user's own ~/.local/bin/37soul", async () => {
+  const h = harness();
+  mkdirSync(path.dirname(binLinkPath(h.home)), { recursive: true });
+  writeFileSync(binLinkPath(h.home), "#!/bin/sh\necho mine\n");
+  assert.equal(await linkBin(h.home, runtimeLauncher(h.home, "0.11.0")), false);
+  assert.equal(readFileSync(binLinkPath(h.home), "utf8"), "#!/bin/sh\necho mine\n");
+
+  await install(h.deps, { agents: ["claude-code"] });
+  await uninstall(h.deps);
+  assert.equal(readFileSync(binLinkPath(h.home), "utf8"), "#!/bin/sh\necho mine\n", "uninstall leaves it too");
+  h.cleanup();
+});
+
+test("install: opens the approval page in the browser when allowed", async () => {
+  const h = harness({ openBrowser: true });
+  await install(h.deps, { agents: ["claude-code"] });
+  assert.ok(h.commands.some((argv) => argv[0] === "open" && argv[1] === "https://app.test/cli/approve?code=ABCD-EFGH"));
+  h.cleanup();
+});
+
+test("install: run from the release tarball layout (dist/bundle/cli.js) finds the package root", async () => {
+  const source = fakeSourceRoot();
+  const h = harness({ runtimeSourceRoot: undefined });
+  delete h.deps.runtimeSourceRoot;
+  h.deps.cliScriptPath = path.join(source, "dist", "bundle", "cli.js");
+  h.deps.agentdScriptPath = h.deps.cliScriptPath;
+  await install(h.deps, { agents: ["claude-code"] });
+  assert.equal(readFileSync(path.join(runtimeDir(h.home, "0.11.0"), "dist", "cli.js"), "utf8"), "// bundled cli\n");
+  h.cleanup();
+});
+
+test("launcher works when called through the ~/.local/bin/37soul symlink", async () => {
+  const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const sourceRoot = mkdtempSync(path.join(tmpdir(), "37soul-packed-"));
+  mkdirSync(path.join(sourceRoot, "dist", "bundle"), { recursive: true });
+  for (const file of ["cli.js", "index.js"]) {
+    copyFileSync(path.join(repoRoot, "dist", "bundle", file), path.join(sourceRoot, "dist", "bundle", file));
+  }
+  const home = mkdtempSync(path.join(tmpdir(), "37soul-link-"));
+  const runtime = await installRuntime({ home, sourceRoot, version: "0.11.0", nodePath: process.execPath });
+  assert.equal(await linkBin(home, runtime.launcher), true);
+
+  const { execFileSync } = await import("node:child_process");
+  const out = execFileSync(binLinkPath(home), ["status"], { env: { ...process.env, SOUL37_HOME: home }, encoding: "utf8" });
+  assert.match(out, /machine: \(not installed\)/);
+
+  rmSync(sourceRoot, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 });
