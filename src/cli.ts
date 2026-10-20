@@ -28,6 +28,7 @@ import type { ProfileId } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
+import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 
 export interface CliIO {
   stdout: (text: string) => void;

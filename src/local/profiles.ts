@@ -313,3 +313,36 @@ export function resolveLocalHostIdSync(root: string): number | null {
     return null;
   }
 }
+
+/**
+ * Task 4: synchronous assets-mode gate for the hook's runtime-event emission.
+ * Returns the single profile's (profile_id, device_id) only when the accounts
+ * index entry for that sole profile is in assets mode (`soul_sync_mode ===
+ * "assets_only"`). Otherwise null, so the hook keeps its legacy behavior.
+ * Read-only and local; never reads or exposes a native_session_id or path.
+ */
+export function resolveLocalAssetsProfileSync(
+  root: string,
+): { profile_id: string; device_id: string } | null {
+  try {
+    const entries = readdirSync(profilesDir(root), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    if (entries.length !== 1) return null;
+    const profileId = entries[0];
+    const accounts = JSON.parse(readFileSync(accountsIndexPath(root), "utf8")) as Record<
+      string,
+      { profile_id?: unknown; soul_sync_mode?: unknown }
+    >;
+    const entry = Object.values(accounts).find((e) => e.profile_id === profileId);
+    if (!entry || entry.soul_sync_mode !== "assets_only") return null;
+    const snapshot = JSON.parse(readFileSync(snapshotPath(root, profileId), "utf8")) as {
+      device_id?: unknown;
+    };
+    return typeof snapshot.device_id === "string" && snapshot.device_id !== ""
+      ? { profile_id: profileId, device_id: snapshot.device_id }
+      : null;
+  } catch {
+    return null;
+  }
+}

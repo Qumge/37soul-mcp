@@ -26,6 +26,14 @@ import { batchEvents, validateBatch, ProtocolError } from "./protocol.js";
 import { repoKey } from "../repo-key.js";
 import type { FileCursor, NormalizedEvent, SessionMetadata, TranscriptParser } from "./types.js";
 
+// Task 4: bounded extraction jobs run in the daemon process. The side-effect
+// import registers the runtime_event / commit_extraction writer commands in the
+// writer process this daemon hosts; drainPendingExtractions is re-exported so the
+// agentd entry point can run pending/under-budget jobs (next checkpoint / explicit
+// retry), never an immediate loop.
+import "../extraction/scheduler.js";
+export { drainPendingExtractions } from "../extraction/scheduler.js";
+
 export interface SessionSource {
   agentKind: string;
   file: string;

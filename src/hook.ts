@@ -12,6 +12,7 @@
  */
 
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import type { GitStateResult } from "./agentd/git-state.js";
 import { getGitState } from "./agentd/git-state.js";
 import { appendSpoolRecord } from "./agentd/spool.js";
@@ -19,6 +20,10 @@ import { dataRoot } from "./install.js";
 import { cachePath } from "./agentd/brief-cache.js";
 import { loadConfig, loadState } from "./agentd/state.js";
 import { repoKey } from "./repo-key.js";
+import type { RuntimeEvent, RuntimeEventKind } from "./adapters/types.js";
+import type { RuntimeKind } from "./assets/protocol.js";
+import { sendWriter } from "./local/writer.js";
+import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
 
 export interface HookDeps {
   home: string;
@@ -210,6 +215,12 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       });
     }
 
+    // Assets mode (soul-assets/v1): additionally deliver the runtime event to the
+    // local writer. Fire-and-forget — it never blocks the hook, never changes the
+    // legacy exit-0 / spool / injection behavior, and does nothing outside assets
+    // mode or when there is no real session id.
+    void emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId).catch(() => {});
+
     if (deps.event === "PreCompact") {
       await writeReinjectMarker(root, sessionId).catch(() => {});
       return 0;
@@ -243,6 +254,53 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     deps.stderr(`37soul hook: ${(error as Error).message}\n`);
     return 0;
   }
+}
+
+/** hook 事件 → RuntimeEvent 种类（assets 模式才发送）。非四类运行时直接不发。 */
+const RUNTIME_KINDS = new Set<string>(["claude-code", "codex", "opencode", "hermes"]);
+const RUNTIME_EVENT_KINDS: Record<string, RuntimeEventKind> = {
+  SessionStart: "resume",
+  Stop: "turn_completed",
+  SessionEnd: "checkpoint",
+  PreCompact: "compact",
+  UserPromptSubmit: "request",
+};
+
+/**
+ * Assets-mode runtime-event emission（Task 4）。只在 accounts index 里有
+ * `soul_sync_mode === "assets_only"` 的单一本地 profile、且确有 session id 时才发；
+ * 事件带 `SOUL37_INTERNAL_JOB_UID`（内部提炼任务标记），writer 用它防递归。
+ * 全程 fire-and-forget：writer 不在也不影响会话。
+ */
+async function emitRuntimeEvent(
+  root: string,
+  agentKind: string,
+  hookEvent: string,
+  sessionId: string,
+): Promise<void> {
+  if (sessionId === "unknown" || !RUNTIME_KINDS.has(agentKind)) return;
+  const kind = RUNTIME_EVENT_KINDS[hookEvent];
+  if (!kind) return;
+  const assets = resolveLocalAssetsProfileSync(root);
+  if (!assets) return; // legacy mode (or no assets profile): the hook keeps its old behavior
+
+  const event: RuntimeEvent = {
+    key: {
+      profile_id: assets.profile_id,
+      device_id: assets.device_id,
+      runtime_kind: agentKind as RuntimeKind,
+      native_session_id: sessionId,
+    },
+    event_ref: randomUUID(),
+    kind,
+    internal_job_uid: process.env.SOUL37_INTERNAL_JOB_UID ?? null,
+  };
+  await sendWriter(root, {
+    request_uid: randomUUID(),
+    profile_id: assets.profile_id,
+    command: "runtime_event",
+    payload: { event },
+  });
 }
 
 /** hook 事件 → spool 记录（§6.3 的映射表）。返回 null = 这个载荷没有可记的事件。 */

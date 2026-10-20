@@ -154,3 +154,21 @@ export function validateProposedAsset(value: unknown): ProposedAsset {
 
   return { kind, trait, content, applicability, tags, evidence, verification, sensitivity, source };
 }
+
+/**
+ * Task 4 classification rule (§2.3, aligned with the shared classification
+ * fixture): a proposal auto-activates only when it is a normal, explicitly
+ * user-stated *relationship* asset with no digest-tombstone conflict. Everything
+ * else — experience facts, inference, sensitive content, tombstoned content and
+ * any conflict — stays a `candidate` for the owner to review.
+ */
+export function classifyProposalState(
+  proposal: ProposedAsset,
+  options: { blockedByTombstone?: boolean } = {},
+): "active" | "candidate" {
+  if (proposal.kind === "experience") return "candidate";
+  if (proposal.sensitivity === "sensitive") return "candidate";
+  if (proposal.evidence !== "explicit_user_statement") return "candidate";
+  if (options.blockedByTombstone) return "candidate";
+  return "active";
+}
