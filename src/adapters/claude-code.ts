@@ -69,9 +69,10 @@ function parseJsonl(jsonl: string): Array<Record<string, any>> {
 /**
  * The first completed turn's record refs. Walk the `parentUuid` chain from the
  * first human user message (a `parentUuid: null` user record), taking the first
- * (chronologically earliest) child at each step and stopping at any sidechain /
- * system / meta / attachment boundary. At Stop time a SessionStart transcript's
- * first turn is exactly the completed turn.
+ * (chronologically earliest) non-skipped child at each step — a sidechain record
+ * written before the main-chain child is never followed — and stopping at any
+ * sidechain / system / meta / attachment boundary. At Stop time a SessionStart
+ * transcript's first turn is exactly the completed turn.
  */
 export function completedTurnSourceRefs(jsonl: string): string[] {
   const records = parseJsonl(jsonl);
@@ -98,7 +99,7 @@ export function completedTurnSourceRefs(jsonl: string): string[] {
 
     let child: Record<string, any> | null = null;
     for (const record of records) {
-      if (record.parentUuid === uuid) {
+      if (record.parentUuid === uuid && !isSkippedRecord(record)) {
         child = record;
         break;
       }

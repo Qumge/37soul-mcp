@@ -6,14 +6,16 @@
  *   node scripts/probe-runtime.mjs --offline --runtime all
  *   node scripts/probe-runtime.mjs --offline --runtime claude-code
  *
- * Offline mode (the default) only exercises the fake runtime so the probe
- * interface, bounded source scope, structured extraction, local receipt and
- * interrupt evidence can be proven with no host tools, no model, no network and
- * no user HOME writes. `--live` stays default-off: real adapters land in Task 6–9
- * and real model probes require separate authorization from the executor.
+ * Offline mode (the default) exercises the real `createClaudeCodeAdapter` with
+ * fake `AdapterDeps` (no host tools, no model, no network, no user HOME writes)
+ * and the fake runtime for the remaining kinds, so the probe interface, bounded
+ * source scope, structured extraction, local receipt and interrupt evidence can
+ * be proven without any live/native verification. `--live` stays default-off:
+ * real model probes require separate authorization from the executor.
  */
 import { probeRuntime } from "../dist/adapters/probe.js";
 import { createFakeAdapter, RUNTIME_KINDS } from "../test/helpers/fake-runtime.mjs";
+import { createClaudeCodeAdapter } from "../dist/adapters/claude-code.js";
 
 function parseArgs(argv) {
   const args = { live: false, offline: false, runtimes: ["all"] };
@@ -54,8 +56,26 @@ for (const kind of wanted) {
 }
 
 const report = [];
+
+/** The real Claude Code adapter's offline deps: a minimal completed turn fed
+ *  through readSource (the adapter still walks its own turn-resolution) and a
+ *  stub model that returns no proposals. Nothing here is a live/native probe. */
+function claudeCodeOfflineDeps() {
+  const transcript = [
+    '{"parentUuid":null,"type":"user","message":{"role":"user","content":"offline probe turn"},"uuid":"turn-offline-u1"}',
+    '{"parentUuid":"turn-offline-u1","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"offline probe answer"}]},"uuid":"turn-offline-a1"}',
+  ].join("\n");
+  return {
+    home: "/tmp/37soul-probe-offline",
+    readSource: async () => transcript,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  };
+}
+
 for (const runtime_kind of wanted) {
-  const adapter = createFakeAdapter(runtime_kind);
+  const isClaudeCode = runtime_kind === "claude-code";
+  const adapter = isClaudeCode ? createClaudeCodeAdapter(claudeCodeOfflineDeps()) : createFakeAdapter(runtime_kind);
   const probe = await probeRuntime(adapter);
 
   // Prove bounded source scope, structured result and local receipt offline.
@@ -82,7 +102,7 @@ for (const runtime_kind of wanted) {
 
   report.push({
     runtime_kind,
-    source: "offline-fake",
+    source: isClaudeCode ? "claude-code-offline" : "offline-fake",
     version: probe.version,
     supported_version: null, // real supported versions are only registered after authorized live probes pass
     probe,

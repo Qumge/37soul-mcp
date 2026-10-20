@@ -82,7 +82,8 @@ test("claude-code: stop extracts only the completed source turn", async () => {
   const completedTurnRefs = ["c-u1", "c-a1", "c-u2", "c-a2"];
 
   // The resolver picks the first completed turn and never follows the sidechain
-  // branch, the turn_duration system record or the later turn.
+  // branch — even when the sidechain record is written before the main-chain
+  // tool_result child — nor the turn_duration system record or the later turn.
   assert.deepEqual(completedTurnSourceRefs(transcriptJsonl), completedTurnRefs);
 
   const reads = [];
