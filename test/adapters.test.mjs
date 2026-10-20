@@ -148,11 +148,8 @@ test("claude-code: stop extracts only the completed source turn", async () => {
     home: root,
     readSource: async (refs) => {
       reads.push(refs.slice());
-      // The marker ref maps to the raw transcript; the resolved record refs map to
-      // the bounded turn text (what a real readSource returns for those records).
-      if (refs.length > 0 && refs.every((r) => typeof r === "string" && r.startsWith("c-"))) {
-        return renderSourceTurn(transcriptJsonl, refs);
-      }
+      // The marker ref maps to the raw transcript; the adapter renders the turn
+      // locally from that returned text (readSource is hit exactly once).
       return transcriptJsonl;
     },
     invoke: async (runtime, args, input, jobUid) => {
@@ -178,11 +175,9 @@ test("claude-code: stop extracts only the completed source turn", async () => {
   assert.deepEqual(result, { proposals: [] });
 
   // The adapter resolved the opaque marker into the completed turn's concrete refs
-  // and re-read exactly those through readSource — the effective extraction source.
-  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  // and rendered exactly those from the returned transcript (one bounded read).
+  assert.equal(reads.length, 1, "raw source is read once through the readSource seam");
   assert.deepEqual(reads[0], ["stop-marker"]);
-  const extractionRequest = { source_event_refs: reads[1] };
-  assert.deepEqual(extractionRequest.source_event_refs, completedTurnRefs);
 
   // The model received only the completed turn's source — no sidechain, no later turn.
   assert.ok(modelInput.includes("给 /users 接口加分页"), "the completed turn's user text is present");
@@ -434,11 +429,8 @@ test("codex: structured extraction uses bounded source refs", async () => {
     home: root,
     readSource: async (refs) => {
       reads.push(refs.slice());
-      // The marker ref maps to the raw rollout; the resolved ordinal refs map to
-      // the bounded turn text (what a real readSource returns for those records).
-      if (refs.length > 0 && refs.every((r) => /^\d+$/.test(String(r)))) {
-        return renderCodexTurn(codexRolloutJsonl, refs);
-      }
+      // The marker ref maps to the raw rollout; the adapter renders the turn
+      // locally from that returned text (readSource is hit exactly once).
       return codexRolloutJsonl;
     },
     invoke: async (runtime, args, input, jobUid) => {
@@ -465,10 +457,9 @@ test("codex: structured extraction uses bounded source refs", async () => {
   assert.deepEqual(result, { proposals: [] });
 
   // The adapter resolved the opaque marker into the completed turn's ordinals and
-  // re-read exactly those through readSource — the effective extraction source.
-  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  // rendered exactly those from the returned rollout (one bounded read).
+  assert.equal(reads.length, 1, "raw source is read once through the readSource seam");
   assert.deepEqual(reads[0], ["rollout-marker"]);
-  assert.deepEqual(reads[1], completedTurnRefs);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
   assert.deepEqual(buildCodexExtractionInvocation(request, "turn text").args, ["exec", "--output-format", "json"]);
@@ -655,11 +646,8 @@ test("opencode: message completion extracts through tool model", async () => {
     home: root,
     readSource: async (refs) => {
       reads.push(refs.slice());
-      // The marker ref maps to the raw transcript; the resolved record refs map to
-      // the bounded turn text (what a real readSource returns for those records).
-      if (refs.length > 0 && !refs.includes("oc-marker")) {
-        return renderOpenCodeTurn(opencodeTurnJsonl, refs);
-      }
+      // The marker ref maps to the raw transcript; the adapter renders the turn
+      // locally from that returned text (readSource is hit exactly once).
       return opencodeTurnJsonl;
     },
     invoke: async (runtime, args, input, jobUid) => {
@@ -686,10 +674,9 @@ test("opencode: message completion extracts through tool model", async () => {
   assert.deepEqual(result, { proposals: [] });
 
   // The adapter resolved the opaque marker into the completed turn's record ids and
-  // re-read exactly those through readSource — the effective extraction source.
-  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  // rendered exactly those from the returned transcript (one bounded read).
+  assert.equal(reads.length, 1, "raw source is read once through the readSource seam");
   assert.deepEqual(reads[0], ["oc-marker"]);
-  assert.deepEqual(reads[1], completedTurnRefs);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
   assert.deepEqual(invokeArgs, ["run", "--output-format", "json", "--plugin-generation", "v2"]);
@@ -823,11 +810,8 @@ test("hermes: CLI events drive structured extraction", async () => {
     home: root,
     readSource: async (refs) => {
       reads.push(refs.slice());
-      // The marker ref maps to the raw transcript; the resolved record refs map to
-      // the bounded turn text (what a real readSource returns for those records).
-      if (refs.length > 0 && !refs.includes("h-marker")) {
-        return renderHermesTurn(hermesTurnJsonl, refs);
-      }
+      // The marker ref maps to the raw transcript; the adapter renders the turn
+      // locally from that returned text (readSource is hit exactly once).
       return hermesTurnJsonl;
     },
     invoke: async (runtime, args, input, jobUid) => {
@@ -854,10 +838,9 @@ test("hermes: CLI events drive structured extraction", async () => {
   assert.deepEqual(result, { proposals: [] });
 
   // The adapter resolved the opaque marker into the completed turn's record ids and
-  // re-read exactly those through readSource — the effective extraction source.
-  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  // rendered exactly those from the returned transcript (one bounded read).
+  assert.equal(reads.length, 1, "raw source is read once through the readSource seam");
   assert.deepEqual(reads[0], ["h-marker"]);
-  assert.deepEqual(reads[1], completedTurnRefs);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
   assert.deepEqual(buildHermesExtractionInvocation(request, "turn text").args, ["run", "--output", "json"]);

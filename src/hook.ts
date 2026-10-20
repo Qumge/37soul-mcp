@@ -28,6 +28,7 @@ import { openStore } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
+import { extractTranscriptPath } from "./agentd/source-index.js";
 import { inspectCodexTrust } from "./adapters/codex.js";
 
 export interface HookDeps {
@@ -224,7 +225,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     // local writer. Fire-and-forget — it never blocks the hook, never changes the
     // legacy exit-0 / spool / injection behavior, and does nothing outside assets
     // mode or when there is no real session id.
-    void emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId).catch(() => {});
+    void emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId, extractTranscriptPath(payload)).catch(() => {});
 
     if (deps.event === "PreCompact") {
       await writeReinjectMarker(root, sessionId).catch(() => {});
@@ -295,6 +296,7 @@ async function emitRuntimeEvent(
   agentKind: string,
   hookEvent: string,
   sessionId: string,
+  sourcePath: string | null,
 ): Promise<void> {
   if (sessionId === "unknown" || !RUNTIME_KINDS.has(agentKind)) return;
   const kind = RUNTIME_EVENT_KINDS[hookEvent];
@@ -317,7 +319,10 @@ async function emitRuntimeEvent(
     request_uid: randomUUID(),
     profile_id: assets.profile_id,
     command: "runtime_event",
-    payload: { event },
+    // source_path is the host's own transcript location, verbatim and unvalidated
+    // here — the writer validates (absolute, existing regular file) before it is
+    // ever persisted as a path pointer. Never synthesized for runtimes that omit it.
+    payload: { event, ...(sourcePath !== null ? { source_path: sourcePath } : {}) },
   });
 }
 

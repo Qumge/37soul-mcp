@@ -8,20 +8,23 @@
  * daemon from `startAgentd` — but only in assets mode (legacy mode has no extraction
  * watermarks and must keep its transcript-upload path unchanged).
  *
- * Honesty contract for `readSource`: the hook emits opaque random event refs
- * (`event_ref: randomUUID()`), and there is no local index that maps a ref back to a
- * raw transcript yet. `readSource` therefore returns "" rather than fabricating
- * source, and every adapter short-circuits to `{ proposals: [] }` before any model
- * call (see claude-code.ts / codex.ts / opencode.ts / hermes.ts `extract`). The
- * spawn invoker is fully wired but is only reached once a real source index exists.
+ * Honesty contract for `readSource` (Task 10c): the hook emits opaque random event
+ * refs (`event_ref: randomUUID()`); `readSource` resolves them through the local
+ * path-pointer index (`source-index.ts`), reads at most one bounded file prefix, and
+ * returns "" when no pointer exists — it never fabricates source. Every adapter
+ * short-circuits to `{ proposals: [] }` before any model call when the resolved
+ * source is empty (see claude-code.ts / codex.ts / opencode.ts / hermes.ts
+ * `extract`). The spawn invoker is reached only once a pointer resolves.
  */
 import { execFile } from "node:child_process";
+import path from "node:path";
 import type { RuntimeKind } from "../assets/protocol.js";
 import type { AdapterDeps, NativeInvoker, RuntimeAdapter } from "../adapters/types.js";
 import { createClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { createCodexAdapter } from "../adapters/codex.js";
 import { createOpenCodeAdapter } from "../adapters/opencode.js";
 import { createHermesAdapter } from "../adapters/hermes.js";
+import { readSourceRefs } from "./source-index.js";
 
 /** Runtime kind -> native CLI binary name. The adapters invoke by runtime kind; this
  *  is the only place the concrete binary spelling lives. */
@@ -85,14 +88,17 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
 }
 
 /**
- * Build the four real adapters on one shared `AdapterDeps`. `emit` is a no-op: none
- * of the four adapters call `deps.emit` during extract/inject (injection for
- * claude-code goes through the global hook; codex/opencode/hermes inject through
- * their own plugin/bridge and return `delivered:false` unverified).
+ * Build the four real adapters on one shared `AdapterDeps`. `readSource` resolves
+ * the opaque event refs through the local path-pointer index (Task 10c) and reads
+ * at most one bounded file — it never fabricates source and returns "" when no
+ * pointer exists. `emit` is a no-op: none of the four adapters call `deps.emit`
+ * during extract/inject (injection for claude-code goes through the global hook;
+ * codex/opencode/hermes inject through their own plugin/bridge and return
+ * `delivered:false` unverified).
  */
-export function createExtractAdapters(home: string, log?: NativeInvokerLog): Partial<Record<RuntimeKind, RuntimeAdapter>> {
+export function createExtractAdapters(home: string, log?: NativeInvokerLog, root = path.join(home, ".37soul")): Partial<Record<RuntimeKind, RuntimeAdapter>> {
   const invoke = createNativeInvoker(log);
-  const readSource = async () => "";
+  const readSource = async (refs: readonly string[]) => readSourceRefs(root, refs);
   const emit = async () => {};
   const deps: AdapterDeps = { home, invoke, readSource, emit };
   return {

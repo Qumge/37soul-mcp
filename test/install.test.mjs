@@ -527,7 +527,7 @@ test("install: --plan lists the files it would touch and writes nothing", async 
   h.cleanup();
 });
 
-test("install: records an install manifest and defaults Codex to transcript fallback", async () => {
+test("install: records an install manifest and persists no transcript fallback in assets mode", async () => {
   const h = harness();
 
   await install(h.deps, { agents: ["claude-code", "codex"] });
@@ -545,7 +545,7 @@ test("install: records an install manifest and defaults Codex to transcript fall
   assert.ok(codexHooksEntry.events.includes("SessionStart") && codexHooksEntry.events.includes("SessionEnd"));
 
   const config = await loadConfig(dataRoot(h.home));
-  assert.deepEqual(config.transcript_fallback, ["codex"], "Codex hook needs trust; fallback until verified");
+  assert.deepEqual(config.transcript_fallback, [], "assets mode persists no legacy transcript fallback");
   h.cleanup();
 });
 

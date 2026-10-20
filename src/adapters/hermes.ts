@@ -385,8 +385,9 @@ export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
       const { refs } = hermesCompletedTurnRefs(transcript);
       if (refs.length === 0) return { proposals: [] };
-      // 3. Re-read exactly the completed turn's source through the same seam.
-      const turnText = await deps.readSource(refs);
+      // 3. Render exactly the completed turn from the already-read source — the
+      //    readSource seam is hit once (bounded); the turn is a local subset of it.
+      const turnText = renderHermesTurn(transcript, refs);
       // 4. Invoke the native model through deps.invoke, tagged with the job uid.
       const { args, input } = buildHermesExtractionInvocation(request, turnText);
       const result = await deps.invoke("hermes", args, input, request.job_uid);

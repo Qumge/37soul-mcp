@@ -765,9 +765,10 @@ export async function install(
     tokens: { ...(existing?.tokens ?? {}), ...tokens },
     installed_at: new Date(deps.now?.() ?? Date.now()).toISOString(),
     mcp: {},
-    // v2 §6.2：hook 是主路径；Codex 的 hook 还要 trust，先默认走会话记录兜底，
-    // 等真机验证通过后再关。用户显式传 --fallback 时以传入为准。
-    transcript_fallback: opts.fallback ?? existing?.transcript_fallback ?? (selected.includes("codex") ? ["codex"] : []),
+    // Assets mode: the legacy transcript fallback is inert (startAgentd forces an
+    // empty fallback), so persisting one would be dead config. Keep it honest — no
+    // fallback is recorded for an assets-only install.
+    transcript_fallback: [],
     runtime_dir: runtime.dir,
     launcher: runtime.launcher,
     node_path: deps.nodePath,
@@ -984,22 +985,36 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
   ).catch(() => {});
   for (const managed of ["runtime", "ipc"]) {
     const target = path.join(root, managed);
+    let exists = false;
     try {
-      await stat(target); // exists? otherwise rm -f silently "succeeds" and we'd report a phantom removal
-      await rm(target, { recursive: true, force: true });
-      removed.push(path.join(".37soul", managed));
+      await stat(target);
+      exists = true;
     } catch {
       // 不存在：卸载幂等
+    }
+    if (!exists) continue;
+    try {
+      await rm(target, { recursive: true, force: true });
+      removed.push(path.join(".37soul", managed));
+    } catch (error) {
+      deps.log?.(`  could not remove .37soul/${managed}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   for (const managed of ["writer.lock", "agentd.log", "install-manifest.json", "config.json"]) {
     const target = path.join(root, managed);
+    let exists = false;
     try {
       await stat(target);
-      await rm(target, { force: true });
-      removed.push(path.join(".37soul", managed));
+      exists = true;
     } catch {
       // 不存在：卸载幂等
+    }
+    if (!exists) continue;
+    try {
+      await rm(target, { force: true });
+      removed.push(path.join(".37soul", managed));
+    } catch (error) {
+      deps.log?.(`  could not remove .37soul/${managed}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

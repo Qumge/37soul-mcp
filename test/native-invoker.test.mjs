@@ -8,10 +8,10 @@
  * These tests pin the honest contract:
  *  - `createExtractAdapters(home)` returns all four `RuntimeAdapter`s on one
  *    shared `AdapterDeps`.
- *  - Because `readSource` is an honest no-op (the hook emits opaque random
- *    event refs and there is no local ref -> transcript index yet), every
- *    adapter `extract` short-circuits to `{ proposals: [] }` before any model
- *    call. The invoker is wired but only reached once a real source index lands.
+ *  - `readSource` resolves the opaque event refs through the local path-pointer
+ *    index (Task 10c; see source-index.test.mjs for the index itself). With no
+ *    pointer on disk it returns "" and every adapter `extract` short-circuits to
+ *    `{ proposals: [] }` before any model call.
  *  - `createNativeInvoker` maps the runtime kind to the one place the concrete
  *    binary spelling lives, tags the internal job uid via
  *    `SOUL37_INTERNAL_JOB_UID`, pipes input on stdin and never hangs on a
@@ -94,8 +94,10 @@ test("extract-adapters: all four runtimes are wired, and extract short-circuits 
       internal_task: true,
     });
 
-    // readSource is an honest no-op (opaque event refs, no local index yet), so
-    // every adapter short-circuits to an empty proposal set before any model call.
+    // readSource resolves refs through the local pointer index; with nothing on
+    // disk it returns "", so every adapter short-circuits to an empty proposal set
+    // before any model call. (Pointer resolution itself is covered in
+    // source-index.test.mjs.)
     assert.deepEqual(extraction, { proposals: [] }, `${kind} must not fabricate source or invoke the model`);
   }
 });

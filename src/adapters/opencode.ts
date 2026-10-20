@@ -452,8 +452,9 @@ export function createOpenCodeAdapter(deps: AdapterDeps): RuntimeAdapter {
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
       const { refs } = opencodeCompletedTurnRefs(transcript);
       if (refs.length === 0) return { proposals: [] };
-      // 3. Re-read exactly the completed turn's source through the same seam.
-      const turnText = await deps.readSource(refs);
+      // 3. Render exactly the completed turn from the already-read source — the
+      //    readSource seam is hit once (bounded); the turn is a local subset of it.
+      const turnText = renderOpenCodeTurn(transcript, refs);
       // 4. Invoke the native model through deps.invoke, tagged with the job uid,
       //    using the ONE bridge generation this adapter ships (never mixed).
       const built = buildOpenCodeExtractionInvocation(request, turnText, OPENCODE_PLUGIN_GENERATION);

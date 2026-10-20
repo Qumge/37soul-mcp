@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDaemon } from "./agentd/daemon.js";
-import { createExtractAdapters } from "./agentd/native-invoker.js";
+import { createExtractAdapters, type NativeInvokerLog } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveConfig, saveState } from "./agentd/state.js";
 import { getGitState } from "./agentd/git-state.js";
@@ -25,7 +25,7 @@ import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { openStore, profilesDir, snapshotPath } from "./local/store.js";
 import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
-import type { ProfileId } from "./adapters/types.js";
+import type { ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
@@ -37,6 +37,22 @@ export interface CliIO {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   stdin: () => Promise<string>;
+}
+
+/**
+ * The assets-mode extract-adapter wiring used by `startAgentd`, extracted so a test
+ * can pin the gate without running the resident daemon loop (intervals / fs.watch /
+ * signal exit). Assets mode gets the four real runtime adapters + spawn NativeInvoker
+ * (whose readSource resolves event refs through the local path-pointer index);
+ * legacy mode keeps its transcript-upload path unchanged and gets `undefined`.
+ */
+export function agentdExtractAdapters(
+  home: string,
+  assetsMode: boolean,
+  logger: NativeInvokerLog,
+  root: string,
+): Partial<Record<RuntimeKind, RuntimeAdapter>> | undefined {
+  return assetsMode ? createExtractAdapters(home, logger, root) : undefined;
 }
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
@@ -215,8 +231,10 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
       fetch: globalThis.fetch,
       getGitState,
       // Task 10: wire the four runtime adapters + spawn NativeInvoker into agentd's
-      // assets-mode drain (only assets mode has extraction watermarks).
-      extractAdapters: assetsMode ? createExtractAdapters(home, logger) : undefined,
+      // assets-mode drain (only assets mode has extraction watermarks). The data
+      // root is passed so readSource can resolve event refs through the local
+      // path-pointer index (Task 10c).
+      extractAdapters: agentdExtractAdapters(home, assetsMode, logger, root),
     },
   );
 

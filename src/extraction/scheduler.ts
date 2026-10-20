@@ -38,6 +38,7 @@ import type {
 } from "../adapters/types.js";
 import { contentDigest, type AssetSource, type ProposedAsset } from "../assets/protocol.js";
 import { classifyProposalState, validateProposedAsset } from "../assets/validation.js";
+import { captureSourcePointer, extractTranscriptPath, validateTranscriptPath } from "../agentd/source-index.js";
 import {
   defaultStoreFs,
   openStore,
@@ -545,6 +546,23 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
     throw new StoreError("invalid_event", "runtime_event payload.event must be a valid RuntimeEvent");
   }
   if (isInternalEvent(event)) return { scheduled: false, reason: "internal" };
+
+  // Task 10c: record the host's own transcript location as a path pointer for this
+  // event ref — path only, never text. Validated here (absolute, existing regular
+  // file); runtimes that omit a transcript location are never indexed.
+  const candidate = extractTranscriptPath(request.payload);
+  if (candidate !== null) {
+    const valid = await validateTranscriptPath(candidate);
+    if (valid !== null) {
+      await captureSourcePointer(root, event.key.profile_id, event.event_ref, {
+        runtime_kind: event.key.runtime_kind,
+        native_session_id: event.key.native_session_id,
+        path: valid,
+        captured_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
+  }
+
   if (!(APPLICABLE_EVENT_KINDS as readonly string[]).includes(event.kind)) {
     return { scheduled: false, reason: "not_applicable" };
   }
