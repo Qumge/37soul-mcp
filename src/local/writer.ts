@@ -42,6 +42,7 @@ export const WRITER_COMMANDS = [
   "commit_extraction",
   "fail_extraction",
   "sync_once",
+  "record_receipt",
   "status",
   "export",
   "login_associate",

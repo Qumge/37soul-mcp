@@ -9,6 +9,9 @@ import { loadConfig, loadState } from "./agentd/state.js";
 import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
+import { readAccountsIndex } from "./local/profiles.js";
+import { isAssetsModeSync } from "./sync/client.js";
+import { openStore } from "./local/store.js";
 
 export interface DoctorDeps {
   home: string;
@@ -38,6 +41,34 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     return { checks, ok: false };
   }
   checks.push({ name: "installation", ok: true, detail: `machine ${config.machine_id}` });
+
+  // Soul sync (assets-only mode) status: pending / conflict counts per local profile.
+  // Read-only and non-fatal — the legacy capture path still runs alongside it.
+  const assetsMode = isAssetsModeSync(root);
+  if (assetsMode) {
+    try {
+      const index = await readAccountsIndex(root);
+      let pending = 0;
+      let conflicts = 0;
+      for (const entry of Object.values(index)) {
+        const store = await openStore(root, entry.profile_id);
+        try {
+          const snap = await store.read();
+          pending += Object.keys(snap.outbox).length;
+          conflicts += Object.keys(snap.quarantine).length;
+        } finally {
+          await store.close();
+        }
+      }
+      checks.push({
+        name: "soul sync",
+        ok: true,
+        detail: `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined`,
+      });
+    } catch {
+      checks.push({ name: "soul sync", ok: true, detail: "assets_only mode" });
+    }
+  }
 
   for (const [agentKind, token] of Object.entries(config.tokens)) {
     // token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）

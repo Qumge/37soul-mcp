@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { absorbPrefetch, absorbWhoami, coreVersionFor, recordSaveOutcome, renderAfterLog, renderWhoami, takeNotice, type SoulPayload } from "./soul.js";
 import { resolveLocalHostIdSync } from "./local/profiles.js";
+import { isAssetsModeSync } from "./sync/client.js";
 
 const BASE_URL = (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
 const TOKEN = process.env.SOUL37_API_TOKEN || process.env.SOUL_API_TOKEN || "";
@@ -242,6 +243,24 @@ function resolveLocalHostId(): number | null {
   return resolveLocalHostIdSync(join(home, ".37soul"));
 }
 
+/**
+ * Assets-only accounts no longer accept the legacy raw-write tools. Raw
+ * transcripts (/turn), unbounded facts (/facts), old work checkpoints and the
+ * legacy PAT identity update must not bypass the soul-assets sync: the model's
+ * raw text never leaves through these tools, and the hosted identity is edited
+ * on 37soul.com, not by the PAT. Read-only tools and chat keep working.
+ */
+function assetsModeBlocked(): string | null {
+  const home = process.env.SOUL37_HOME || homedir();
+  if (!isAssetsModeSync(join(home, ".37soul"))) return null;
+  return (
+    "This account is in assets-only mode: raw transcripts, facts, checkpoints and " +
+    "identity edits no longer flow through this legacy tool. The local soul sync " +
+    "(register the Soul, enable consent, then extract portable relationship/experience " +
+    "assets) is the write path; edit her identity on 37soul.com."
+  );
+}
+
 const NO_BOUND_HOST = "No host selected. Either pass host_id, or set SOUL37_HOST_ID in this server's env to bind it to one character. Use list_hosts to find the id.";
 
 /**
@@ -299,6 +318,7 @@ async function writeTurnInBackground(hostId: number, body: Record<string, string
       if (res.status === 402) { recordSaveOutcome(hostId, 402); return; }
       if (res.status === 401) { recordSaveOutcome(hostId, 401); return; }
       if (res.status === 404) { recordSaveOutcome(hostId, 404); return; }
+      if (res.status === 410) { recordSaveOutcome(hostId, 410); return; }
       if (res.status < 500) { recordSaveOutcome(hostId, "lost"); return; }
     } catch (e) {
       console.error(`37soul-mcp: log_turn write for host ${hostId} failed (attempt ${attempt}): ${e instanceof Error ? e.message : e}`);
@@ -475,6 +495,7 @@ server.registerTool(
   },
   async ({ host_id, character, greeting, preferred_channel_ids }) => {
     if (!TOKEN) return text(NO_TOKEN, true);
+    const blocked = assetsModeBlocked(); if (blocked) return text(blocked, true);
     const host = Object.fromEntries(Object.entries({ character, greeting, preferred_channel_ids }).filter(([, value]) => value !== undefined));
     if (!Object.keys(host).length) return text("Provide at least one of character, greeting, or preferred_channel_ids.", true);
 
@@ -703,6 +724,7 @@ server.registerTool(
   },
   async ({ content, kind, host_id }) => {
     if (!TOKEN) return text(NO_TOKEN, true);
+    const blocked = assetsModeBlocked(); if (blocked) return text(blocked, true);
     const id = resolveHostId(host_id);
     if (id == null) return text(NO_BOUND_HOST, true);
     let res: Response;
@@ -757,6 +779,7 @@ server.registerTool(
   },
   async ({ user_message, host_message, host_id }) => {
     if (!TOKEN) return text(NO_TOKEN, true);
+    const blocked = assetsModeBlocked(); if (blocked) return text(blocked, true);
     const id = resolveHostId(host_id);
     if (id == null) return text(NO_BOUND_HOST, true);
 
@@ -962,6 +985,7 @@ server.registerTool(
   },
   async (args) => {
     if (!TOKEN) return text(NO_TOKEN, true);
+    const blocked = assetsModeBlocked(); if (blocked) return text(blocked, true);
     return remoteMcpTool("checkpoint", args);
   },
 );

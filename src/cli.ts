@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDaemon } from "./agentd/daemon.js";
 import { createRotatingLogger } from "./agentd/logger.js";
-import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
+import { emptyState, loadConfig, loadState, saveConfig, saveState } from "./agentd/state.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
 import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
@@ -29,6 +29,7 @@ import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
+import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -557,6 +558,15 @@ export async function loginCommand(
     io.stderr(`${res.error.code}: ${res.error.message}\n`);
     return 1;
   }
+  // Persist the device tokens the login just granted (merged, never replacing the
+  // other agents' tokens) so the local soul sync has an authorized device token to
+  // push/pull with. Tokens are written to config.json only — never the snapshot,
+  // outbox, receipt, error, log or CLI output.
+  const existing = await loadConfig(root);
+  if (existing && login.tokens && Object.keys(login.tokens).length > 0) {
+    await saveConfig(root, { ...existing, tokens: { ...(existing.tokens ?? {}), ...login.tokens } });
+  }
+
   // Print the profile actually adopted (the writer result), never the current/anonymous
   // id — so the success line can never disagree with accounts.json.
   const adopted = res.result as { profile_id?: unknown; owner_id?: unknown } | null;

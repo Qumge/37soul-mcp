@@ -164,11 +164,14 @@ const SAVE_NOTICE_TEXT = {
   unauthorized:
     "Exchanges are not being saved: the 37Soul token was rejected. Tell the person once that their agent needs a new token from 37soul.com/agent_access.",
   wrongHost: "Exchanges are not being saved: that host id is not theirs. Check SOUL37_HOST_ID.",
+  assetsOnly:
+    "Exchanges are not being saved through this path: this account is in assets-only mode, so raw transcripts " +
+    "no longer upload. The local soul sync (register the Soul, enable consent, extract portable assets) is the write path.",
   lost: "The last exchange was not saved (37Soul could not be reached). It is gone; nothing to do.",
 } as const;
 
-/** 一次写回失败的分类：402 是账单性拒绝；401/404 是配置错了；别的（其它 4xx、网络失败）算「丢了」。 */
-export type SaveOutcome = "ok" | 401 | 402 | 404 | "lost";
+/** 一次写回失败的分类：402 是账单性拒绝；401/404/410 是配置或模式错了；别的（其它 4xx、网络失败）算「丢了」。 */
+export type SaveOutcome = "ok" | 401 | 402 | 404 | 410 | "lost";
 
 function savingBucketFor(outcome: SaveOutcome): SavingState {
   if (outcome === "ok") return "ok";
@@ -180,6 +183,7 @@ function noticeTextFor(outcome: Exclude<SaveOutcome, "ok">): string {
   if (outcome === 402) return SAVE_NOTICE_TEXT.refused;
   if (outcome === 401) return SAVE_NOTICE_TEXT.unauthorized;
   if (outcome === 404) return SAVE_NOTICE_TEXT.wrongHost;
+  if (outcome === 410) return SAVE_NOTICE_TEXT.assetsOnly;
   return SAVE_NOTICE_TEXT.lost;
 }
 

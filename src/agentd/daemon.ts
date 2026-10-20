@@ -33,6 +33,7 @@ import type { FileCursor, NormalizedEvent, SessionMetadata, TranscriptParser } f
 // by the hook becomes an asset, without ever blocking the capture loop on a model.
 import "../extraction/scheduler.js";
 import { drainPendingExtractions } from "../extraction/scheduler.js";
+import "../sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
 import type { RuntimeAdapter } from "../adapters/types.js";
 export { drainPendingExtractions } from "../extraction/scheduler.js";
 
