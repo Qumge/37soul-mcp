@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDaemon } from "./agentd/daemon.js";
+import { createExtractAdapters } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveConfig, saveState } from "./agentd/state.js";
 import { getGitState } from "./agentd/git-state.js";
@@ -30,6 +31,7 @@ import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
+import { isAssetsModeSync } from "./sync/client.js";
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -189,7 +191,13 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   const apiBaseUrl =
     config?.api_base_url ?? (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
   const machineId = config?.machine_id ?? legacyState.machine_id;
-  const tokens = config?.tokens ?? {};
+  // Upgrade gate: in assets mode the legacy transcript upload path must be inert —
+  // pre-seeded spool/queue/log_turn/checkpoint/facts/remember/PAT updates produce
+  // zero old write requests. With tokens forced to {} (and no transcript fallback),
+  // `uploadBatch` short-circuits to "unauthorized" before any fetch and the spool is
+  // never discovered. Local assets/soul data is untouched.
+  const assetsMode = isAssetsModeSync(root);
+  const tokens = assetsMode ? {} : (config?.tokens ?? {});
 
   const logger = createRotatingLogger({ file: path.join(root, "agentd.log") });
   const daemon = createDaemon(
@@ -200,9 +208,16 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
       tokens,
       home,
       // v2 §6.2：hook 是主路径；会话记录兜底只对显式开启的 Agent 生效。
-      transcriptFallback: config?.transcript_fallback ?? [],
+      transcriptFallback: assetsMode ? [] : (config?.transcript_fallback ?? []),
     },
-    { log: logger, fetch: globalThis.fetch, getGitState },
+    {
+      log: logger,
+      fetch: globalThis.fetch,
+      getGitState,
+      // Task 10: wire the four runtime adapters + spawn NativeInvoker into agentd's
+      // assets-mode drain (only assets mode has extraction watermarks).
+      extractAdapters: assetsMode ? createExtractAdapters(home, logger) : undefined,
+    },
   );
 
   // Single-writer IPC for local soul assets. Best-effort: IPC unavailability must

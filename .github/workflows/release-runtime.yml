@@ -1,19 +1,19 @@
-name: Release runtime
+name: Verify runtime
 
-# Publishes the self-contained installer runtime that https://37soul.com/install.sh
-# downloads (no npm registry involved since 2026-10-06). Trigger: push a tag vX.Y.Z
-# that matches package.json. Asset names carry no version, so the site can always
-# fetch releases/latest/download/37soul-runtime.tgz (+ .sha256).
+# Builds and verifies the self-contained installer runtime only. There is NO
+# upload-to-Release job here: publishing is a separate, explicitly-authorized step
+# (the tarball + .sha256 + VERSION stay local build artifacts). Trigger: push a tag
+# vX.Y.Z that matches package.json.
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # gh release create
+  contents: read
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -37,11 +37,25 @@ jobs:
 
       - run: ./scripts/pack-runtime.sh
 
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify tarball layout (root, bundle, bridges, no native modules, digest)
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release/37soul-runtime.tgz release/37soul-runtime.tgz.sha256 \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Installer runtime for https://37soul.com/install.sh — run: curl -fsSL https://37soul.com/install.sh | bash"
+          set -euo pipefail
+          tar -tzf release/37soul-runtime.tgz > /tmp/runtime-files.txt
+          grep -q '^37soul/package.json$' /tmp/runtime-files.txt
+          grep -q '^37soul/dist/bundle/cli.js$' /tmp/runtime-files.txt
+          grep -q '^37soul/dist/bundle/index.js$' /tmp/runtime-files.txt
+          grep -q '^37soul/dist/adapters/plugins/opencode.js$' /tmp/runtime-files.txt
+          grep -q '^37soul/src/adapters/plugins/hermes.py$' /tmp/runtime-files.txt
+          # Every entry is under the 37soul/ root (no absolute/out-of-tree member).
+          if grep -v '^37soul/' /tmp/runtime-files.txt | grep -q .; then
+            echo "tarball member outside 37soul/ root" >&2
+            exit 1
+          fi
+          if tar -tzf release/37soul-runtime.tgz | grep -E '\.(node|wasm|so|dylib)$' | grep -q .; then
+            echo "native module/WASM found in runtime" >&2
+            exit 1
+          fi
+          recorded="$(awk '{print $1}' release/37soul-runtime.tgz.sha256)"
+          actual="$(sha256sum release/37soul-runtime.tgz | awk '{print $1}')"
+          test "$recorded" = "$actual"
+          test "$(cat release/VERSION)" = "$(node -p 'require("./package.json").version')"

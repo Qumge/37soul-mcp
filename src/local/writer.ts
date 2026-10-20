@@ -46,6 +46,7 @@ export const WRITER_COMMANDS = [
   "status",
   "export",
   "login_associate",
+  "init_assets_profile",
 ] as const;
 
 export type WriterCommand = (typeof WRITER_COMMANDS)[number];

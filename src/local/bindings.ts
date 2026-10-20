@@ -593,3 +593,43 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
 
   return { profile_id: profileId, owner_id: ownerId, soul_sync_mode: mode };
 });
+
+/**
+ * Anonymous-first install (assets_only default, zero HTTP, zero login): establish
+ * the single anonymous assets profile and mark the account index `assets_only`.
+ *
+ * This mirrors `login_associate`'s ownership of the accounts index, but there is no
+ * cloud identity: the profile's owner stays null and the index entry is keyed by the
+ * sentinel owner key `"anonymous"` (never a real user id). The empty snapshot is
+ * persisted through `transact` so `snapshot.json` carries the pinned `device_id` —
+ * the field `resolveLocalAssetsProfileSync` requires before any assets-mode write
+ * (hook emission, extraction watermarks) will be accepted.
+ *
+ * Idempotent: re-running keeps the already-pinned device id and the existing index
+ * `default_soul_uid`, and only (re)asserts `soul_sync_mode: "assets_only"`.
+ */
+registerWriterCommand("init_assets_profile", async ({ root, request }) => {
+  const profileId = typeof request.payload.profile_id === "string" && request.payload.profile_id
+    ? request.payload.profile_id
+    : request.profile_id;
+
+  const store = await openStore(root, profileId);
+  try {
+    // Persist the empty snapshot (openStore already pins device_id in device.json;
+    // this commit is what writes snapshot.json with that device_id).
+    await store.transact(() => {});
+  } finally {
+    await store.close();
+  }
+
+  const ANONYMOUS_OWNER_KEY = "anonymous";
+  const index = await readAccountsIndex(root);
+  index[ANONYMOUS_OWNER_KEY] = {
+    profile_id: profileId,
+    default_soul_uid: index[ANONYMOUS_OWNER_KEY]?.default_soul_uid ?? null,
+    soul_sync_mode: "assets_only",
+  };
+  await writeAccountsIndex(root, index);
+
+  return { profile_id: profileId, owner_id: null, soul_sync_mode: "assets_only" };
+});

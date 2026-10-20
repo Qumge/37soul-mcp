@@ -16,6 +16,8 @@ import {
 } from "./config-editor.js";
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
+import { sendWriter, startWriter } from "./local/writer.js";
+import "./local/bindings.js"; // side effect: register init_assets_profile (anonymous-first install)
 import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
 import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS } from "./adapters/codex.js";
 import { inspectOpenCodePlugin, openCodePluginPath, removeOpenCodePlugin, writeOpenCodePlugin } from "./adapters/opencode.js";
@@ -282,6 +284,12 @@ export async function installRuntime(deps: {
     await cp(path.join(deps.sourceRoot, "node_modules"), path.join(dir, "node_modules"), { recursive: true, force: true });
   }
 
+  // Node 18 (and every Node < 22) treats a `.js` file next to no package.json as
+  // CommonJS, so an ESM bundle fails with "Cannot use import statement outside a
+  // module". Ship a minimal `{"type":"module"}` marker so the launcher's cli.js /
+  // index.js load as ESM on Node 18 exactly as they do on Node 20/22/24.
+  await writeFile(path.join(dir, "package.json"), `${JSON.stringify({ type: "module" })}\n`, { mode: 0o644 });
+
   await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
   await writeFile(launcher, launcherScript(deps.nodePath, dir), { mode: 0o755 });
   await chmod(launcher, 0o755);
@@ -531,30 +539,35 @@ async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook
   const instructions = await editManagedFragment(claudeInstructionsPath(deps.home), INSTRUCTIONS_FRAGMENT);
 
   let mcp = false;
-  const addArgs = [
-    "claude",
-    "mcp",
-    "add",
-    "--transport",
-    "http",
-    "--scope",
-    "user",
-    "37soul",
-    `${deps.apiBase}/mcp`,
-    "--header",
-    `Authorization: Bearer ${token}`,
-  ];
-  try {
-    let result = await deps.runCommand(addArgs);
-    if (result.code !== 0) {
-      // 重新安装时同名 server 已存在：先移除再写。
-      await deps.runCommand(["claude", "mcp", "remove", "--scope", "user", "37soul"]).catch(() => {});
-      result = await deps.runCommand(addArgs);
+  // Anonymous-first assets-only install has no token: registering a remote MCP
+  // server with an empty bearer header would only create a broken entry, and the
+  // assets-mode read tools are unavailable without a login anyway. Skip it.
+  if (token) {
+    const addArgs = [
+      "claude",
+      "mcp",
+      "add",
+      "--transport",
+      "http",
+      "--scope",
+      "user",
+      "37soul",
+      `${deps.apiBase}/mcp`,
+      "--header",
+      `Authorization: Bearer ${token}`,
+    ];
+    try {
+      let result = await deps.runCommand(addArgs);
+      if (result.code !== 0) {
+        // 重新安装时同名 server 已存在：先移除再写。
+        await deps.runCommand(["claude", "mcp", "remove", "--scope", "user", "37soul"]).catch(() => {});
+        result = await deps.runCommand(addArgs);
+      }
+      mcp = result.code === 0;
+      if (!mcp) deps.log?.(`  claude mcp add did not succeed (${result.stderr || result.stdout}); add the remote MCP server by hand if you want resume/checkpoint.`);
+    } catch (error) {
+      deps.log?.(`  claude mcp add failed: ${(error as Error).message}`);
     }
-    mcp = result.code === 0;
-    if (!mcp) deps.log?.(`  claude mcp add did not succeed (${result.stderr || result.stdout}); add the remote MCP server by hand if you want resume/checkpoint.`);
-  } catch (error) {
-    deps.log?.(`  claude mcp add failed: ${(error as Error).message}`);
   }
 
   return { hook: true, instructions: instructions.changed || true, mcp };
@@ -577,7 +590,10 @@ async function configureCodex(
   const trust = inspectCodexTrust(deps.home);
 
   let mcp = false;
-  if (deps.launcher) {
+  // Anonymous-first assets-only install has no token: `codex mcp add --env
+  // SOUL37_API_TOKEN=` with an empty value would register a broken stdio server.
+  // Skip registration entirely until the user logs in on the website.
+  if (deps.launcher && token) {
     const addArgs = [
       "codex",
       "mcp",
@@ -671,6 +687,39 @@ async function configureHermes(
   };
 }
 
+/**
+ * Anonymous-first install: establish the single anonymous assets profile and mark
+ * the account index `assets_only` — through the single-writer IPC, exactly like
+ * every other local soul mutation. Uses the running writer when one exists, else
+ * starts a transient writer for the dispatch and closes it (the CLI process never
+ * commits the snapshot itself).
+ */
+async function ensureAnonymousAssetsProfile(root: string): Promise<void> {
+  const request = {
+    request_uid: cryptoRandomId(),
+    profile_id: "default",
+    command: "init_assets_profile",
+    payload: { profile_id: "default" },
+  } as const;
+  const direct = await sendWriter(root, request);
+  if (direct.ok) return;
+  if (direct.error.code !== "writer_unavailable") {
+    throw new Error(`could not initialise the local assets profile: ${direct.error.message}`);
+  }
+  const writer = await startWriter(root).catch(() => null);
+  if (!writer) {
+    throw new Error("no writer is running — start agentd first");
+  }
+  try {
+    const result = await sendWriter(root, request);
+    if (!result.ok) {
+      throw new Error(`could not initialise the local assets profile: ${result.error.message}`);
+    }
+  } finally {
+    await writer.close().catch(() => {});
+  }
+}
+
 export async function install(
   deps: InstallDeps,
   opts: { agents?: string[]; installService?: boolean; fallback?: string[] } = {},
@@ -684,9 +733,13 @@ export async function install(
     throw new Error(`no supported agent selected (detected: ${detected.join(", ") || "none"})`);
   }
 
-  const tokens = (await deviceLogin(deps, selected)).tokens;
+  const tokens: Record<string, string> = {};
+  // Anonymous-first install (assets_only default): zero HTTP, no device login, no
+  // tokens. The local assets profile becomes the write path; remote MCP reads stay
+  // unavailable until the user logs in on the website and pairs a token.
 
   const root = dataRoot(deps.home);
+  await ensureAnonymousAssetsProfile(root);
   const existing = (await loadConfig(root)) ?? null;
 
   // 审查修复 1：先把运行文件复制到固定 runtime，再写任何会长期存在的路径引用
@@ -920,17 +973,34 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
 
   if (await unlinkBin(deps.home)) removed.push(path.relative(deps.home, binLinkPath(deps.home)));
 
-  // 4. 后台服务 + 数据目录。
+  // 4. 后台服务 + 受管运行时文件。**绝不递归删整个 .37soul 数据根**：profiles/
+  //（snapshot、备份、outbox、watermark、合并 journal、defaults）、accounts.json、
+  // spool/（原始本地归档）与 queue/（未同步队列）都是用户资产，必须原样保留。
+  // 只删安装器/agentd 自己管理的那几样：runtime/、ipc/、writer.lock、agentd.log、
+  // install-manifest.json 与 config.json。
   await removeService(
     { home: deps.home, nodePath: deps.nodePath, scriptPath: deps.agentdScriptPath, logPath: "", platform: deps.platform },
     deps.runCommand,
   ).catch(() => {});
-  try {
-    await stat(root);
-    await rm(root, { recursive: true, force: true });
-    removed.push(".37soul");
-  } catch {
-    // 已经不在了：卸载是幂等的
+  for (const managed of ["runtime", "ipc"]) {
+    const target = path.join(root, managed);
+    try {
+      await stat(target); // exists? otherwise rm -f silently "succeeds" and we'd report a phantom removal
+      await rm(target, { recursive: true, force: true });
+      removed.push(path.join(".37soul", managed));
+    } catch {
+      // 不存在：卸载幂等
+    }
+  }
+  for (const managed of ["writer.lock", "agentd.log", "install-manifest.json", "config.json"]) {
+    const target = path.join(root, managed);
+    try {
+      await stat(target);
+      await rm(target, { force: true });
+      removed.push(path.join(".37soul", managed));
+    } catch {
+      // 不存在：卸载幂等
+    }
   }
 
   return removed;

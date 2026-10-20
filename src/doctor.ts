@@ -9,6 +9,7 @@ import { loadConfig, loadState } from "./agentd/state.js";
 import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
 import { inspectOpenCodePlugin } from "./adapters/opencode.js";
 import { inspectHermesPlugin } from "./adapters/hermes.js";
+import { codexHookConfigPath, inspectCodexTrust } from "./adapters/codex.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
@@ -72,19 +73,32 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     }
   }
 
-  for (const [agentKind, token] of Object.entries(config.tokens)) {
-    // token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）
-    const response = await deps.fetch(`${config.api_base_url}/api/v1/me/brief?agent_kind=${encodeURIComponent(agentKind)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(5000),
-    }).catch(() => null);
-    const tokenOk = response?.status === 200;
-    checks.push({
-      name: `${agentKind}: token`,
-      ok: tokenOk,
-      detail: tokenOk ? "accepted" : response ? `HTTP ${response.status}` : "no answer",
-      fatal: !tokenOk,
-    });
+  // Iterate over every *installed* agent (from the manifest), not over tokens:
+  // anonymous-first install has no tokens, but the hook/plugin state must still be
+  // reported honestly. The token check only runs when that agent has a token.
+  const manifest = await readManifest(deps.home);
+  const manifestAgents = new Set<string>();
+  for (const entry of manifest.entries) {
+    if (typeof entry.agent === "string" && entry.agent !== "") manifestAgents.add(entry.agent);
+  }
+  const agents = [...new Set([...Object.keys(config.tokens), ...manifestAgents])];
+
+  for (const agentKind of agents) {
+    const token = config.tokens[agentKind];
+    if (token) {
+      // token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）
+      const response = await deps.fetch(`${config.api_base_url}/api/v1/me/brief?agent_kind=${encodeURIComponent(agentKind)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => null);
+      const tokenOk = response?.status === 200;
+      checks.push({
+        name: `${agentKind}: token`,
+        ok: tokenOk,
+        detail: tokenOk ? "accepted" : response ? `HTTP ${response.status}` : "no answer",
+        fatal: !tokenOk,
+      });
+    }
 
     // 配置痕迹
     if (agentKind === "claude-code") {
@@ -108,10 +122,21 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     } else if (agentKind === "codex") {
       const instructions = await readTextSafe(codexInstructionsPath(deps.home));
       checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: codexInstructionsPath(deps.home) });
+      // Task 10: honest Codex hook result (replaces the old `ok:true` / "not used
+      // (B tier)" hand-wave). installed / trusted / events_seen /
+      // extraction_capable / injection_capable are the five report states; a write
+      // we performed never makes trusted or events_seen green.
+      let hookInstalled = false;
+      try {
+        hookInstalled = (await stat(codexHookConfigPath(deps.home))).isFile();
+      } catch {
+        hookInstalled = false;
+      }
+      const trust = inspectCodexTrust(deps.home);
       checks.push({
         name: `${agentKind}: SessionStart hook`,
-        ok: true,
-        detail: "not used (B tier) — brief arrives via AGENTS.md + .37soul/brief.md",
+        ok: trust.trusted && trust.events_seen,
+        detail: codexHookDetail(hookInstalled, trust),
       });
       const sessions = path.join(deps.home, ".codex", "sessions");
       checks.push(await dirCheck(`${agentKind}: session records`, sessions));
@@ -168,7 +193,6 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   });
 
   // 服务文件（装了的话）必须存在、且引用的是固定启动器而不是 npx 缓存。
-  const manifest = await readManifest(deps.home);
   if (manifest.entries.some((entry) => entry.kind === "service")) {
     const platform = deps.platform ?? process.platform;
     const serviceFile = platform === "darwin" ? plistPath(deps.home) : systemdPath(deps.home);
@@ -250,6 +274,14 @@ function hermesDoctorDetail(inspection: { status: string; surface: string }): st
   }
 }
 
+/** Codex SessionStart hook 的诚实人话：installed → trusted → events 三步，谁缺谁说。 */
+function codexHookDetail(installed: boolean, trust: { trusted: boolean; events_seen: boolean }): string {
+  if (!installed) return "not installed — run `37soul install`";
+  if (trust.trusted && trust.events_seen) return "trusted and SessionStart events observed";
+  if (trust.trusted) return "installed and trusted, but no SessionStart events observed yet";
+  return "installed, not trusted — Codex has not authorized the hook (no `trusted = true` in its config.toml)";
+}
+
 async function dirCheck(name: string, dir: string): Promise<DoctorCheck> {
   try {
     const info = await stat(dir);
@@ -286,9 +318,9 @@ async function resolveWorkingNode(recorded: string | undefined, home: string): P
   return null;
 }
 
-async function readManifest(home: string): Promise<{ entries: Array<{ kind?: string }> }> {
+async function readManifest(home: string): Promise<{ entries: Array<{ kind?: string; agent?: string }> }> {
   try {
-    const parsed = JSON.parse(await readTextSafe(installManifestPath(home))) as { entries?: Array<{ kind?: string }> };
+    const parsed = JSON.parse(await readTextSafe(installManifestPath(home))) as { entries?: Array<{ kind?: string; agent?: string }> };
     return { entries: Array.isArray(parsed.entries) ? parsed.entries : [] };
   } catch {
     return { entries: [] };

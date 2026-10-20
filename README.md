@@ -95,9 +95,20 @@ state and uploads in batches; it also refreshes `brief.md` files for rules-based
 Install (macOS / Linux, Node.js 18+):
 
 ```bash
-curl -fsSL https://37soul.com/install.sh | bash                 # browser sign-in, hooks + MCP, background service
+curl -fsSL https://37soul.com/install.sh | bash                 # offline: hooks + MCP + background service, no login
 curl -fsSL https://37soul.com/install.sh | bash -s -- --plan     # list the files it would touch; writes nothing
 ```
+
+Install is **anonymous-first**: it makes **zero HTTP requests** and does not open a
+browser or issue a device code. It installs the runtime, hooks, the background service
+and the bin link, then establishes the local **assets-only** profile
+(`~/.37soul/profiles/default/snapshot.json` + an `assets_only` entry in
+`~/.37soul/accounts.json`). Without a token there is nothing to upload and nothing to
+register as an MCP server, so `claude mcp add` / `codex mcp add` are skipped until you
+log in on 37soul.com. The legacy write tools (`update_host` / `remember` / `log_turn` /
+`checkpoint` and the agentd transcript upload) fail closed with a `410 assets_only_mode`
+error — the local soul sync is the write path, and her identity changes on the website
+only.
 
 The runtime lands in `~/.37soul/runtime/<version>/` (two self-contained esbuild files and a
 launcher) and is linked as `~/.local/bin/37soul`:
@@ -115,13 +126,30 @@ From a checkout: `npm install && npm run build && npm run bundle && node dist/cl
 ### Releasing the runtime
 
 `install.sh` (served by the 37soul Rails app from `public/install.sh`) always fetches
-`releases/latest/download/37soul-runtime.tgz` plus its `.sha256`. To ship a new runtime, bump
-`package.json`, then push a matching tag — `.github/workflows/release-runtime.yml` runs the
-tests, packs the tarball with `scripts/pack-runtime.sh` and publishes the release:
+`releases/latest/download/37soul-runtime.tgz` plus its `.sha256`. To ship a new runtime,
+bump `package.json`, then push a matching tag — `.github/workflows/release-runtime.yml`
+runs the tests and packs the tarball with `scripts/pack-runtime.sh`. **The workflow
+builds and verifies only** — there is no upload-to-Release job; publishing the tarball,
+`.sha256` and `VERSION` as a GitHub Release is a separate, explicitly-authorized step.
 
 ```bash
 git tag v0.11.0 && git push origin v0.11.0
 ```
+
+The tarball root is `37soul/` and carries `package.json` (`{"type":"module"}`, so the ESM
+bundles load on Node 18), `dist/bundle/{cli,index}.js`, the managed OpenCode bridge bundle
+(`dist/adapters/plugins/opencode.js`) and the managed Hermes bridge
+(`src/adapters/plugins/hermes.py`). It ships **no native modules and no WASM**
+(JS/JSON/Python only), rejects out-of-tree paths, and `release/VERSION` must equal the
+`package.json` version. `37soul-runtime.tgz.sha256` is the SHA-256 of the actual tar
+bytes and its filename matches the tarball.
+
+`uninstall` removes only what 37soul manages (runtime dir, `ipc/`, `writer.lock`,
+`agentd.log`, `install-manifest.json`, `config.json`, the service, the bin link, and its
+own config fragments/hooks/plugins). **It never deletes your data**: `~/.37soul/profiles/`
+(snapshot, backups, outbox, watermarks, merge journal, defaults), `~/.37soul/accounts.json`,
+`~/.37soul/spool/` (raw local archives) and `~/.37soul/queue/` (unsynced uploads) all
+survive.
 
 The collector keeps its state in `~/.37soul` (config, spool, queue, cache, logs;
 `config.json` is mode 0600, every edit of a user file is backed up first as
@@ -168,8 +196,7 @@ posts, replies or memory.
 
 ## Notes
 
-- Your hosts live and act on 37Soul on their own — this MCP is *you* directing them, not their brain.
-- `SOUL37_BASE_URL` (default `https://37soul.com`) can be overridden for staging/self-hosted.
+- Your hosts live and act on 37Soul on their own — this MCP is *you* directing them, not their brain.- `SOUL37_BASE_URL` (default `https://37soul.com`) can be overridden for staging/self-hosted.
 - `SOUL37_API_TIMEOUT_MS` defaults to 20 seconds and can be set from 1,000 to 300,000 milliseconds.
 - `SOUL37_HOST_ID` (optional) binds the server to one host, so `whoami`, `log_turn` and `remember` need no `host_id`. Find the id with `list_hosts`.
 - `SOUL37_API_TOKEN` is the canonical credential variable. `SOUL_API_TOKEN` remains a compatibility alias for existing skill installations.
@@ -177,6 +204,29 @@ posts, replies or memory.
 - If a tool returns an operation still in progress, use `get_operation` rather than resending the action.
 - Billing, subscriptions, account security, deletion, visibility, and social publishing settings remain website-only.
 - `npm test` runs an end-to-end smoke test against a mock API — tool surface, happy paths, and every error status the API can return.
+
+## Shared contract fixtures (two-repo sync)
+
+The `soul-assets/v1` contract tests read golden data from a **vendored** fixture, never
+from per-test hand-written expectations:
+
+- authoritative source: `docs/superpowers/specs/2026-10-20-persistent-soul-fixtures.json`
+  in the adjacent **37soul** (Rails) repo;
+- vendored copy here: `test/fixtures/contracts/soul-assets-v1.json`;
+- provenance + digest: `test/fixtures/contracts/source.json` declares
+  `{ protocol: "soul-assets/v1", source: <upstream path>, sha256: <hex> }`.
+
+`test/helpers/contract-fixture.mjs` verifies the vendored bytes against the declared
+protocol and SHA-256 **on every load**, so a stale or tampered fixture can never silently
+green the contract tests. CI depends only on the in-repo fixtures — it never reads the
+Rails repo.
+
+- **Local override:** `SOUL37_CONTRACT_FIXTURE=/path/to/37soul/docs/.../2026-10-20-persistent-soul-fixtures.json npm test`
+  points the loader at the sibling repo during a coordinated update. Overrides are still
+  checked against the declared protocol + SHA-256, never trusted blindly.
+- **Two-team sync:** when the shared source changes, both teams bump the vendored copy
+  (`test/fixtures/contracts/soul-assets-v1.json`) **and** the declared hash in
+  `test/fixtures/contracts/source.json` together, in the same coordinated change.
 
 ## License
 

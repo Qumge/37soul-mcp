@@ -20,6 +20,7 @@ import { z } from "zod";
 import { absorbPrefetch, absorbWhoami, coreVersionFor, recordSaveOutcome, renderAfterLog, renderWhoami, takeNotice, type SoulPayload } from "./soul.js";
 import { resolveLocalHostIdSync } from "./local/profiles.js";
 import { isAssetsModeSync } from "./sync/client.js";
+import { statusError, text, unknownPostResult } from "./mcp/status.js";
 
 const BASE_URL = (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
 const TOKEN = process.env.SOUL37_API_TOKEN || process.env.SOUL_API_TOKEN || "";
@@ -129,10 +130,6 @@ function rememberOperation(fingerprint: string | null, operationId?: number) {
   persistOperationLedger();
 }
 
-function text(t: string, isError = false) {
-  return { content: [{ type: "text" as const, text: t }], ...(isError ? { isError: true } : {}) };
-}
-
 async function api(path: string, init: RequestInit = {}, timeoutMs = API_TIMEOUT_MS): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${TOKEN}`);
@@ -144,46 +141,6 @@ async function api(path: string, init: RequestInit = {}, timeoutMs = API_TIMEOUT
 }
 
 const NO_TOKEN = `SOUL37_API_TOKEN is not set. Get a token at ${BASE_URL}/agent_access (log in -> Generate token — one token covers all your hosts), then set it in this MCP server's env. SOUL_API_TOKEN is accepted only as a compatibility alias.`;
-
-function statusError(res: Response, ctx: string) {
-  if (res.ok) return null;
-  switch (res.status) {
-    case 401: return text(`Unauthorized — check your SOUL37_API_TOKEN (regenerate at ${BASE_URL}/agent_access).`, true);
-    case 402: return text("Out of messages — the daily free allowance for this character is used up and the account has no credits left. Top up or subscribe on 37soul.com, or try again tomorrow.", true);
-    case 403: return text("That host is unlisted, so 37Soul no longer generates content for it. Re-list it on 37soul.com to post again. (Chatting with it still works.)", true);
-    case 404: return text(ctx === "get_operation"
-      ? "That operation does not exist or does not belong to this account."
-      : "That host isn't yours (or doesn't exist). Use list_hosts to see your host ids.", true);
-    case 409: return text("That idempotency key was already used for a different request. Start a new deliberate action instead of retrying this one.", true);
-    case 422: return text(`Invalid parameters for ${ctx}.`, true);
-    case 429: return text(ctx === "instruct_post"
-      ? "Post not accepted — this host is already processing another post instruction or has reached 8 posts/hour. Wait before trying again."
-      : "Rate limited by 37Soul. Wait before trying again.", true);
-    case 502:
-      if (ctx === "instruct_post") {
-        return unknownPostResult(ctx, "37Soul could not confirm the post operation.");
-      }
-      if (ctx === "chat_with_host") {
-        return unknownPostResult(ctx, "37Soul could not complete the chat response.");
-      }
-      return text(`37Soul is temporarily unavailable for ${ctx}. It is safe to retry this read operation.`, true);
-    default:
-      if (ctx === "chat_with_host" || ctx === "instruct_post") {
-        return unknownPostResult(ctx, `37Soul returned an unexpected error while running ${ctx}.`);
-      }
-      return text(`37Soul is unavailable right now (${ctx}). Try again shortly.`, true);
-  }
-}
-
-function unknownPostResult(ctx: string, prefix: string) {
-  if (ctx === "chat_with_host") {
-    return text(`${prefix} The message may still have been delivered. Do not send it again; use read_chat_history to check.`, true);
-  }
-  if (ctx === "instruct_post") {
-    return text(`${prefix} The post may still have been published. Do not instruct it again; use read_recent_posts to check.`, true);
-  }
-  return text(`${prefix} The update may still have been applied. Read the host again before trying it another time.`, true);
-}
 
 function requestError(error: unknown, ctx: string, resultMayBeCommitted = false) {
   const cause = error instanceof Error ? error.cause : undefined;
@@ -254,9 +211,9 @@ function assetsModeBlocked(): string | null {
   const home = process.env.SOUL37_HOME || homedir();
   if (!isAssetsModeSync(join(home, ".37soul"))) return null;
   return (
-    "This account is in assets-only mode: raw transcripts, facts, checkpoints and " +
-    "identity edits no longer flow through this legacy tool. The local soul sync " +
-    "(register the Soul, enable consent, then extract portable relationship/experience " +
+    "This account is in assets-only mode (410 assets_only_mode): raw transcripts, facts, " +
+    "checkpoints and identity edits no longer flow through this legacy tool. The local soul " +
+    "sync (register the Soul, enable consent, then extract portable relationship/experience " +
     "assets) is the write path; edit her identity on 37soul.com."
   );
 }
@@ -384,7 +341,7 @@ async function readOperation(operationId: number, timeoutMs = API_TIMEOUT_MS): P
   let res: Response;
   try { res = await api(`/operations/${operationId}`, { method: "GET" }, timeoutMs); }
   catch (e) { return requestError(e, "get_operation"); }
-  const err = statusError(res, "get_operation"); if (err) return err;
+  const err = statusError(res, "get_operation", BASE_URL); if (err) return err;
   const parsed = await responseJson<{ operation?: AgentOperation }>(res, "get_operation");
   if (isToolResult(parsed)) return parsed;
   return parsed.operation || text("37Soul returned an operation without status information.", true);
@@ -429,7 +386,7 @@ server.registerTool(
     let res: Response;
     try { res = await api(`/hosts${query ? `?${query}` : ""}`, { method: "GET" }); }
     catch (e) { return requestError(e, "list_hosts"); }
-    const err = statusError(res, "list_hosts"); if (err) return err;
+    const err = statusError(res, "list_hosts", BASE_URL); if (err) return err;
     const parsed = await responseJson<{
       hosts?: Array<{ id: number; nickname: string; age?: number; sex?: string; karma_score?: number }>;
       pagination?: { total?: number; limit?: number; offset?: number; has_more?: boolean };
@@ -472,7 +429,7 @@ server.registerTool(
     let res: Response;
     try { res = await api(`/hosts/${host_id}`, { method: "GET" }); }
     catch (e) { return requestError(e, "get_host"); }
-    const err = statusError(res, "get_host"); if (err) return err;
+    const err = statusError(res, "get_host", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ host?: { id?: number; nickname?: string; character?: string; greeting?: string; preferred_channel_ids?: number[] } }>(res, "get_host");
     if (isToolResult(parsed)) return parsed;
     const host = parsed.host;
@@ -507,7 +464,7 @@ server.registerTool(
         body: JSON.stringify({ host }),
       });
     } catch (e) { return requestError(e, "update_host", true); }
-    const err = statusError(res, "update_host"); if (err) return err;
+    const err = statusError(res, "update_host", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ host?: { id?: number; nickname?: string } }>(res, "update_host", true);
     if (isToolResult(parsed)) return parsed;
     return parsed.host?.id
@@ -528,7 +485,7 @@ server.registerTool(
     let res: Response;
     try { res = await api(`/hosts/${host_id}/photos`, { method: "GET" }); }
     catch (e) { return requestError(e, "read_host_photos"); }
-    const err = statusError(res, "read_host_photos"); if (err) return err;
+    const err = statusError(res, "read_host_photos", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ photos?: Array<{ id?: number; caption?: string; image?: string | null; order?: number }> }>(res, "read_host_photos");
     if (isToolResult(parsed)) return parsed;
     const photos = parsed.photos || [];
@@ -562,7 +519,7 @@ server.registerTool(
         body: JSON.stringify(payload),
       });
     } catch (e) { return requestError(e, "chat_with_host", true); }
-    const err = statusError(res, "chat_with_host"); if (err) return err;
+    const err = statusError(res, "chat_with_host", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ operation?: AgentOperation }>(res, "chat_with_host", true);
     if (isToolResult(parsed)) return parsed;
     if (!parsed.operation) return unknownPostResult("chat_with_host", "37Soul accepted the message but returned no operation id.");
@@ -585,7 +542,7 @@ server.registerTool(
     let res: Response;
     try { res = await api(`/hosts/${host_id}/chat`, { method: "GET" }); }
     catch (e) { return requestError(e, "read_chat_history"); }
-    const err = statusError(res, "read_chat_history"); if (err) return err;
+    const err = statusError(res, "read_chat_history", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ messages?: Array<{ text?: string; sender_type?: string }> }>(res, "read_chat_history");
     if (isToolResult(parsed)) return parsed;
     const data = parsed;
@@ -610,7 +567,7 @@ server.registerTool(
     let res: Response;
     try { res = await api(`/hosts/${host_id}/posts`, { method: "GET" }); }
     catch (e) { return requestError(e, "read_recent_posts"); }
-    const err = statusError(res, "read_recent_posts"); if (err) return err;
+    const err = statusError(res, "read_recent_posts", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ posts?: Array<{ id?: number; text?: string; image?: string | null; created_at?: string }> }>(res, "read_recent_posts");
     if (isToolResult(parsed)) return parsed;
     const posts = parsed.posts || [];
@@ -664,7 +621,7 @@ server.registerTool(
         body: JSON.stringify(payload),
       });
     } catch (e) { return requestError(e, "instruct_post", true); }
-    const err = statusError(res, "instruct_post"); if (err) return err;
+    const err = statusError(res, "instruct_post", BASE_URL); if (err) return err;
     const parsed = await responseJson<{ operation?: AgentOperation }>(res, "instruct_post", true);
     if (isToolResult(parsed)) return parsed;
     if (!parsed.operation) return unknownPostResult("instruct_post", "37Soul accepted the post request but returned no operation id.");
@@ -694,7 +651,7 @@ server.registerTool(
     const query = `turn=${encodeURIComponent(turn)}${cv ? `&core_version=${encodeURIComponent(cv)}` : ""}`;
     try { res = await api(`/hosts/${id}/soul?${query}`, { method: "GET" }); }
     catch (e) { return requestError(e, "whoami"); }
-    const err = statusError(res, "whoami"); if (err) return err;
+    const err = statusError(res, "whoami", BASE_URL); if (err) return err;
     const parsed = await responseJson<SoulPayload>(res, "whoami");
     if (isToolResult(parsed)) return parsed;
     if (!parsed.host) return text("37Soul returned no persona for that host.", true);
@@ -745,7 +702,7 @@ server.registerTool(
       }
       return text("Invalid parameters for remember.", true);
     }
-    const err = statusError(res, "remember"); if (err) return err;
+    const err = statusError(res, "remember", BASE_URL); if (err) return err;
     const parsed = await responseJson<{
       fact?: { id: number; kind: string; content: string; dismissed?: boolean };
     }>(res, "remember");
@@ -863,7 +820,7 @@ server.registerTool(
         case 409: return text(
           "WHY: a video for this conversation is still being shot. Wait for that one.\n" +
           "TO THEM, as her: she is still working on the last one.", true);
-        default: return statusError(res, "shoot") ?? text(`Could not shoot (${res.status}).`, true);
+        default: return statusError(res, "shoot", BASE_URL) ?? text(`Could not shoot (${res.status}).`, true);
       }
     }
 

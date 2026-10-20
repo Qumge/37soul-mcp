@@ -137,39 +137,45 @@ test("install: detects installed agents and only configures the selected ones", 
   assert.deepEqual(result.installed.map((entry) => entry.agentKind), ["claude-code"]);
   assert.deepEqual(result.skipped, ["codex"]);
   const config = await loadConfig(dataRoot(h.home));
-  assert.equal(config.tokens["claude-code"], "TOKEN-CLAUDE");
-  assert.equal(config.tokens.codex, undefined);
+  // Anonymous-first install: no device login, so no token is ever issued/stored.
+  assert.deepEqual(config.tokens, {});
+  assert.equal(h.deps.fetch.calls.length, 0, "install must make zero HTTP requests");
   h.cleanup();
 });
 
-test("install: polls the device endpoint until approval and stores one token per agent", async () => {
-  const fetchImpl = deviceFlowFetch({
-    polls: [
-      { status: 202, body: { status: "pending" } },
-      { status: 201, body: { tokens: [{ agent_kind: "claude-code", token: "T1" }, { agent_kind: "codex", token: "T2" }] } },
-    ],
+test("install: offline setup does not login — zero HTTP, assets_only default, no sleeps", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code", "codex"] });
+
+  // Zero HTTP: no device-code POST, no poll, no token fetch.
+  assert.equal(h.deps.fetch.calls.length, 0, "anonymous-first install makes zero HTTP requests");
+  assert.deepEqual(h.sleeps, [], "no polling sleeps");
+
+  // The anonymous assets profile is established: accounts.json has the sentinel
+  // owner marked assets_only, and snapshot.json carries the pinned device_id.
+  const accounts = JSON.parse(readFileSync(path.join(dataRoot(h.home), "accounts.json"), "utf8"));
+  assert.deepEqual(accounts.anonymous, {
+    profile_id: "default",
+    default_soul_uid: null,
+    soul_sync_mode: "assets_only",
   });
-  const h = harness({ fetch: fetchImpl });
+  const snapshot = JSON.parse(readFileSync(path.join(dataRoot(h.home), "profiles", "default", "snapshot.json"), "utf8"));
+  assert.equal(typeof snapshot.device_id, "string");
+  assert.ok(snapshot.device_id.length > 0, "snapshot must carry a pinned device_id");
+  assert.equal(snapshot.owner_id, null, "anonymous profile has no owner");
 
-  const result = await install(h.deps, { agents: ["claude-code", "codex"] });
-
-  assert.equal(result.installed.length, 2);
-  assert.ok(h.logs.some((line) => line.includes("ABCD-EFGH")), "human code must be shown");
-  assert.deepEqual(h.sleeps, [5000]);
-  const config = await loadConfig(dataRoot(h.home));
-  assert.deepEqual(config.tokens, { "claude-code": "T1", codex: "T2" });
+  // No token means no MCP server was registered for either runtime.
+  assert.ok(!h.commands.some((argv) => argv[0] === "claude" && argv[1] === "mcp" && argv[2] === "add"), "no claude mcp add without a token");
+  assert.ok(!h.commands.some((argv) => argv[0] === "codex" && argv[1] === "mcp" && argv[2] === "add"), "no codex mcp add without a token");
   h.cleanup();
 });
 
-test("install: an expired or cancelled login fails before touching any config", async () => {
-  const expired = harness({ fetch: deviceFlowFetch({ polls: [{ status: 410, body: { error: "expired" } }] }) });
-  await assert.rejects(() => install(expired.deps, { agents: ["claude-code"] }), /expired/);
-  assert.equal(statSync(claudeSettingsPath(expired.home), { throwIfNoEntry: false }), undefined, "settings untouched");
-  expired.cleanup();
-
-  const cancelled = harness({ fetch: deviceFlowFetch({ polls: [{ status: 404, body: { error: "unknown_device_code" } }] }) });
-  await assert.rejects(() => install(cancelled.deps, { agents: ["claude-code"] }), /cancelled/);
-  cancelled.cleanup();
+test("install: an anonymous install never opens the browser or touches the device endpoint", async () => {
+  const h = harness({ openBrowser: true });
+  await install(h.deps, { agents: ["claude-code"] });
+  assert.ok(!h.commands.some((argv) => argv[0] === "open"), "no browser open without a login");
+  assert.equal(h.deps.fetch.calls.length, 0);
+  h.cleanup();
 });
 
 test("install: backs up with a timestamp before every change, keeps unrelated hooks, and stays idempotent", async () => {
@@ -290,11 +296,44 @@ test("uninstall: removes only our entries and is idempotent", async () => {
   assert.equal(readFileSync(claudeInstructionsPath(h.home), "utf8").includes("37soul:begin"), false);
   assert.equal(readFileSync(codexInstructionsPath(h.home), "utf8").includes("37soul:begin"), false);
   assert.equal(statSync(plistPath(h.home), { throwIfNoEntry: false }), undefined);
-  assert.equal(statSync(dataRoot(h.home), { throwIfNoEntry: false }), undefined);
   assert.ok(first.length > 0);
 
   const second = await uninstall(h.deps);
   assert.deepEqual(second, [], "nothing left for us to own");
+  h.cleanup();
+});
+
+test("uninstall: retains all user assets and only removes managed runtime/config files", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+
+  // Pre-seed user assets that must survive: the anonymous profile snapshot, the
+  // accounts index, a raw spool archive and an unsynced queue item.
+  const root = dataRoot(h.home);
+  const snapshotPath = path.join(root, "profiles", "default", "snapshot.json");
+  const accountsPath = path.join(root, "accounts.json");
+  mkdirSync(path.join(root, "spool", "claude-code"), { recursive: true });
+  mkdirSync(path.join(root, "queue"), { recursive: true });
+  writeFileSync(path.join(root, "spool", "claude-code", "sess.jsonl"), "{\"t\":1}\n");
+  writeFileSync(path.join(root, "queue", "pending-1.json"), "{\"id\":\"pending-1\"}\n");
+  const snapshotBefore = readFileSync(snapshotPath, "utf8");
+  const accountsBefore = readFileSync(accountsPath, "utf8");
+
+  await uninstall(h.deps);
+
+  // User assets survive byte-for-byte.
+  assert.ok(statSync(snapshotPath).isFile(), "profile snapshot survives");
+  assert.equal(readFileSync(snapshotPath, "utf8"), snapshotBefore, "snapshot unchanged");
+  assert.equal(readFileSync(accountsPath, "utf8"), accountsBefore, "accounts index unchanged");
+  assert.equal(readFileSync(path.join(root, "spool", "claude-code", "sess.jsonl"), "utf8"), "{\"t\":1}\n", "raw spool archive survives");
+  assert.equal(readFileSync(path.join(root, "queue", "pending-1.json"), "utf8"), "{\"id\":\"pending-1\"}\n", "unsynced queue survives");
+
+  // Managed runtime/config entries are gone.
+  assert.equal(statSync(path.join(root, "runtime"), { throwIfNoEntry: false }), undefined, "runtime dir removed");
+  assert.equal(statSync(installManifestPath(h.home), { throwIfNoEntry: false }), undefined, "install manifest removed");
+  assert.equal(statSync(path.join(root, "config.json"), { throwIfNoEntry: false }), undefined, "config removed");
+  assert.equal(statSync(path.join(root, "ipc"), { throwIfNoEntry: false }), undefined, "ipc socket dir removed");
+
   h.cleanup();
 });
 
@@ -443,17 +482,12 @@ async function mcpInitialize(entry, env = {}) {
   });
 }
 
-test("install: configures Codex MCP with the issued token via env (no manual login)", async () => {
+test("install: skips Codex MCP registration without a token (anonymous assets-only)", async () => {
   const h = harness();
   await install(h.deps, { agents: ["codex"] });
 
   const codexAdd = h.commands.find((argv) => argv[0] === "codex" && argv[1] === "mcp" && argv[2] === "add");
-  assert.ok(codexAdd, "codex mcp add must run");
-  assert.ok(codexAdd.includes("--env"));
-  assert.ok(codexAdd.includes("SOUL37_API_TOKEN=TOKEN-CODEX"));
-  assert.ok(codexAdd.includes("SOUL37_ENTRY=dist/index.js"));
-  assert.ok(codexAdd.includes("--"));
-  assert.ok(codexAdd.at(-1) === runtimeLauncher(h.home, "0.11.0"), "runs the fixed runtime launcher");
+  assert.equal(codexAdd, undefined, "codex mcp add must NOT run without a token (would register a broken stdio server)");
   h.cleanup();
 });
 
@@ -626,13 +660,6 @@ test("install: never overwrites a user's own ~/.local/bin/37soul", async () => {
   h.cleanup();
 });
 
-test("install: opens the approval page in the browser when allowed", async () => {
-  const h = harness({ openBrowser: true });
-  await install(h.deps, { agents: ["claude-code"] });
-  assert.ok(h.commands.some((argv) => argv[0] === "open" && argv[1] === "https://app.test/cli/approve?code=ABCD-EFGH"));
-  h.cleanup();
-});
-
 test("install: run from the release tarball layout (dist/bundle/cli.js) finds the package root", async () => {
   const source = fakeSourceRoot();
   const h = harness({ runtimeSourceRoot: undefined });
@@ -792,6 +819,33 @@ test("doctor: OpenCode plugin bridge reports a specific honest state", async () 
   assert.ok(check, "the plugin bridge check is present");
   assert.equal(check.ok, false);
   assert.equal(check.detail, "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins");
+
+  h.cleanup();
+});
+
+test("doctor: Codex hook reports an honest trust state, never a blanket ok", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["codex"] });
+
+  const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
+  const byName = (r) => Object.fromEntries(r.checks.map((c) => [c.name, c]));
+
+  // The managed hook-config file exists, but Codex has not authorized it: the
+  // doctor must say "not trusted", not the old `ok: true` hand-wave.
+  const check = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
+  assert.ok(check, "the codex SessionStart hook check is present");
+  assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
+  assert.equal(
+    check.detail,
+    "installed, not trusted — Codex has not authorized the hook (no `trusted = true` in its config.toml)",
+  );
+
+  // A Codex-authored trust marker flips trust green, but no SessionStart event
+  // has been observed yet — trust is not observation, so the check stays not-ok.
+  writeFileSync(path.join(h.home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
+  const trusted = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
+  assert.equal(trusted.ok, false, "trust alone (no observed event) is not green");
+  assert.equal(trusted.detail, "installed and trusted, but no SessionStart events observed yet");
 
   h.cleanup();
 });

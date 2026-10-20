@@ -126,3 +126,42 @@ a client at a 404:
 4. **Push `37soul-skill` to `main` last** (`docs/remote-endpoint` branch). The
    `/skill` page reads GitHub `main` live — pushing it *is* deploying it, and it
    now tells agents to use the URL.
+
+## Runtime tarball (install.sh)
+
+The local collector is not on npm: `https://37soul.com/install.sh` fetches
+`releases/latest/download/37soul-runtime.tgz` + its `.sha256`. The release path:
+
+1. **Bump `package.json`** (the tarball `VERSION` and `ReleaseManifest` read it).
+2. **Test + pack:**
+   ```sh
+   npm test
+   ./scripts/pack-runtime.sh   # -> release/37soul-runtime.tgz (+ .sha256, VERSION)
+   ```
+   `pack-runtime.sh` refuses out-of-tree paths, refuses non-JS/JSON/Python files
+   (no native modules/WASM), and asserts `VERSION` equals the `package.json` version
+   and that `.sha256` matches the actual tar bytes. The tar root is `37soul/` and it
+   carries `package.json` (`{"type":"module"}`), `dist/bundle/{cli,index}.js`, the
+   OpenCode bridge bundle and `hermes.py`.
+3. **Push a matching tag** — `.github/workflows/release-runtime.yml` runs the tests and
+   packs/verifies the tarball. **It does not upload a Release** (that is a separate,
+   explicitly-authorized step); it only proves the artifacts build and verify.
+
+The runtime is pure JS + one stdlib Python bridge and needs no `node_modules`: the ESM
+bundles load under Node 18, 20, 22 and 24, and the generated launcher honours `SOUL37_NODE`.
+
+## Shared contract fixtures (two-repo sync)
+
+The `soul-assets/v1` contract tests are fed by a vendored fixture, so CI depends only on
+in-repo files — never on the adjacent 37soul repo:
+
+- authoritative: `docs/superpowers/specs/2026-10-20-persistent-soul-fixtures.json` (Rails repo)
+- vendored: `test/fixtures/contracts/soul-assets-v1.json`
+- provenance/digest: `test/fixtures/contracts/source.json`
+  (`{ protocol, source, sha256 }`)
+
+`test/helpers/contract-fixture.mjs` verifies the bytes against the declared protocol +
+SHA-256 on every load. To work against the sibling repo during a coordinated update, set
+`SOUL37_CONTRACT_FIXTURE` to the authoritative path — overrides are still hash-checked.
+When the shared source changes, bump the vendored copy **and** `source.json`'s `sha256`
+together in both repos.
