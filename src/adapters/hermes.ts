@@ -377,6 +377,11 @@ export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
       }
       // 1. Read the raw transcript through the ONLY raw-source seam.
       const transcript = await deps.readSource(request.source_event_refs);
+      // A gateway-shaped event stream must refuse even when config detection is
+      // inconclusive: gateway records are never fed to a model invocation.
+      if (hermesEventSurface(transcript) === "gateway") {
+        return { error: { code: "gateway_only", retryable: false } };
+      }
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
       const { refs } = hermesCompletedTurnRefs(transcript);
       if (refs.length === 0) return { proposals: [] };

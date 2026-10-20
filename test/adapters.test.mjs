@@ -952,9 +952,12 @@ test("hermes: compact reloads active revisions", async () => {
   const input = ownerContextInput(snap, soulUid, binding, "整理客户沟通要点", 4096);
   const compactBundle = selectContext(input);
 
-  // The bundle/manifest after compaction equals the current active manifest:
-  // the deleted asset's revision is absent, the current one is present.
-  const currentActiveManifest = [{ asset_uid: "a1", revision: 1 }];
+  // The bundle/manifest after compaction equals the live active set derived from
+  // the snapshot the test itself built (never a literal): the deleted asset's
+  // revision is absent, the current one is present.
+  const currentActiveManifest = Object.values(snap.assets)
+    .filter((asset) => asset.state === "active")
+    .map((asset) => ({ asset_uid: asset.asset_uid, revision: asset.revision }));
   assert.deepEqual(compactBundle.manifest, currentActiveManifest);
   assert.ok(compactBundle.rendered_text.includes(CURRENT_CONTENT), "the current asset is injected");
   assert.ok(!compactBundle.rendered_text.includes(DELETED_CONTENT), "the deleted asset is not injected");
@@ -1047,9 +1050,22 @@ test("hermes: the python bridge spawns only the local hook command and makes no 
   );
   assert.ok(!/shell\s*=\s*True/.test(source), "no shell=True");
 
-  // Standard library only and no network surface anywhere (imports included).
+  // Standard library only — positively: extract every module the bridge imports and
+  // assert the set is a subset of the allowed stdlib modules (a blacklist would let
+  // a third-party module like numpy through). The network-keyword check stays too.
+  const importedModules = new Set();
+  for (const match of source.matchAll(/\bimport\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    importedModules.add(match[1]);
+  }
+  for (const match of source.matchAll(/\bfrom\s+([A-Za-z_][A-Za-z0-9_.]*)\s+import\b/g)) {
+    importedModules.add(match[1].split(".")[0]);
+  }
+  assert.ok(importedModules.size > 0, "the bridge's imports are extracted");
+  assert.ok(
+    [...importedModules].every((name) => ["json", "os", "subprocess", "sys"].includes(name)),
+    `standard library only — got: ${[...importedModules].join(", ")}`,
+  );
   assert.ok(!/\b(urllib|http|https|socket|requests|aiohttp|ftplib|smtplib)\b/.test(source), "no network call");
-  assert.ok(!/\bimport\s+(django|flask|fastapi|requests|aiohttp|openai|anthropic)\b/.test(source), "no third-party dependency");
 
   // The payload is bounded and the wait has a short timeout (never hangs the host),
   // and every error path still returns 0 (main always exits 0).
@@ -1111,6 +1127,29 @@ test("hermes: probe and doctor report gateway-only honestly, never as CLI", asyn
   assert.deepEqual(inspectHermesPlugin(root), { status: "observation_only", surface: "cli" });
   assert.equal(readFileSync(hermesPluginPath(root), "utf8"), HERMES_PLUGIN_SOURCE);
   assert.ok(HERMES_PLUGIN_FILENAME.endsWith(".py"), "the managed bridge is a Python file");
+
+  // A gateway-shaped event stream must refuse even when config detection is
+  // inconclusive (the surface here is CLI): the stream classifier guards
+  // extraction too, so a gateway record is never fed to a model invocation.
+  const streamAdapter = createHermesAdapter({
+    home: root,
+    readSource: async () => hermesGatewayJsonl,
+    invoke: async () => {
+      throw new Error("the model must not be invoked for a gateway stream");
+    },
+    emit: async () => {},
+  });
+  const streamRefusal = await streamAdapter.extract({
+    job_uid: "h-gw-stream-1",
+    runtime_kind: "hermes",
+    native_session_id: "h-gw-stream-session",
+    source_event_refs: ["h-gw-marker"],
+    binding_uid: "b1",
+    binding_revision: 1,
+    soul_uid: "s1",
+    internal_task: true,
+  });
+  assert.deepEqual(streamRefusal, { error: { code: "gateway_only", retryable: false } });
 
   rmSync(root, { recursive: true, force: true });
 });
