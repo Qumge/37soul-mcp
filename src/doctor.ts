@@ -7,6 +7,7 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
 import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
+import { inspectOpenCodePlugin } from "./adapters/opencode.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
@@ -113,6 +114,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       });
       const sessions = path.join(deps.home, ".codex", "sessions");
       checks.push(await dirCheck(`${agentKind}: session records`, sessions));
+    } else if (agentKind === "opencode") {
+      // 插件桥（Task 8）：六个诚实状态，各自不同的 detail；没有一个状态是绿的
+      // （observation_only 是上限，直到有授权的真机 probe）。ok 固定 false 且非 fatal。
+      const inspection = inspectOpenCodePlugin(deps.home);
+      checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: openCodeDoctorDetail(inspection) });
     }
 
     const state = await loadState(root);
@@ -201,6 +207,26 @@ async function readTextSafe(file: string): Promise<string> {
     return await readFile(file, "utf8");
   } catch {
     return "";
+  }
+}
+
+/** 插件桥六状态 → 人话 detail；每个状态都是诚实的非绿（observation_only 是上限）。 */
+function openCodeDoctorDetail(inspection: { status: string; declared: string }): string {
+  switch (inspection.status) {
+    case "not_installed":
+      return "plugin bridge not installed — run `37soul install`";
+    case "unsupported_generation":
+      return `plugin bridge declares an unsupported generation (${inspection.declared || "none"}) — rerun \`37soul install\``;
+    case "not_loaded":
+      return "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins";
+    case "not_trusted":
+      return "plugin file present but OpenCode has not trusted it — approve it in OpenCode";
+    case "model_refused":
+      return "a live probe was refused by the model — no authorized probe yet";
+    case "observation_only":
+      return "events may be observed; no model call authorized (structured extraction stays off)";
+    default:
+      return inspection.status;
   }
 }
 

@@ -27,6 +27,14 @@ import { installRuntime, runtimeDir, runtimeLauncher, binLinkPath, linkBin } fro
 import { loadConfig } from "../dist/agentd/state.js";
 import { runDoctor } from "../dist/doctor.js";
 import { codexHookConfigPath } from "../dist/adapters/codex.js";
+import {
+  OPENCODE_PLUGIN_FILENAME,
+  OPENCODE_PLUGIN_SOURCE,
+  openCodePluginDir,
+  openCodePluginGeneration,
+  openCodePluginPath,
+  openCodePluginSha256,
+} from "../dist/adapters/opencode.js";
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-install-"));
@@ -645,4 +653,104 @@ test("launcher works when called through the ~/.local/bin/37soul symlink", async
 
   rmSync(sourceRoot, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
+});
+
+function opencodeDeviceFlow() {
+  return deviceFlowFetch({ polls: [{ status: 201, body: { tokens: [{ agent_kind: "opencode", token: "TOKEN-OPENCODE" }] } }] });
+}
+
+test("install: records the managed OpenCode plugin by exact path + SHA-256 and replaces only that entry", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+
+  // A pre-existing unrelated plugin file must survive install untouched.
+  const pluginDir = openCodePluginDir(h.home);
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(path.join(pluginDir, "some-other-plugin.js"), "export default {};\n", { mode: 0o600 });
+  // A pre-existing file at OUR path gets backed up exactly once before replacement.
+  writeFileSync(openCodePluginPath(h.home), 'export default { api_generation: "v1" };\n', { mode: 0o600 });
+
+  await install(h.deps, { agents: ["opencode"] });
+
+  const manifest = JSON.parse(readFileSync(installManifestPath(h.home), "utf8"));
+  const pluginEntry = manifest.entries.find((entry) => entry.kind === "opencode_plugin");
+  assert.ok(pluginEntry, "the managed plugin file is recorded in the manifest");
+  assert.equal(pluginEntry.agent, "opencode");
+  assert.equal(pluginEntry.file, openCodePluginPath(h.home));
+  assert.equal(pluginEntry.generation, "v2");
+  assert.equal(pluginEntry.sha256, openCodePluginSha256());
+
+  // The installed file is exactly our source.
+  assert.equal(readFileSync(openCodePluginPath(h.home), "utf8"), OPENCODE_PLUGIN_SOURCE);
+  // The pre-existing v1 file was backed up, and the other vendor's plugin untouched.
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${OPENCODE_PLUGIN_FILENAME}.37soul-`));
+  assert.equal(backups.length, 1, "the pre-install file is backed up exactly once");
+  assert.equal(readFileSync(path.join(pluginDir, backups[0]), "utf8"), 'export default { api_generation: "v1" };\n');
+  assert.equal(readFileSync(path.join(pluginDir, "some-other-plugin.js"), "utf8"), "export default {};\n");
+
+  h.cleanup();
+});
+
+test("install: reports the OpenCode plugin as installed-but-unverified with generation", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+
+  const result = await install(h.deps, { agents: ["opencode"] });
+  const opencodeEntry = result.installed.find((entry) => entry.agentKind === "opencode");
+
+  // No global hook / instructions / MCP: the plugin file is the only managed artifact.
+  assert.equal(opencodeEntry.hook, false);
+  assert.equal(opencodeEntry.instructions, false);
+  assert.equal(opencodeEntry.mcp, false);
+  // Five honest states + generation; our own write never makes trust/events green.
+  assert.deepEqual(opencodeEntry.report, {
+    installed: true,
+    trusted: false,
+    events_seen: false,
+    extraction_capable: false,
+    injection_capable: false,
+    generation: "v2",
+  });
+  assert.ok(
+    h.logs.some((line) => line.includes("opencode") && line.includes("trusted=pending") && line.includes("injection=no")),
+    "the honest five-state line is logged",
+  );
+
+  // The installed file declares v2 for itself (a file write we performed, not trust).
+  assert.equal(openCodePluginGeneration(readFileSync(openCodePluginPath(h.home), "utf8")).generation, "v2");
+
+  h.cleanup();
+});
+
+test("uninstall: removes only the OpenCode plugin entry and leaves other plugins", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+
+  const pluginDir = openCodePluginDir(h.home);
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(path.join(pluginDir, "some-other-plugin.js"), "export default {};\n", { mode: 0o600 });
+
+  await install(h.deps, { agents: ["opencode"] });
+  assert.ok(statSync(openCodePluginPath(h.home), { throwIfNoEntry: false }), "our plugin file exists after install");
+
+  const removed = await uninstall(h.deps);
+  assert.ok(removed.some((entry) => entry.includes(OPENCODE_PLUGIN_FILENAME)), "the plugin file removal is reported");
+  assert.equal(statSync(openCodePluginPath(h.home), { throwIfNoEntry: false }), undefined, "our plugin file is gone");
+  assert.equal(readFileSync(path.join(pluginDir, "some-other-plugin.js"), "utf8"), "export default {};\n", "another vendor's plugin survives");
+
+  h.cleanup();
+});
+
+test("doctor: OpenCode plugin bridge reports a specific honest state", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+  await install(h.deps, { agents: ["opencode"] });
+
+  // The plugin file exists but OpenCode's own config has no load marker yet.
+  const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
+  const report = await runDoctor({ ...h.deps, fetch: fetchImpl });
+  const byName = (r) => Object.fromEntries(r.checks.map((c) => [c.name, c]));
+
+  const check = byName(report)["opencode: plugin bridge"];
+  assert.ok(check, "the plugin bridge check is present");
+  assert.equal(check.ok, false);
+  assert.equal(check.detail, "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins");
+
+  h.cleanup();
 });

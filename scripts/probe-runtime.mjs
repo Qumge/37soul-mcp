@@ -17,6 +17,7 @@ import { probeRuntime } from "../dist/adapters/probe.js";
 import { createFakeAdapter, RUNTIME_KINDS } from "../test/helpers/fake-runtime.mjs";
 import { createClaudeCodeAdapter } from "../dist/adapters/claude-code.js";
 import { createCodexAdapter } from "../dist/adapters/codex.js";
+import { createOpenCodeAdapter } from "../dist/adapters/opencode.js";
 
 function parseArgs(argv) {
   const args = { live: false, offline: false, runtimes: ["all"] };
@@ -93,14 +94,36 @@ function codexOfflineDeps() {
   };
 }
 
+/** The real OpenCode adapter's offline deps: a minimal completed transcript fed
+ *  through readSource (the adapter still resolves its own completed-turn refs) and
+ *  a stub model that returns no proposals. No load/trust markers exist, so
+ *  `probe()` and `inject()` stay honest (all-false / not delivered). Nothing is
+ *  live/native. */
+function opencodeOfflineDeps() {
+  const transcript = [
+    '{"type":"session.created","session_id":"oc-offline-0001","cwd":"/tmp/37soul-probe-offline"}',
+    '{"type":"request","id":"req-1","session_id":"oc-offline-0001","prompt":"offline probe turn"}',
+    '{"type":"message","id":"m1","session_id":"oc-offline-0001","role":"assistant","content":[{"type":"text","text":"offline probe answer"}]}',
+  ].join("\n");
+  return {
+    home: "/tmp/37soul-probe-offline",
+    readSource: async () => transcript,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  };
+}
+
 for (const runtime_kind of wanted) {
   const isClaudeCode = runtime_kind === "claude-code";
   const isCodex = runtime_kind === "codex";
+  const isOpenCode = runtime_kind === "opencode";
   const adapter = isClaudeCode
     ? createClaudeCodeAdapter(claudeCodeOfflineDeps())
     : isCodex
       ? createCodexAdapter(codexOfflineDeps())
-      : createFakeAdapter(runtime_kind);
+      : isOpenCode
+        ? createOpenCodeAdapter(opencodeOfflineDeps())
+        : createFakeAdapter(runtime_kind);
   const probe = await probeRuntime(adapter);
 
   // Prove bounded source scope, structured result and local receipt offline.
@@ -127,7 +150,7 @@ for (const runtime_kind of wanted) {
 
   report.push({
     runtime_kind,
-    source: isClaudeCode ? "claude-code-offline" : isCodex ? "codex-offline" : "offline-fake",
+    source: isClaudeCode ? "claude-code-offline" : isCodex ? "codex-offline" : isOpenCode ? "opencode-offline" : "offline-fake",
     version: probe.version,
     supported_version: null, // real supported versions are only registered after authorized live probes pass
     probe,

@@ -25,6 +25,17 @@ import {
   renderCodexTurn,
   buildCodexExtractionInvocation,
 } from "../dist/adapters/codex.js";
+import {
+  createOpenCodeAdapter,
+  OPENCODE_PLUGIN_GENERATIONS,
+  openCodePluginGeneration,
+  validateOpenCodeGenerations,
+  inspectOpenCodePlugin,
+  writeOpenCodePlugin,
+  opencodeCompletedTurnRefs,
+  renderOpenCodeTurn,
+  buildOpenCodeExtractionInvocation,
+} from "../dist/adapters/opencode.js";
 import { openStore } from "../dist/local/store.js";
 import { resolveBinding } from "../dist/local/bindings.js";
 import { handleRuntimeEvent } from "../dist/extraction/scheduler.js";
@@ -39,6 +50,10 @@ const transcriptJsonl = readFileSync(
 );
 const codexRolloutJsonl = readFileSync(
   path.join(here, "fixtures", "runtimes", "codex", "turn.jsonl"),
+  "utf8",
+);
+const opencodeTurnJsonl = readFileSync(
+  path.join(here, "fixtures", "runtimes", "opencode", "turn.jsonl"),
   "utf8",
 );
 
@@ -529,6 +544,193 @@ test("codex: compact refresh excludes deleted assets", async () => {
   assert.ok(!refreshed.manifest.some((x) => x.asset_uid === "a2"), "the deleted asset is absent from the manifest");
   assert.ok(refreshed.rendered_text.includes(CURRENT_CONTENT), "the current asset is injected");
   assert.ok(!refreshed.rendered_text.includes(DELETED_CONTENT), "the deleted asset is not injected");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// OpenCode (Task 8): explicit plugin generations, observation-only probe,
+// message-completion extraction through the tool model, and isolation of
+// internal tasks / session resets.
+// ---------------------------------------------------------------------------
+
+test("opencode: unsupported plugin generation is explicit", () => {
+  // The supported generations are explicit data: v1 and v2 are distinct surfaces
+  // and neither is verified (no authorized live probe).
+  assert.deepEqual(Object.keys(OPENCODE_PLUGIN_GENERATIONS).sort(), ["v1", "v2"]);
+  assert.ok(
+    Object.values(OPENCODE_PLUGIN_GENERATIONS).every((entry) => entry.verified === false),
+    "no generation may be marked verified",
+  );
+
+  // An installed file declares its own generation; an unknown declaration is an
+  // explicit unsupported result, never a guess.
+  assert.deepEqual(openCodePluginGeneration('export default { api_generation: "v2" }'), { generation: "v2" });
+  assert.deepEqual(openCodePluginGeneration('export default { api_generation: "v1" }'), { generation: "v1" });
+  assert.deepEqual(openCodePluginGeneration("export default {}"), { unsupported: true, declared: "" });
+  assert.deepEqual(openCodePluginGeneration('export default { api_generation: "v3" }'), { unsupported: true, declared: "v3" });
+
+  // V1/V2 are never mixed in one configuration: a mixed set fails explicitly.
+  assert.deepEqual(validateOpenCodeGenerations(["v2"]), { generation: "v2" });
+  assert.deepEqual(validateOpenCodeGenerations(["v1", "v2"]), { unsupported: true, reason: "mixed_generation" });
+  assert.deepEqual(validateOpenCodeGenerations(["v3"]), { unsupported: true, reason: "unknown_generation" });
+  assert.deepEqual(validateOpenCodeGenerations([]), { unsupported: true, reason: "unknown_generation" });
+
+  // The single exported invocation builder never mixes generations: exactly one
+  // generation's args, and an unknown generation is an explicit unsupported result.
+  const request = {
+    job_uid: "j",
+    runtime_kind: "opencode",
+    native_session_id: "ns",
+    source_event_refs: [],
+    binding_uid: "b",
+    binding_revision: 1,
+    soul_uid: "s",
+    internal_task: true,
+  };
+  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v3"), { unsupported: true, declared: "v3" });
+  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v1").args, ["run", "--output-format", "json"]);
+  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v2").args, ["run", "--output-format", "json", "--plugin-generation", "v2"]);
+});
+
+test("opencode: message completion extracts through tool model", async () => {
+  const root = tempDir("opencode-extract-");
+  const completedTurnRefs = ["req-1", "m1", "t1", "m2"];
+
+  // Observation-only host: the bridge may fire events, but no model call has been
+  // authorized, so structured extraction stays false — observing events is never
+  // structured extraction.
+  const observationAdapter = createOpenCodeAdapter({
+    home: root,
+    readSource: async () => "",
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  });
+  const observationOnlyProbe = await observationAdapter.probe();
+  assert.equal(observationOnlyProbe.structured_extraction, false);
+  assert.equal(observationOnlyProbe.version, "0.0.0-unverified");
+  assert.equal(observationOnlyProbe.session_id, false);
+
+  // The resolver picks the first completed turn only: the first request boundary
+  // plus its messages/tools, and never the later turn.
+  assert.deepEqual(opencodeCompletedTurnRefs(opencodeTurnJsonl), {
+    session_id: "oc-0001",
+    refs: completedTurnRefs,
+  });
+
+  const reads = [];
+  let modelInput = null;
+  let invokeRuntime = null;
+  let invokeJobUid = null;
+  let invokeArgs = null;
+  const adapter = createOpenCodeAdapter({
+    home: root,
+    readSource: async (refs) => {
+      reads.push(refs.slice());
+      // The marker ref maps to the raw transcript; the resolved record refs map to
+      // the bounded turn text (what a real readSource returns for those records).
+      if (refs.length > 0 && !refs.includes("oc-marker")) {
+        return renderOpenCodeTurn(opencodeTurnJsonl, refs);
+      }
+      return opencodeTurnJsonl;
+    },
+    invoke: async (runtime, args, input, jobUid) => {
+      invokeRuntime = runtime;
+      invokeJobUid = jobUid;
+      invokeArgs = args;
+      modelInput = input;
+      return { code: 0, stdout: "[]", stderr: "" };
+    },
+    emit: async () => {},
+  });
+
+  const request = {
+    job_uid: "oc-job-1",
+    runtime_kind: "opencode",
+    native_session_id: "oc-0001",
+    source_event_refs: ["oc-marker"],
+    binding_uid: "b1",
+    binding_revision: 1,
+    soul_uid: "s1",
+    internal_task: true,
+  };
+  const result = await adapter.extract(request);
+  assert.deepEqual(result, { proposals: [] });
+
+  // The adapter resolved the opaque marker into the completed turn's record ids and
+  // re-read exactly those through readSource — the effective extraction source.
+  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  assert.deepEqual(reads[0], ["oc-marker"]);
+  assert.deepEqual(reads[1], completedTurnRefs);
+
+  // The native command is isolated in one builder and invoked only via deps.invoke.
+  assert.deepEqual(invokeArgs, ["run", "--output-format", "json", "--plugin-generation", "v2"]);
+  assert.equal(invokeRuntime, "opencode", "the native tool is opencode");
+  assert.equal(invokeJobUid, "oc-job-1", "the model call is tagged with the job uid");
+
+  // The model received only the completed turn's source — the request prompt, the
+  // assistant messages and the summarized tool call — never the later turn.
+  assert.ok(modelInput.includes("给 /users 接口加分页"), "the completed turn's user prompt is present");
+  assert.ok(modelInput.includes("给查询层加上 limit/offset"), "the completed turn's assistant text is present");
+  assert.ok(modelInput.includes("sed -n '1,40p' app/controllers/users_controller.rb"), "the tool input is summarized");
+  assert.ok(!modelInput.includes("默认 page size 用 20"), "the later turn is excluded");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("opencode: internal task and reset stay isolated", async () => {
+  const root = tempDir("opencode-reset-");
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+    d.souls["s2"] = makeSoul("s2");
+  });
+
+  // A reset to a new native session must not inherit the old soul (never by cwd,
+  // never by guessing): with two souls and no default, the binding is null.
+  await resolveBinding(keyOf("p1", "dev-1", "opencode", "oc-original"), "s1", { root });
+  const resetBinding = await resolveBinding(keyOf("p1", "dev-1", "opencode", "oc-reset-new"), undefined, { root });
+  assert.equal(resetBinding, null);
+
+  // Internal message-completed events must never schedule another extraction.
+  const key = keyOf("p1", "dev-1", "opencode", "oc-original");
+  const binding = await resolveBinding(key, "s1", { root });
+  let internalJobUidPassed = null;
+  let internalMessageScheduledJobs = 0;
+  const adapter = createOpenCodeAdapter({
+    home: root,
+    readSource: async () => opencodeTurnJsonl,
+    invoke: async (runtime, args, input, internal_job_uid) => {
+      internalJobUidPassed = internal_job_uid;
+      // The plugin bridge fires its own message.completed mid-run. That event carries
+      // the internal job uid, so it must never schedule another extraction.
+      const outcome = await handleRuntimeEvent(
+        { key, event_ref: "internal-message", kind: "turn_completed", internal_job_uid },
+        { root, adapter },
+      );
+      if (outcome.scheduled) internalMessageScheduledJobs += 1;
+      return { code: 0, stdout: "[]", stderr: "" };
+    },
+    emit: async () => {},
+  });
+
+  await adapter.extract({
+    job_uid: "job-1",
+    runtime_kind: "opencode",
+    native_session_id: "oc-original",
+    source_event_refs: ["oc-marker"],
+    binding_uid: binding.binding_uid,
+    binding_revision: binding.revision,
+    soul_uid: "s1",
+    internal_task: true,
+  });
+
+  assert.equal(internalJobUidPassed, "job-1", "the adapter tags the model call with the internal job uid");
+  assert.equal(internalMessageScheduledJobs, 0);
+
+  // The plugin bridge reports distinct honest doctor states, never a generic failure.
+  assert.deepEqual(inspectOpenCodePlugin(root), { status: "not_installed", generation: null, declared: "" });
+  writeOpenCodePlugin(root);
+  assert.deepEqual(inspectOpenCodePlugin(root), { status: "not_loaded", generation: "v2", declared: "v2" });
 
   rmSync(root, { recursive: true, force: true });
 });

@@ -18,6 +18,7 @@ import { installService, plistPath, removeService, systemdPath, type RunCommand,
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
 import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
 import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS } from "./adapters/codex.js";
+import { inspectOpenCodePlugin, openCodePluginPath, removeOpenCodePlugin, writeOpenCodePlugin } from "./adapters/opencode.js";
 
 export const INSTRUCTIONS_FRAGMENT = `## 37Soul
 At the start of a session you may receive a "37Soul brief" (or find it in .37soul/brief.md
@@ -62,7 +63,7 @@ export interface CodexInstallReport {
   installed: boolean;
   /** Codex-authored trust marker only; a write we performed never flips this. */
   trusted: boolean;
-  /** Observed only alongside a Codex-authored trust marker. */
+  /** Never observed: stays false even when a Codex-authored trust marker exists, because there is no event-observation path. */
   events_seen: boolean;
   /** No verified native command (P0 matrix row stays 未验). */
   extraction_capable: boolean;
@@ -70,13 +71,28 @@ export interface CodexInstallReport {
   injection_capable: boolean;
 }
 
+export interface OpenCodeInstallReport {
+  /** We wrote the ONE managed plugin file (a file write we performed). */
+  installed: boolean;
+  /** OpenCode-authored load+trust markers only; a write we performed never flips this. */
+  trusted: boolean;
+  /** Never observed: stays false (no event-observation path). */
+  events_seen: boolean;
+  /** No verified native command (P0 matrix row stays 未验). */
+  extraction_capable: boolean;
+  /** The plugin bridge is unverified, so injection is never claimed. */
+  injection_capable: boolean;
+  /** The plugin generation the installed file declares. */
+  generation: "v1" | "v2" | "unsupported";
+}
+
 export interface InstalledAgent {
   agentKind: string;
   hook: boolean;
   instructions: boolean;
   mcp: boolean;
-  /** Task 7: honest five-state report for runtimes with unverified hooks (codex). */
-  report?: CodexInstallReport;
+  /** Task 7/8: honest five-state report for runtimes with unverified hooks/plugins (codex, opencode). */
+  report?: CodexInstallReport | OpenCodeInstallReport;
 }
 
 export interface InstallResult {
@@ -96,7 +112,7 @@ export function installManifestPath(home: string): string {
   return path.join(dataRoot(home), "install-manifest.json");
 }
 
-const SUPPORTED_AGENTS = ["claude-code", "codex"];
+const SUPPORTED_AGENTS = ["claude-code", "codex", "opencode"];
 
 /** v2 §6.1：`install --plan` 只打印要动哪些文件、装哪些 hook，不写入任何东西。 */
 export async function planInstall(deps: InstallDeps, opts: { agents?: string[] } = {}): Promise<InstallPlan> {
@@ -108,6 +124,9 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
   }
   if (agents.includes("codex")) {
     files.push(codexInstructionsPath(deps.home), codexHookConfigPath(deps.home));
+  }
+  if (agents.includes("opencode")) {
+    files.push(openCodePluginPath(deps.home));
   }
   files.push(configPath(dataRoot(deps.home)), installManifestPath(deps.home));
 
@@ -140,6 +159,7 @@ async function resolveRuntimeMeta(deps: InstallDeps): Promise<{ sourceRoot: stri
 const AGENT_HOMES: Record<string, string> = {
   "claude-code": ".claude",
   codex: ".codex",
+  opencode: ".config/opencode",
   pi: ".pi",
   "gemini-cli": ".gemini",
 };
@@ -579,6 +599,32 @@ async function configureCodex(
   };
 }
 
+async function configureOpenCode(
+  deps: InstallDeps,
+  _token: string,
+): Promise<{ hook: boolean; instructions: boolean; mcp: boolean; report?: OpenCodeInstallReport }> {
+  // OpenCode 走插件桥（Task 8）：只写 ONE 受管静态文件，注入经插件桥在下一个
+  // request 边界投递。插件桥未验证，所以 trusted/events/extraction/injection 都
+  // 不绿；不写全局 hook、不写 instructions fragment、不注册 MCP —— 插件文件是
+  // 唯一受管产物。我们自己的写文件永远不能把 trusted 变绿。
+  const written = writeOpenCodePlugin(deps.home);
+  const inspection = inspectOpenCodePlugin(deps.home);
+  const observedByOpenCode = inspection.status === "observation_only" || inspection.status === "model_refused";
+  return {
+    hook: false, // no global hook: injection arrives via the plugin bridge at the next request boundary
+    instructions: false, // no AGENTS fragment for OpenCode; the plugin file is the only managed artifact
+    mcp: false,
+    report: {
+      installed: written.installed, // our own plugin-file write
+      trusted: observedByOpenCode, // OpenCode-authored load+trust markers only
+      events_seen: false, // never observed
+      extraction_capable: false, // no verified native command (P0 未验)
+      injection_capable: false, // plugin bridge unverified
+      generation: written.generation,
+    },
+  };
+}
+
 export async function install(
   deps: InstallDeps,
   opts: { agents?: string[]; installService?: boolean; fallback?: string[] } = {},
@@ -632,7 +678,12 @@ export async function install(
   const results: InstalledAgent[] = [];
   for (const agentKind of selected) {
     const token = tokens[agentKind];
-    const configured = agentKind === "claude-code" ? await configureClaude(runtimeDeps, token) : await configureCodex(runtimeDeps, token);
+    const configured =
+      agentKind === "claude-code"
+        ? await configureClaude(runtimeDeps, token)
+        : agentKind === "codex"
+          ? await configureCodex(runtimeDeps, token)
+          : await configureOpenCode(runtimeDeps, token);
     config.mcp = { ...(config.mcp ?? {}), [agentKind]: configured.mcp };
     results.push({
       agentKind,
@@ -644,7 +695,7 @@ export async function install(
     if (configured.report) {
       const r = configured.report;
       log(
-        `  ${agentKind}: hook=no (untrusted) instructions=yes mcp=${configured.mcp ? "yes" : "no"} ` +
+        `  ${agentKind}: hook=no (untrusted) instructions=${configured.instructions ? "yes" : "no"} mcp=${configured.mcp ? "yes" : "no"} ` +
           `installed=yes trusted=${r.trusted ? "yes" : "pending"} events=${r.events_seen ? "yes" : "no"} ` +
           `extraction=${r.extraction_capable ? "yes" : "no"} injection=${r.injection_capable ? "yes" : "no"}`,
       );
@@ -692,6 +743,12 @@ export async function install(
     entries.push({ agent: "codex", file: codexInstructionsPath(deps.home), kind: "fragment" });
     entries.push({ agent: "codex", file: codexHookConfigPath(deps.home), kind: "codex_hooks", events: CODEX_HOOK_EVENTS.map((entry) => entry.event) });
     entries.push({ agent: "codex", file: path.join(deps.home, ".codex", "config.toml"), kind: "mcp" });
+  }
+  if (selected.includes("opencode")) {
+    // 幂等：configureOpenCode 已写过，这里只为拿到精确 path + SHA-256 + generation
+    // 记进 manifest（备份只在内容不同时发生，二次写不会产生多余 .bak）。
+    const plugin = writeOpenCodePlugin(deps.home);
+    entries.push({ agent: "opencode", file: plugin.path, kind: "opencode_plugin", generation: plugin.generation, sha256: plugin.sha256 });
   }
   entries.push({ file: configPath(root), kind: "config" });
   if (serviceFile) entries.push({ file: serviceFile, kind: "service" });
@@ -746,6 +803,9 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
 
   // 2b. Codex hook 订阅配置（我们管理的文件；真实 Codex hook 格式未验证）。
   if (removeCodexHookConfig(deps.home)) removed.push(path.relative(deps.home, codexHookConfigPath(deps.home)));
+
+  // 2c. OpenCode 插件桥（ONE 受管静态文件；只删这一条，别的 vendor 插件不动）。
+  if (removeOpenCodePlugin(deps.home)) removed.push(path.relative(deps.home, openCodePluginPath(deps.home)));
 
   // 3. MCP 条目（best effort）。
   for (const argv of [
