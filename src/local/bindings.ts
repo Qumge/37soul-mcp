@@ -528,14 +528,40 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
     // profile; the current (anonymous) profile is never written.
     const existing = await openStore(root, useProfileId);
     const existingSnap = await existing.read();
-    await existing.close();
     if (existingSnap.owner_id !== ownerId) {
+      await existing.close();
       throw new StoreError("owner_mismatch", `profile ${useProfileId} does not belong to ${ownerId}`);
     }
+    // A fresh login for a different cloud device must never clobber the adopted
+    // profile's device binding.
+    if (
+      cloudDeviceUid !== null &&
+      existingSnap.cloud_device_uid !== null &&
+      existingSnap.cloud_device_uid !== cloudDeviceUid
+    ) {
+      await existing.close();
+      throw new StoreError("device_mismatch", `profile ${useProfileId} is already bound to a different cloud device`);
+    }
+    // The writer holds the lock, so committing the login identity to the adopted
+    // profile is legal; the CLI process never does this itself.
+    await existing.transact((draft) => {
+      draft.owner_id = ownerId;
+      if (cloudDeviceUid !== null) draft.cloud_device_uid = cloudDeviceUid;
+    });
+    await existing.close();
+
+    // Apply the server's default only when the Soul exists in the adopted profile;
+    // otherwise leave resolution untouched (pickSoul reads defaults.json, not the index).
+    let appliedDefault: string | null = null;
+    if (defaultSoulUid && existingSnap.souls[defaultSoulUid]) {
+      await setAccountDefaultSoul(useProfileId, defaultSoulUid, { root });
+      appliedDefault = defaultSoulUid;
+    }
+
     const index = await readAccountsIndex(root);
     index[ownerId] = {
       profile_id: useProfileId,
-      default_soul_uid: defaultSoulUid ?? index[ownerId]?.default_soul_uid ?? null,
+      default_soul_uid: appliedDefault ?? index[ownerId]?.default_soul_uid ?? null,
       soul_sync_mode: mode,
     };
     await writeAccountsIndex(root, index);

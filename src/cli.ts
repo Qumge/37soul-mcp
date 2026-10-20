@@ -556,7 +556,12 @@ export async function loginCommand(
     io.stderr(`${res.error.code}: ${res.error.message}\n`);
     return 1;
   }
-  io.stdout(`logged in as owner ${login.owner_id} (profile ${profileId})\n`);
+  // Print the profile actually adopted (the writer result), never the current/anonymous
+  // id — so the success line can never disagree with accounts.json.
+  const adopted = res.result as { profile_id?: unknown; owner_id?: unknown } | null;
+  const adoptedProfile = adopted && typeof adopted.profile_id === "string" ? adopted.profile_id : profileId;
+  const adoptedOwner = adopted && typeof adopted.owner_id === "string" ? adopted.owner_id : login.owner_id;
+  io.stdout(`logged in as owner ${adoptedOwner} (profile ${adoptedProfile})\n`);
   return 0;
 }
 

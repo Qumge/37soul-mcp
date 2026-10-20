@@ -765,7 +765,7 @@ test("login: refused when no writer can be acquired — the CLI never commits di
 // profile already exists; bind surfaces needs_new_session
 // ---------------------------------------------------------------------------
 
-function makeLoginDeps(ownerId = "owner-123") {
+function makeLoginDeps(ownerId = "owner-123", { cloudDeviceUid = "cdu", defaultSoulUid = null } = {}) {
   const fetchImpl = async (url) => {
     const s = String(url);
     if (s.endsWith("/api/v1/cli/device_codes")) {
@@ -785,8 +785,8 @@ function makeLoginDeps(ownerId = "owner-123") {
           protocol: "soul-assets/v1",
           mode: "assets_only",
           owner_id: ownerId,
-          cloud_device_uid: "cdu",
-          default_soul_uid: null,
+          cloud_device_uid: cloudDeviceUid,
+          default_soul_uid: defaultSoulUid,
           tokens: [{ agent_kind: "hermes", token: "T" }],
         };
       },
@@ -955,4 +955,133 @@ test("bind: an injected session surfaces needs_new_session as a real error", asy
   assert.match(text(), /new session/, "the user sees a real message");
   assert.ok(!text().includes("undefined"), "never prints undefined");
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// fix round 3: --use-profile applies the login identity; success line prints
+// the adopted profile
+// ---------------------------------------------------------------------------
+
+test("login: --use-profile persists the fresh cloud_device_uid and prints the adopted profile", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+  });
+
+  const { io, text } = capturingIO();
+  const code = await loginCommand(
+    root,
+    ["--profile", "anon", "--use-profile", "existing"],
+    io,
+    makeLoginDeps("owner-123", { cloudDeviceUid: "cdu-xyz" }),
+  );
+  assert.equal(code, 0);
+
+  const existingStore = await openStore(root, "existing");
+  const existing = await existingStore.read();
+  await existingStore.close();
+  assert.equal(existing.cloud_device_uid, "cdu-xyz", "fresh cloud_device_uid persisted in the adopted snapshot");
+
+  assert.match(text(), /profile existing/, "the success line prints the adopted profile, not the anonymous one");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: --use-profile refuses a conflicting cloud device, writing nothing", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+    d.cloud_device_uid = "cdu-old";
+  });
+
+  const { io, text } = capturingIO();
+  const code = await loginCommand(
+    root,
+    ["--profile", "anon", "--use-profile", "existing"],
+    io,
+    makeLoginDeps("owner-123", { cloudDeviceUid: "cdu-new" }),
+  );
+  assert.equal(code, 1, "a conflicting cloud device is refused");
+  assert.match(text(), /device_mismatch|cloud device/, "the refusal is typed and user-visible");
+
+  const existingStore = await openStore(root, "existing");
+  const existing = await existingStore.read();
+  await existingStore.close();
+  assert.equal(existing.cloud_device_uid, "cdu-old", "the adopted snapshot is untouched");
+
+  const index = await readAccountsIndex(root);
+  assert.equal(index["owner-123"], undefined, "the account index is not switched");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: --use-profile applies a known default soul", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+    d.souls["s2"] = makeSoul("s2");
+  });
+
+  const { io } = capturingIO();
+  const code = await loginCommand(
+    root,
+    ["--profile", "anon", "--use-profile", "existing"],
+    io,
+    makeLoginDeps("owner-123", { defaultSoulUid: "s2" }),
+  );
+  assert.equal(code, 0);
+
+  const resolved = await resolveBinding(keyOf("existing", "dev-existing", "hermes", "ns-new"), undefined, { root });
+  assert.equal(resolved.soul_uid, "s2", "a known default is applied via defaults.json");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: --use-profile leaves resolution untouched when the default is absent or unknown", async () => {
+  // Absent default -> no account default installed; two souls => refuse to guess.
+  const root1 = tempDir();
+  await seedProfile(root1, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root1, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-1";
+    d.souls["s-a"] = makeSoul("s-a");
+    d.souls["s-b"] = makeSoul("s-b");
+  });
+  {
+    const { io } = capturingIO();
+    const code = await loginCommand(root1, ["--profile", "anon", "--use-profile", "existing"], io, makeLoginDeps("owner-1"));
+    assert.equal(code, 0);
+    const resolved = await resolveBinding(keyOf("existing", "dev-existing", "hermes", "ns-new"), undefined, { root: root1 });
+    assert.equal(resolved, null, "absent default leaves resolution untouched");
+  }
+  rmSync(root1, { recursive: true, force: true });
+
+  // Unknown default -> same: nothing installed.
+  const root2 = tempDir();
+  await seedProfile(root2, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root2, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-2";
+    d.souls["s-a"] = makeSoul("s-a");
+    d.souls["s-b"] = makeSoul("s-b");
+  });
+  {
+    const { io } = capturingIO();
+    const code = await loginCommand(root2, ["--profile", "anon", "--use-profile", "existing"], io, makeLoginDeps("owner-2", { defaultSoulUid: "ghost" }));
+    assert.equal(code, 0);
+    const resolved = await resolveBinding(keyOf("existing", "dev-existing", "hermes", "ns-new"), undefined, { root: root2 });
+    assert.equal(resolved, null, "unknown default leaves resolution untouched");
+  }
+  rmSync(root2, { recursive: true, force: true });
 });
