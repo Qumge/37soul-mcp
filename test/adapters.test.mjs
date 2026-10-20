@@ -347,18 +347,26 @@ test("codex: untrusted hooks expose pending reason and never claim injection/ext
   rmSync(root, { recursive: true, force: true });
 });
 
-test("codex: a Codex-authored trust marker is the only path to trusted/events", () => {
+test("codex: a section-scoped Codex-authored trust marker is the only path to trusted (events stay unseen)", () => {
   const home = tempDir("codex-trust-");
   mkdirSync(path.join(home, ".codex"), { recursive: true });
   writeFileSync(path.join(home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
 
-  assert.deepEqual(inspectCodexTrust(home), { trusted: true, events_seen: true, reason: "trusted" });
+  // Trusted is green, but events_seen stays false: a trust marker means "Codex may
+  // run the hook", not "Codex ran it" — there is no event-observation mechanism.
+  assert.deepEqual(inspectCodexTrust(home), { trusted: true, events_seen: false, reason: "trusted" });
 
-  // A merely-named MCP registration (what `codex mcp add 37soul` writes) is not a
-  // trust marker: `[mcp_servers.37soul]` with `trusted = true` elsewhere must not
-  // collide with our distinct `37soul-hooks` section.
+  // `trusted = true` under an unrelated section must never flip trust.
   writeFileSync(path.join(home, ".codex", "config.toml"), "[mcp_servers.37soul]\nenv = {}\ntrusted = true\n", { mode: 0o600 });
   assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: false, reason: "pending" });
+
+  // `trusted = true` inside a comment must never flip trust.
+  writeFileSync(path.join(home, ".codex", "config.toml"), "[hooks.37soul-hooks]\n# trusted = true\n", { mode: 0o600 });
+  assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: false, reason: "pending" });
+
+  // The quoted section form is also recognised.
+  writeFileSync(path.join(home, ".codex", "config.toml"), '[hooks."37soul-hooks"]\ntrusted = true\n', { mode: 0o600 });
+  assert.deepEqual(inspectCodexTrust(home), { trusted: true, events_seen: false, reason: "trusted" });
 
   rmSync(home, { recursive: true, force: true });
 });

@@ -546,16 +546,18 @@ test("install: Codex trust flips green only from a Codex-authored marker, never 
   const result = await install(h.deps, { agents: ["codex"] });
   const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
 
+  // Trusted flips green, but events_seen stays false: a trust marker means "Codex
+  // may run the hook", not "Codex ran it" — no event has been observed.
   assert.deepEqual(codexEntry.report, {
     installed: true,
     trusted: true,
-    events_seen: true,
+    events_seen: false,
     extraction_capable: false,
     injection_capable: true,
   });
   assert.ok(
-    h.logs.some((line) => line.includes("codex") && line.includes("trusted=yes") && line.includes("injection=yes")),
-    "trusted Codex hooks log green injection",
+    h.logs.some((line) => line.includes("codex") && line.includes("trusted=yes") && line.includes("events=no") && line.includes("injection=yes")),
+    "trusted Codex hooks log green injection but events=no",
   );
 
   h.cleanup();

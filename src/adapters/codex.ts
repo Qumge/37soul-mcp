@@ -12,9 +12,11 @@
  *   - `writeCodexHookConfig` records the subscription 37soul installs — the
  *     "installed" state. It is a config write WE performed, so it never makes
  *     "trusted" or "events_seen" green.
- *   - `inspectCodexTrust` reads only Codex's own config and returns
- *     trusted/events_seen solely from a Codex-authored trust marker; the exact
- *     marker path is UNVERIFIED and folded into one boolean, never guessed at.
+ *   - `inspectCodexTrust` reads only Codex's own config and returns `trusted` only
+ *     from a section-scoped Codex-authored trust marker in `[hooks.37soul-hooks]`;
+ *     `events_seen` is independently derived and stays false — there is no
+ *     event-observation mechanism, so a trust marker never reports events as seen.
+ *     The exact marker path is UNVERIFIED.
  *   - `extract()` runs the native model ONLY through `deps.invoke` (never a raw
  *     spawn) and reuses the shared Codex rollout parser for session identity and
  *     turn text. `buildCodexExtractionInvocation` is the single exported command
@@ -66,8 +68,59 @@ export function codexConfigPath(home: string): string {
 
 /** Distinct from `codex mcp add 37soul` (which writes `[mcp_servers.37soul]`), so
  *  our own MCP registration can never be mistaken for a Codex-authored trust marker. */
-const CODEX_TRUST_SECTION = "37soul-hooks";
-const CODEX_TRUST_FLAG = "trusted = true";
+const CODEX_TRUST_SECTION = "hooks.37soul-hooks";
+
+/**
+ * Extract the `[hooks.37soul-hooks]` TOML section only. Trust must be section-scoped:
+ * a `trusted = true` under an unrelated section — or inside a comment — never counts.
+ */
+function readCodexHooksSection(text: string): string {
+  // Section headers: [hooks.37soul-hooks] or the quoted [hooks."37soul-hooks"] form.
+  const header = /^\s*\[\s*hooks\s*\.\s*(?:"?37soul-hooks"?|'37soul-hooks')\s*\]\s*(?:#.*)?$/;
+  const lines = text.split("\n");
+  let inSection = false;
+  const collected: string[] = [];
+  for (const line of lines) {
+    if (!inSection) {
+      if (header.test(line)) inSection = true;
+      continue;
+    }
+    if (/^\s*\[/.test(line)) break; // the next section ends ours
+    collected.push(line);
+  }
+  return collected.join("\n");
+}
+
+export interface CodexTrustState {
+  trusted: boolean;
+  events_seen: boolean;
+  reason: "trusted" | "pending";
+}
+
+/**
+ * Read Codex's own config and report trust only from a Codex-authored marker in the
+ * `[hooks.37soul-hooks]` section. UNVERIFIED marker path: the real trust store
+ * format is not confirmed by an authorized live probe. Anything else — including a
+ * config write we performed — stays pending.
+ *
+ * `events_seen` is independently derived and honest: there is no event-observation
+ * mechanism yet, so a trust marker ("Codex may run the hook") can never report that
+ * events were seen. It stays false regardless of the trust marker until an
+ * observation path exists.
+ */
+export function inspectCodexTrust(home: string): CodexTrustState {
+  let text = "";
+  try {
+    text = readFileSync(codexConfigPath(home), "utf8");
+  } catch {
+    // no config.toml yet: nothing Codex wrote, so nothing is trusted
+  }
+  const section = readCodexHooksSection(text);
+  const trusted = /^\s*trusted\s*=\s*true\s*(?:#.*)?$/m.test(section);
+  return trusted
+    ? { trusted: true, events_seen: false, reason: "trusted" }
+    : { trusted: false, events_seen: false, reason: "pending" };
+}
 
 /**
  * Record the hook events 37soul installs. This is the "installed" state only —
@@ -98,32 +151,6 @@ export function removeCodexHookConfig(home: string): boolean {
   if (!existsSync(file)) return false;
   rmSync(file, { force: true });
   return true;
-}
-
-export interface CodexTrustState {
-  trusted: boolean;
-  events_seen: boolean;
-  reason: "trusted" | "pending";
-}
-
-/**
- * Read Codex's own config and report trust only from a Codex-authored marker.
- * UNVERIFIED marker path: the real trust store format is not confirmed by an
- * authorized live probe, so a section named `37soul-hooks` with `trusted = true`
- * is the minimal observable shape. Anything else — including a config write we
- * performed — stays pending.
- */
-export function inspectCodexTrust(home: string): CodexTrustState {
-  let text = "";
-  try {
-    text = readFileSync(codexConfigPath(home), "utf8");
-  } catch {
-    // no config.toml yet: nothing Codex wrote, so nothing is trusted
-  }
-  const trusted = text.includes(CODEX_TRUST_SECTION) && text.includes(CODEX_TRUST_FLAG);
-  return trusted
-    ? { trusted: true, events_seen: true, reason: "trusted" }
-    : { trusted: false, events_seen: false, reason: "pending" };
 }
 
 function parseJsonl(jsonl: string): Array<Record<string, any>> {
