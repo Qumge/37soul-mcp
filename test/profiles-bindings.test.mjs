@@ -15,7 +15,8 @@ import { rename as fsRename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { openStore } from "../dist/local/store.js";
+import { openStore, acquireWriterLock } from "../dist/local/store.js";
+import { startWriter, sendWriter } from "../dist/local/writer.js";
 import {
   resolveBinding,
   detachBinding,
@@ -23,13 +24,18 @@ import {
   bindingKey,
   setToolDefault,
   setAccountDefaultSoul,
+  assertBindingCurrent,
 } from "../dist/local/bindings.js";
 import {
   mergeLoginProfile,
   readAccountsIndex,
+  writeAccountsIndex,
+  accountsIndexPath,
   mergeJournalPath,
+  resolveLocalHostIdSync,
 } from "../dist/local/profiles.js";
 import { deviceLogin } from "../dist/install.js";
+import { loginCommand } from "../dist/cli.js";
 
 function tempDir(prefix = "profiles-bindings-") {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -104,8 +110,21 @@ test("profiles: anonymous association keeps profile and soul ids", async () => {
   const beforeLogin = await beforeStore.read();
   await beforeStore.close();
 
-  // Zero HTTP: mergeLoginProfile performs no network calls.
-  const result = await mergeLoginProfile(profileId, "owner-123", undefined, { root });
+  // Zero HTTP: mergeLoginProfile performs no network calls. Assert with a recording
+  // stub, not a comment — any fetch during association fails the test.
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (...args) => {
+    fetchCalls.push(args);
+    throw new Error("mergeLoginProfile must never perform HTTP");
+  };
+  let result;
+  try {
+    result = await mergeLoginProfile(profileId, "owner-123", undefined, { root });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(fetchCalls.length, 0, "anonymous association is fully local");
   assert.equal(result, profileId);
 
   const afterStore = await openStore(root, profileId);
@@ -209,19 +228,23 @@ test("profiles: switching accounts never mixes data", async () => {
   const root = tempDir();
   const aKey = keyOf("a1", "dev-a", "hermes", "ns-a");
   await seedProfile(root, "a1", "dev-a", (d) => {
-    d.owner_id = "owner-A";
     d.souls["s-a"] = makeSoul("s-a");
     d.outbox["a-op"] = makeOutboxOp("a-op");
     d.bindings[bindingKey(aKey)] = makeBinding("b-a", "s-a", aKey);
   });
-  const index = await readAccountsIndex(root);
-  index["owner-A"] = { profile_id: "a1", default_soul_uid: null };
-  // (write via a fresh association below instead of touching the file directly)
+  // Associate owner A for real (writes accounts.json on disk), not an in-memory index.
+  await mergeLoginProfile("a1", "owner-A", undefined, { root });
   await seedProfile(root, "b1", "dev-b");
 
   // Account B claims its own independent profile.
   const result = await mergeLoginProfile("b1", "owner-B", undefined, { root });
   assert.equal(result, "b1");
+
+  // The on-disk accounts index maps each owner to a distinct profile.
+  const onDiskIndex = JSON.parse(readFileSync(accountsIndexPath(root), "utf8"));
+  assert.equal(onDiskIndex["owner-A"].profile_id, "a1");
+  assert.equal(onDiskIndex["owner-B"].profile_id, "b1");
+  assert.notEqual(onDiskIndex["owner-A"].profile_id, onDiskIndex["owner-B"].profile_id);
 
   const bStore = await openStore(root, "b1");
   const bSnap = await bStore.read();
@@ -332,6 +355,36 @@ test("binding: injected switch requires new session", async () => {
   assert.equal(detached.state, "detached");
   assert.equal(detached.revision, 2);
   assert.equal(await resolveBinding(key3, undefined, { root }), null, "a detached session no longer resolves");
+
+  // assertBindingCurrent (Task 4 will call it before committing results): the current
+  // revision is accepted; a stale / detached / other-profile binding is refused.
+  await assertBindingCurrent(key2, sw2.binding_uid, 2, { root }); // current switch revision
+  await assert.rejects(
+    () => assertBindingCurrent(key2, sw2.binding_uid, 1, { root }),
+    (err) => err && err.code === "stale_binding",
+    "a result frozen before the switch is refused",
+  );
+  await assert.rejects(
+    () => assertBindingCurrent(key3, b3.binding_uid, 1, { root }),
+    (err) => err && err.code === "stale_binding",
+    "a result frozen before the detach is refused",
+  );
+  await assert.rejects(
+    () => assertBindingCurrent(key3, detached.binding_uid, 2, { root }),
+    (err) => err && err.code === "stale_binding",
+    "a detached binding never accepts a result",
+  );
+  await assertBindingCurrent(key1, bound.binding_uid, 1, { root }); // injected session untouched
+
+  // Account switch: a binding uid from profile p1 is unknown in a different profile.
+  await seedProfile(root, "p2", "dev-2", (d) => {
+    d.souls["s3"] = makeSoul("s3");
+  });
+  await assert.rejects(
+    () => assertBindingCurrent(keyOf("p2", "dev-2", "hermes", "ns-9"), sw2.binding_uid, 2, { root }),
+    (err) => err && err.code === "unknown_binding",
+    "a binding uid from another profile is refused",
+  );
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -484,9 +537,225 @@ test("login: deviceLogin sends and parses soul-assets/v1 fields", async () => {
   assert.equal(deviceCodesReq.protocol, "soul-assets/v1");
   assert.equal(deviceCodesReq.machine_id, "machine-1");
   assert.equal(deviceCodesReq.client_version, "0.11.0");
-  assert.equal(deviceCodesReq.mode, "assets_only");
+  assert.ok(!("mode" in deviceCodesReq), "mode is response-only, never sent in the request");
   const tokensReq = calls[1].body;
   assert.equal(tokensReq.protocol, "soul-assets/v1");
   assert.equal(tokensReq.machine_id, "machine-1");
   assert.equal(tokensReq.client_version, "0.11.0");
+  assert.ok(!("mode" in tokensReq), "mode is response-only, never sent in the request");
+});
+
+// ---------------------------------------------------------------------------
+// fix 1: the session explicit choice outranks an existing native binding
+// ---------------------------------------------------------------------------
+
+test("binding: explicit choice outranks a native binding (non-injected re-points, injected refuses)", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["A"] = makeSoul("A");
+    d.souls["B"] = makeSoul("B");
+  });
+  const key = keyOf("p1", "dev-1", "hermes", "ns-1");
+
+  // Bind the native session to A.
+  const bound = await selectSoul(key, "A", { root });
+  assert.equal(bound.soul_uid, "A");
+  assert.equal(bound.revision, 1);
+
+  // Explicit B, non-injected -> re-pointed through the same revision-bump/CAS path.
+  const rePointed = await resolveBinding(key, "B", { root });
+  assert.equal(rePointed.soul_uid, "B");
+  assert.equal(rePointed.revision, 2, "explicit choice bumps the revision");
+  assert.equal(rePointed.binding_uid, bound.binding_uid, "same record, not a new binding");
+
+  // Inject the (now B) binding, then an explicit A must refuse WITHOUT touching it.
+  const mark = await openStore(root, "p1");
+  await mark.transact((d) => {
+    d.receipts["r1"] = {
+      binding_uid: rePointed.binding_uid,
+      binding_revision: rePointed.revision,
+      stage: "injected",
+      manifest: [],
+      rendered_sha256: "sha",
+    };
+  });
+  await mark.close();
+
+  const injected = await resolveBinding(key, "A", { root });
+  assert.equal(injected, null, "explicit switch of an injected session is refused");
+
+  const snapStore = await openStore(root, "p1");
+  const snap = await snapStore.read();
+  await snapStore.close();
+  assert.equal(snap.bindings[bindingKey(key)].soul_uid, "B", "stored binding is untouched");
+  assert.equal(snap.bindings[bindingKey(key)].revision, 2, "stored revision is untouched");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// fix 5: an unknown explicit UID never falls through to defaults
+// ---------------------------------------------------------------------------
+
+test("binding: unknown explicit soul never falls through to defaults", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  await setToolDefault({ profile_id: "p1", runtime_kind: "hermes" }, "s1", { root });
+  await setAccountDefaultSoul("p1", "s1", { root });
+
+  const key = keyOf("p1", "dev-1", "hermes", "ns-1");
+  const result = await resolveBinding(key, "ghost", { root });
+  assert.equal(result, null, "unknown explicit UID returns null, never consults defaults");
+
+  // And nothing was auto-bound on the way.
+  const store = await openStore(root, "p1");
+  const snap = await store.read();
+  await store.close();
+  assert.deepEqual(snap.bindings, {}, "no binding was created for an unknown explicit UID");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// fix 6: the host-id local peek is gated on soul_sync_mode === "assets_only"
+// ---------------------------------------------------------------------------
+
+test("resolveHostId: local peek is gated on assets mode", () => {
+  const root = tempDir();
+  const profileId = "p1";
+  mkdirSync(path.join(root, "profiles", profileId), { recursive: true });
+  writeFileSync(
+    path.join(root, "profiles", profileId, "device.json"),
+    `${JSON.stringify({ device_id: "dev-1" })}\n`,
+    { mode: 0o600 },
+  );
+  const s1 = makeSoul("s1");
+  s1.legacy_host_id = 42;
+  writeFileSync(
+    path.join(root, "profiles", profileId, "snapshot.json"),
+    `${JSON.stringify({ store_version: 1, profile_id: profileId, souls: { s1 } })}\n`,
+    { mode: 0o600 },
+  );
+
+  // No gate at all (accounts.json missing) -> env/default path, no local host id.
+  assert.equal(resolveLocalHostIdSync(root), null, "no gate -> null");
+
+  // Gate present but not assets mode -> still null.
+  writeFileSync(
+    accountsIndexPath(root),
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: null, soul_sync_mode: null } })}\n`,
+    { mode: 0o600 },
+  );
+  assert.equal(resolveLocalHostIdSync(root), null, "non-assets gate -> null");
+
+  // Gate present in assets mode -> the local host id.
+  writeFileSync(
+    accountsIndexPath(root),
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: null, soul_sync_mode: "assets_only" } })}\n`,
+    { mode: 0o600 },
+  );
+  assert.equal(resolveLocalHostIdSync(root), 42, "assets gate -> local host id");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// fix 2: login association runs inside the single writer; never from the CLI
+// ---------------------------------------------------------------------------
+
+test("login: association runs inside the writer and persists soul_sync_mode", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  const writer = await startWriter(root);
+  try {
+    const request = (requestUid, ownerId) => ({
+      request_uid: requestUid,
+      profile_id: "p1",
+      command: "login_associate",
+      payload: { owner_id: ownerId, cloud_device_uid: "cdu-1", default_soul_uid: "s1", mode: "assets_only" },
+    });
+    // Two concurrent associations serialize through the writer's dispatch queue.
+    const [r1, r2] = await Promise.all([
+      sendWriter(root, request("u1", "owner-1")),
+      sendWriter(root, request("u2", "owner-1")),
+    ]);
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+
+    const store = await openStore(root, "p1");
+    const snap = await store.read();
+    await store.close();
+    assert.equal(snap.owner_id, "owner-1");
+    assert.equal(snap.cloud_device_uid, "cdu-1");
+
+    const onDisk = JSON.parse(readFileSync(accountsIndexPath(root), "utf8"));
+    assert.equal(onDisk["owner-1"].profile_id, "p1");
+    assert.equal(onDisk["owner-1"].soul_sync_mode, "assets_only");
+  } finally {
+    await writer.close();
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: refused when no writer can be acquired — the CLI never commits directly", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  // Hold the writer lock so the CLI's startWriter fallback cannot acquire it.
+  const releaseLock = await acquireWriterLock(root);
+  try {
+    const fetchImpl = async (url) => {
+      const s = String(url);
+      if (s.endsWith("/api/v1/cli/device_codes")) {
+        return {
+          status: 201,
+          ok: true,
+          async json() {
+            return { device_code: "dc", user_code: "UC", verification_url: "https://x", interval: 1, expires_in: 600 };
+          },
+        };
+      }
+      return {
+        status: 201,
+        ok: true,
+        async json() {
+          return {
+            protocol: "soul-assets/v1",
+            mode: "assets_only",
+            owner_id: "123",
+            cloud_device_uid: "cdu",
+            default_soul_uid: null,
+            tokens: [{ agent_kind: "hermes", token: "T" }],
+          };
+        },
+      };
+    };
+    const deps = {
+      home: "/tmp/x",
+      apiBase: "https://x",
+      fetch: fetchImpl,
+      runCommand: async () => ({ code: 0, stdout: "", stderr: "" }),
+      nodePath: process.execPath,
+      cliScriptPath: "/tmp/cli.js",
+      agentdScriptPath: "/tmp/cli.js",
+      platform: "linux",
+      openBrowser: false,
+      now: () => 0,
+      sleep: async () => {},
+    };
+    const io = { stdout: () => {}, stderr: () => {}, stdin: async () => "" };
+
+    const code = await loginCommand(root, ["--profile", "p1"], io, deps);
+    assert.equal(code, 1, "login must be refused when it cannot go through the writer");
+
+    const store = await openStore(root, "p1");
+    const snap = await store.read();
+    await store.close();
+    assert.equal(snap.owner_id, null, "the CLI process never commits the snapshot directly");
+  } finally {
+    await releaseLock();
+  }
+  rmSync(root, { recursive: true, force: true });
 });

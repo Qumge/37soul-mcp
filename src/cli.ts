@@ -23,7 +23,6 @@ import { runDoctor } from "./doctor.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { openStore } from "./local/store.js";
-import { mergeLoginProfile, resolveRoot, readAccountsIndex } from "./local/profiles.js";
 import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
 import type { ProfileId } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
@@ -417,7 +416,13 @@ async function bindCommand(root: string, rest: string[], io: CliIO, detach: bool
     io.stderr(`${res.error.code}: ${res.error.message}\n`);
     return 1;
   }
-  io.stdout(`${detach ? "detached" : "bound"} session ${nativeSessionId}\n`);
+  // Never print the native session id; report the cloud-facing binding identity only.
+  const binding = res.result as { binding_uid: string; revision: number; soul_uid: string };
+  io.stdout(
+    detach
+      ? `detached soul ${binding.soul_uid} (binding ${binding.binding_uid}, revision ${binding.revision})\n`
+      : `bound soul ${binding.soul_uid} (binding ${binding.binding_uid}, revision ${binding.revision})\n`,
+  );
   return 0;
 }
 
@@ -432,7 +437,7 @@ async function readClientVersion(cliScriptPath: string): Promise<string> {
   }
 }
 
-async function loginCommand(
+export async function loginCommand(
   root: string,
   rest: string[],
   io: CliIO,
@@ -448,19 +453,19 @@ async function loginCommand(
     io.stderr("login returned no owner_id\n");
     return 1;
   }
-  await mergeLoginProfile(profileId, login.owner_id, undefined, { root });
-  if (login.cloud_device_uid) {
-    const store = await openStore(root, profileId);
-    try {
-      await store.transact((draft) => {
-        draft.cloud_device_uid = login.cloud_device_uid ?? null;
-      });
-    } finally {
-      await store.close();
-    }
-  }
-  if (login.default_soul_uid) {
-    await setAccountDefaultSoul(profileId, login.default_soul_uid, { root });
+
+  // §2.5: only the writer process commits. The whole association runs inside one
+  // `login_associate` writer dispatch (owner + cloud_device_uid + merge + defaults +
+  // soul_sync_mode); the CLI process itself never calls store.transact.
+  const res = await runWriterCommand(root, profileId, "login_associate", {
+    owner_id: login.owner_id,
+    cloud_device_uid: login.cloud_device_uid ?? null,
+    default_soul_uid: login.default_soul_uid ?? null,
+    mode: login.mode ?? "assets_only",
+  });
+  if (!res.ok) {
+    io.stderr(`${res.error.code}: ${res.error.message}\n`);
+    return 1;
   }
   io.stdout(`logged in as owner ${login.owner_id} (profile ${profileId})\n`);
   return 0;

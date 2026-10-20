@@ -377,10 +377,11 @@ export async function deviceLogin(
     throw new Error("assets login requires a stable machine_id");
   }
 
+  // §3 adds only protocol/machine_id/client_version to the request; `mode` is
+  // response-only (the server reports the assets mode it granted).
   const fields = assetsMode
     ? {
         protocol: "soul-assets/v1",
-        mode: "assets_only",
         machine_id: options.machineId,
         client_version: options.clientVersion ?? "0.0.0",
       }

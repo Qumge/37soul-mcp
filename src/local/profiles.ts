@@ -24,6 +24,7 @@
  * offline — anonymous association and merge are local operations.
  */
 import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { link as fsLink, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defaultRoot } from "../agentd/state.js";
@@ -32,6 +33,8 @@ import {
   defaultStoreFs,
   openStore,
   profileDir,
+  profilesDir,
+  snapshotPath,
   StoreError,
   type StoreFs,
   type StoreSnapshot,
@@ -40,6 +43,8 @@ import {
 export interface AccountEntry {
   profile_id: ProfileId;
   default_soul_uid: string | null;
+  /** §3 login `mode` response (currently "assets_only"); gates the host-id local peek. */
+  soul_sync_mode: string | null;
 }
 
 export type AccountsIndex = Record<string, AccountEntry>;
@@ -75,10 +80,11 @@ export async function readAccountsIndex(root: string): Promise<AccountsIndex> {
         typeof entry === "object" &&
         typeof (entry as Record<string, unknown>).profile_id === "string"
       ) {
-        const e = entry as { profile_id: string; default_soul_uid?: unknown };
+        const e = entry as { profile_id: string; default_soul_uid?: unknown; soul_sync_mode?: unknown };
         out[ownerId] = {
           profile_id: e.profile_id,
           default_soul_uid: typeof e.default_soul_uid === "string" ? e.default_soul_uid : null,
+          soul_sync_mode: typeof e.soul_sync_mode === "string" ? e.soul_sync_mode : null,
         };
       }
     }
@@ -269,8 +275,41 @@ export async function mergeLoginProfile(
   index[ownerId] = {
     profile_id: profileId,
     default_soul_uid: index[ownerId]?.default_soul_uid ?? null,
+    soul_sync_mode: index[ownerId]?.soul_sync_mode ?? null,
   };
   await writeAccountsIndex(root, index);
 
   return profileId;
+}
+
+/**
+ * Ruling 5 (assets-mode gate) for the MCP host-id peek. Synchronous and read-only:
+ * returns a host id number only when the account index entry for the single local
+ * profile is in assets mode (`soul_sync_mode === "assets_only"`) AND that profile's
+ * store holds exactly one Soul with a legacy host id. Otherwise null, so the caller
+ * keeps its env/default behavior. Never reads or exposes a native_session_id or path.
+ */
+export function resolveLocalHostIdSync(root: string): number | null {
+  try {
+    const entries = readdirSync(profilesDir(root), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    if (entries.length !== 1) return null; // only a single local profile can be consulted
+    const profileId = entries[0];
+    const accounts = JSON.parse(readFileSync(accountsIndexPath(root), "utf8")) as Record<
+      string,
+      { profile_id?: unknown; soul_sync_mode?: unknown }
+    >;
+    const entry = Object.values(accounts).find((e) => e.profile_id === profileId);
+    if (!entry || entry.soul_sync_mode !== "assets_only") return null;
+    const snapshot = JSON.parse(readFileSync(snapshotPath(root, profileId), "utf8")) as {
+      souls?: Record<string, { legacy_host_id?: unknown }>;
+    };
+    const souls = Object.values(snapshot.souls ?? {});
+    if (souls.length !== 1) return null;
+    const hostId = souls[0].legacy_host_id;
+    return typeof hostId === "number" && Number.isFinite(hostId) && hostId > 0 ? hostId : null;
+  } catch {
+    return null;
+  }
 }

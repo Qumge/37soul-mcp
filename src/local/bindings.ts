@@ -44,7 +44,7 @@ import {
   type StoreSnapshot,
 } from "./store.js";
 import { registerWriterCommand } from "./writer.js";
-import { resolveRoot, type LocalOptions } from "./profiles.js";
+import { mergeLoginProfile, readAccountsIndex, resolveRoot, writeAccountsIndex, type LocalOptions } from "./profiles.js";
 
 /** Join the native key into one record key. Never serialized beyond the local store. */
 export function bindingKey(key: NativeSessionKey): string {
@@ -189,30 +189,78 @@ async function pickSoul(
   root: string,
   snap: StoreSnapshot,
   key: NativeSessionKey,
-  explicitSoulUid?: string,
 ): Promise<string | null> {
-  // 1. session explicit choice
-  if (explicitSoulUid && snap.souls[explicitSoulUid]) return explicitSoulUid;
   const defaults = await readDefaults(root, key.profile_id);
-  // 3. tool default
+  // 1. tool default
   const toolDefault = defaults.tool_defaults[key.runtime_kind];
   if (toolDefault && snap.souls[toolDefault]) return toolDefault;
-  // 4. account default
+  // 2. account default
   if (defaults.account_default_soul_uid && snap.souls[defaults.account_default_soul_uid]) {
     return defaults.account_default_soul_uid;
   }
-  // 5. unique Soul
+  // 3. unique Soul
   const souls = Object.values(snap.souls);
   if (souls.length === 1) return souls[0].soul_uid;
-  // 6. refuse to guess
+  // 4. refuse to guess
   return null;
 }
 
+type LocalStore = Awaited<ReturnType<typeof openStore>>;
+
+/** Persist a mutation of an existing binding record (switch / re-bind), revision + 1. */
+async function rebindExisting(
+  store: LocalStore,
+  snap: StoreSnapshot,
+  k: string,
+  existing: BindingSnapshot,
+  soulUid: string,
+): Promise<BindingSnapshot> {
+  const pred = lastBindingOpId(snap, existing.session_ref);
+  const next: BindingSnapshot = {
+    ...existing,
+    soul_uid: soulUid,
+    state: "bound",
+    revision: existing.revision + 1,
+  };
+  const op = bindingOutboxOp(next, "bound", existing.revision, pred ? [pred] : []);
+  const written = await store.transact((draft) => {
+    draft.bindings[k] = next;
+    draft.outbox[op.operation_id] = op;
+  });
+  return written.bindings[k];
+}
+
+/** Persist a fresh binding (revision 1) for a session key. */
+async function bindFresh(
+  store: LocalStore,
+  k: string,
+  key: NativeSessionKey,
+  soulUid: string,
+): Promise<BindingSnapshot> {
+  const binding = createBinding(key, soulUid);
+  const op = bindingOutboxOp(binding, "bound", 0, []);
+  const written = await store.transact((draft) => {
+    draft.bindings[k] = binding;
+    draft.outbox[op.operation_id] = op;
+  });
+  return written.bindings[k];
+}
+
 /**
- * Resolve the effective binding for a native session, or null. A bound binding is
- * returned as-is (step 2); when none exists yet, a determinable Soul (explicit ->
- * tool default -> account default -> unique) is auto-bound, and anything ambiguous
- * returns null so the CLI can offer choose/create. No native id => refuse to guess.
+ * Resolve the effective binding for a native session, or null.
+ *
+ * Order (explicit first, per review fix 1):
+ *   1. session explicit choice (explicitSoulUid):
+ *      - unknown local UID -> null, and defaults are never consulted (fix 5);
+ *      - existing bound binding to the same Soul -> returned as-is;
+ *      - existing bound binding to a different Soul, not injected -> re-pointed
+ *        through the same revision-bump/CAS path `selectSoul` uses;
+ *      - existing bound binding to a different Soul, injected -> null WITHOUT
+ *        touching the stored binding (caller then calls `selectSoul`, which yields
+ *        `needs_new_session`);
+ *      - no bound binding -> fresh binding to the explicit Soul.
+ *   2. native binding, 3. tool default, 4. account default, 5. unique Soul,
+ *   6. refuse to guess. No native id => refuse to guess.
  */
 export async function resolveBinding(
   key: NativeSessionKey,
@@ -229,18 +277,25 @@ export async function resolveBinding(
     const snap = await store.read();
     const k = bindingKey(key);
     const existing = snap.bindings[k];
+
+    // 1. session explicit choice is consulted before the native binding.
+    if (explicitSoulUid) {
+      if (!snap.souls[explicitSoulUid]) return null; // unknown explicit UID: never guess
+      if (existing && existing.state === "bound") {
+        if (existing.soul_uid === explicitSoulUid) return existing;
+        if (isInjected(snap, existing)) return null; // do not touch an injected session
+        return rebindExisting(store, snap, k, existing, explicitSoulUid);
+      }
+      return bindFresh(store, k, key, explicitSoulUid);
+    }
+
+    // 2. native binding
     if (existing && existing.state === "bound") return existing;
 
-    const soulUid = await pickSoul(root, snap, key, explicitSoulUid);
+    // 3-6. tool default -> account default -> unique -> refuse
+    const soulUid = await pickSoul(root, snap, key);
     if (!soulUid || !snap.souls[soulUid]) return null;
-
-    const binding = createBinding(key, soulUid);
-    const op = bindingOutboxOp(binding, "bound", 0, []);
-    const written = await store.transact((draft) => {
-      draft.bindings[k] = binding;
-      draft.outbox[op.operation_id] = op;
-    });
-    return written.bindings[k];
+    return bindFresh(store, k, key, soulUid);
   } finally {
     await store.close();
   }
@@ -270,28 +325,10 @@ export async function selectSoul(
       if (existing.state === "bound" && isInjected(snap, existing)) {
         return { error: "needs_new_session" };
       }
-      const pred = lastBindingOpId(snap, existing.session_ref);
-      const next: BindingSnapshot = {
-        ...existing,
-        soul_uid: soulUid,
-        state: "bound",
-        revision: existing.revision + 1,
-      };
-      const op = bindingOutboxOp(next, "bound", existing.revision, pred ? [pred] : []);
-      await store.transact((draft) => {
-        draft.bindings[k] = next;
-        draft.outbox[op.operation_id] = op;
-      });
-      return toBinding(next);
+      return toBinding(await rebindExisting(store, snap, k, existing, soulUid));
     }
 
-    const binding = createBinding(key, soulUid);
-    const op = bindingOutboxOp(binding, "bound", 0, []);
-    await store.transact((draft) => {
-      draft.bindings[k] = binding;
-      draft.outbox[op.operation_id] = op;
-    });
-    return toBinding(binding);
+    return toBinding(await bindFresh(store, k, key, soulUid));
   } finally {
     await store.close();
   }
@@ -324,6 +361,39 @@ export async function detachBinding(key: NativeSessionKey, opts: LocalOptions = 
 }
 
 // --- writer commands (registered at module top level) -------------------------------
+
+/**
+ * Task 4 calls this before committing extraction results frozen at `revision`.
+ * Throws a typed StoreError when the binding no longer exists, is detached, or has
+ * moved to a different revision (switch / detach / account switch) — a result frozen
+ * at an old revision is recognizably stale and must be refused, never silently
+ * applied over the current binding.
+ */
+export async function assertBindingCurrent(
+  key: NativeSessionKey,
+  bindingUid: string,
+  revision: number,
+  opts: LocalOptions = {},
+): Promise<void> {
+  const root = resolveRoot(opts.root);
+  const fs = { ...defaultStoreFs, ...(opts.fs ?? {}) };
+  const store = await openStore(root, key.profile_id, { fs });
+  try {
+    const snap = await store.read();
+    const current = Object.values(snap.bindings).find((binding) => binding.binding_uid === bindingUid);
+    if (!current) {
+      throw new StoreError("unknown_binding", `no binding ${bindingUid} in profile ${key.profile_id}`);
+    }
+    if (current.state !== "bound" || current.revision !== revision) {
+      throw new StoreError(
+        "stale_binding",
+        `binding ${bindingUid} is ${current.state} at revision ${current.revision}; a result frozen at revision ${revision} cannot be applied`,
+      );
+    }
+  } finally {
+    await store.close();
+  }
+}
 
 function identityFromPayload(payload: Record<string, unknown>): Soul["identity"] {
   const identity = (payload.identity ?? {}) as Record<string, unknown>;
@@ -431,4 +501,44 @@ registerWriterCommand("export", async ({ root, request }) => {
   } finally {
     await store.close();
   }
+});
+
+/**
+ * §3 login association runs entirely inside one writer dispatch: owner association,
+ * cloud_device_uid update, account default, and the §3 `mode` (as `soul_sync_mode`)
+ * on the accounts index. The writer holds the lock across the whole handler, so the
+ * CLI never commits the snapshot itself.
+ */
+registerWriterCommand("login_associate", async ({ root, request }) => {
+  const p = request.payload;
+  const ownerId = String(p.owner_id ?? "");
+  const cloudDeviceUid = typeof p.cloud_device_uid === "string" ? p.cloud_device_uid : null;
+  const defaultSoulUid = typeof p.default_soul_uid === "string" && p.default_soul_uid ? p.default_soul_uid : null;
+  const mergeProfileId = typeof p.merge_profile_id === "string" && p.merge_profile_id ? p.merge_profile_id : undefined;
+  const mode = typeof p.mode === "string" && p.mode ? p.mode : "assets_only";
+
+  const profileId = await mergeLoginProfile(request.profile_id, ownerId, mergeProfileId, { root });
+
+  const store = await openStore(root, profileId);
+  try {
+    await store.transact((draft) => {
+      draft.owner_id = ownerId;
+      if (cloudDeviceUid !== null) draft.cloud_device_uid = cloudDeviceUid;
+    });
+  } finally {
+    await store.close();
+  }
+
+  if (defaultSoulUid) await setAccountDefaultSoul(profileId, defaultSoulUid, { root });
+
+  // Ruling 5: persist the §3 login `mode` so the host-id peek can gate on it.
+  const index = await readAccountsIndex(root);
+  index[ownerId] = {
+    profile_id: profileId,
+    default_soul_uid: defaultSoulUid ?? index[ownerId]?.default_soul_uid ?? null,
+    soul_sync_mode: mode,
+  };
+  await writeAccountsIndex(root, index);
+
+  return { profile_id: profileId, owner_id: ownerId, soul_sync_mode: mode };
 });

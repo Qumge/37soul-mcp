@@ -41,6 +41,7 @@ export const WRITER_COMMANDS = [
   "sync_once",
   "status",
   "export",
+  "login_associate",
 ] as const;
 
 export type WriterCommand = (typeof WRITER_COMMANDS)[number];
