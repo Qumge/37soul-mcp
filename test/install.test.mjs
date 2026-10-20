@@ -26,6 +26,7 @@ import { plistPath, renderPlist, systemdPath } from "../dist/service.js";
 import { installRuntime, runtimeDir, runtimeLauncher, binLinkPath, linkBin } from "../dist/install.js";
 import { loadConfig } from "../dist/agentd/state.js";
 import { runDoctor } from "../dist/doctor.js";
+import { codexHookConfigPath } from "../dist/adapters/codex.js";
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-install-"));
@@ -487,11 +488,76 @@ test("install: records an install manifest and defaults Codex to transcript fall
   assert.ok(kinds.includes("fragment"));
   assert.ok(kinds.includes("config"));
   assert.ok(kinds.includes("service"));
+  assert.ok(kinds.includes("codex_hooks"), "the managed Codex hook-config file is recorded in the manifest");
   const hooksEntry = manifest.entries.find((entry) => entry.kind === "hooks");
   assert.ok(hooksEntry.events.includes("SessionStart") && hooksEntry.events.includes("SessionEnd"));
+  const codexHooksEntry = manifest.entries.find((entry) => entry.kind === "codex_hooks");
+  assert.ok(codexHooksEntry.events.includes("SessionStart") && codexHooksEntry.events.includes("SessionEnd"));
 
   const config = await loadConfig(dataRoot(h.home));
   assert.deepEqual(config.transcript_fallback, ["codex"], "Codex hook needs trust; fallback until verified");
+  h.cleanup();
+});
+
+test("install: reports Codex hooks as installed-but-unverified and the AGENTS fragment carries no persona", async () => {
+  const h = harness();
+
+  const result = await install(h.deps, { agents: ["codex"] });
+  const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
+
+  // Five separate states; our own write never makes trust/events/injection green.
+  assert.equal(codexEntry.hook, false);
+  assert.deepEqual(codexEntry.report, {
+    installed: true,
+    trusted: false,
+    events_seen: false,
+    extraction_capable: false,
+    injection_capable: false,
+  });
+  assert.ok(
+    h.logs.some((line) => line.includes("codex") && line.includes("trusted=pending") && line.includes("injection=no")),
+    "the honest five-state line is logged",
+  );
+
+  // The "installed" state is a file we wrote; it must not look like a trust marker.
+  const hookConfig = JSON.parse(readFileSync(codexHookConfigPath(h.home), "utf8"));
+  assert.equal(hookConfig.managed_by, "37soul");
+  assert.equal(hookConfig.verified, false);
+  assert.deepEqual(hookConfig.events, ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"]);
+
+  // The global AGENTS fragment carries no Soul identity — persona lives only in the
+  // per-session ContextBundle.
+  const fragment = readFileSync(codexInstructionsPath(h.home), "utf8");
+  assert.ok(fragment.includes("37soul:begin"));
+  assert.ok(!fragment.includes("soul_uid"));
+  assert.ok(!fragment.includes("character:"));
+  assert.ok(!fragment.includes("greeting:"));
+  assert.ok(!fragment.includes("Growth"));
+
+  h.cleanup();
+});
+
+test("install: Codex trust flips green only from a Codex-authored marker, never our own write", async () => {
+  const h = harness();
+  // A trust marker Codex itself wrote (UNVERIFIED marker path, modeled as data —
+  // a section named 37soul-hooks with trusted = true in Codex's own config.toml).
+  writeFileSync(path.join(h.home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
+
+  const result = await install(h.deps, { agents: ["codex"] });
+  const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
+
+  assert.deepEqual(codexEntry.report, {
+    installed: true,
+    trusted: true,
+    events_seen: true,
+    extraction_capable: false,
+    injection_capable: true,
+  });
+  assert.ok(
+    h.logs.some((line) => line.includes("codex") && line.includes("trusted=yes") && line.includes("injection=yes")),
+    "trusted Codex hooks log green injection",
+  );
+
   h.cleanup();
 });
 

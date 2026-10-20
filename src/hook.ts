@@ -28,6 +28,7 @@ import { openStore } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
+import { inspectCodexTrust } from "./adapters/codex.js";
 
 export interface HookDeps {
   home: string;
@@ -241,7 +242,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
         await withBudget(deps.timeoutMs ?? 300, () =>
-          injectSoulContext(root, assets, deps.agentKind, sessionId, deps.stdout),
+          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout),
         ).catch(() => {});
         return 0;
       }
@@ -326,14 +327,22 @@ async function emitRuntimeEvent(
  * the writer/scheduler), the context is rendered by the shared selector, delivered
  * to stdout, and only then is the `injected` receipt recorded through the writer.
  * A missing binding, an empty render, or a missing writer never fails the session.
+ *
+ * Task 7 trust gate: Codex hooks execute only after the user trusts them, and no
+ * authorized live probe has confirmed our hook. A config write WE performed must
+ * never make injection green — an untrusted Codex hook skips injection entirely
+ * (no stdout, no injected receipt).
  */
 async function injectSoulContext(
   root: string,
+  home: string,
   assets: { profile_id: string; device_id: string },
   agentKind: string,
   sessionId: string,
   stdout: (text: string) => void,
 ): Promise<void> {
+  if (agentKind === "codex" && !inspectCodexTrust(home).trusted) return;
+
   const store = await openStore(root, assets.profile_id);
   try {
     const snap = await store.read();

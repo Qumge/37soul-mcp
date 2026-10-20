@@ -17,6 +17,7 @@ import {
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
 import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
+import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS } from "./adapters/codex.js";
 
 export const INSTRUCTIONS_FRAGMENT = `## 37Soul
 At the start of a session you may receive a "37Soul brief" (or find it in .37soul/brief.md
@@ -56,11 +57,26 @@ export interface InstallDeps {
   launcher?: string;
 }
 
+export interface CodexInstallReport {
+  /** We wrote our own hook subscription (a config write we performed). */
+  installed: boolean;
+  /** Codex-authored trust marker only; a write we performed never flips this. */
+  trusted: boolean;
+  /** Observed only alongside a Codex-authored trust marker. */
+  events_seen: boolean;
+  /** No verified native command (P0 matrix row stays 未验). */
+  extraction_capable: boolean;
+  /** Injection needs a trusted SessionStart hook. */
+  injection_capable: boolean;
+}
+
 export interface InstalledAgent {
   agentKind: string;
   hook: boolean;
   instructions: boolean;
   mcp: boolean;
+  /** Task 7: honest five-state report for runtimes with unverified hooks (codex). */
+  report?: CodexInstallReport;
 }
 
 export interface InstallResult {
@@ -91,7 +107,7 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
     files.push(claudeSettingsPath(deps.home), claudeInstructionsPath(deps.home));
   }
   if (agents.includes("codex")) {
-    files.push(codexInstructionsPath(deps.home));
+    files.push(codexInstructionsPath(deps.home), codexHookConfigPath(deps.home));
   }
   files.push(configPath(dataRoot(deps.home)), installManifestPath(deps.home));
 
@@ -453,7 +469,7 @@ export async function deviceLogin(
   }
 }
 
-async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook: boolean; instructions: boolean; mcp: boolean }> {
+async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook: boolean; instructions: boolean; mcp: boolean; report?: CodexInstallReport }> {
   const settings = claudeSettingsPath(deps.home);
   await editJsonFile(settings, (document) => {
     document.hooks = document.hooks ?? {};
@@ -504,12 +520,21 @@ async function configureClaude(deps: InstallDeps, token: string): Promise<{ hook
   return { hook: true, instructions: instructions.changed || true, mcp };
 }
 
-async function configureCodex(deps: InstallDeps, token: string): Promise<{ hook: boolean; instructions: boolean; mcp: boolean }> {
+async function configureCodex(
+  deps: InstallDeps,
+  token: string,
+): Promise<{ hook: boolean; instructions: boolean; mcp: boolean; report?: CodexInstallReport }> {
   // Codex 选 B 档（实测：hook 需要 trust 才执行，未端到端验证；设计 §6.4.1）：
   // 全局指令片段 + 一个 **stdio MCP server**。审查修复 2：实测 `codex mcp add --env`
   // 会把 token 直接写进 config.toml（`[mcp_servers.37soul.env]`），不需要用户再跑
   // `codex mcp login` —— 安装器用刚发好的那枚 token 一次写完，全程无感。
+  //
+  // Task 7：用真实的 hook/trust 面替代旧的「hook:false 就是没事」。我们写自己的
+  // 订阅（installed）并检查 Codex 自己的 config 里的信任标记（trusted）——我们
+  // 自己写的配置永远不能把 trusted/events/injection 变成绿。
   await editManagedFragment(codexInstructionsPath(deps.home), INSTRUCTIONS_FRAGMENT);
+  writeCodexHookConfig(deps.home);
+  const trust = inspectCodexTrust(deps.home);
 
   let mcp = false;
   if (deps.launcher) {
@@ -540,7 +565,18 @@ async function configureCodex(deps: InstallDeps, token: string): Promise<{ hook:
     }
   }
 
-  return { hook: false, instructions: true, mcp };
+  return {
+    hook: false, // legacy: no trusted/active hook has been observed
+    instructions: true,
+    mcp,
+    report: {
+      installed: true, // our own hook-config write
+      trusted: trust.trusted, // Codex-authored marker only
+      events_seen: trust.events_seen,
+      extraction_capable: false, // no verified native command (P0 未验)
+      injection_capable: trust.trusted, // injection needs a trusted SessionStart hook
+    },
+  };
 }
 
 export async function install(
@@ -598,8 +634,23 @@ export async function install(
     const token = tokens[agentKind];
     const configured = agentKind === "claude-code" ? await configureClaude(runtimeDeps, token) : await configureCodex(runtimeDeps, token);
     config.mcp = { ...(config.mcp ?? {}), [agentKind]: configured.mcp };
-    results.push({ agentKind, hook: configured.hook, instructions: configured.instructions, mcp: configured.mcp });
-    log(`  ${agentKind}: hook=${configured.hook ? "yes" : "no (transcript fallback)"} instructions=yes mcp=${configured.mcp ? "yes" : "no"}`);
+    results.push({
+      agentKind,
+      hook: configured.hook,
+      instructions: configured.instructions,
+      mcp: configured.mcp,
+      ...(configured.report ? { report: configured.report } : {}),
+    });
+    if (configured.report) {
+      const r = configured.report;
+      log(
+        `  ${agentKind}: hook=no (untrusted) instructions=yes mcp=${configured.mcp ? "yes" : "no"} ` +
+          `installed=yes trusted=${r.trusted ? "yes" : "pending"} events=${r.events_seen ? "yes" : "no"} ` +
+          `extraction=${r.extraction_capable ? "yes" : "no"} injection=${r.injection_capable ? "yes" : "no"}`,
+      );
+    } else {
+      log(`  ${agentKind}: hook=${configured.hook ? "yes" : "no (transcript fallback)"} instructions=yes mcp=${configured.mcp ? "yes" : "no"}`);
+    }
   }
   await saveConfig(root, config);
 
@@ -639,6 +690,7 @@ export async function install(
   }
   if (selected.includes("codex")) {
     entries.push({ agent: "codex", file: codexInstructionsPath(deps.home), kind: "fragment" });
+    entries.push({ agent: "codex", file: codexHookConfigPath(deps.home), kind: "codex_hooks", events: CODEX_HOOK_EVENTS.map((entry) => entry.event) });
     entries.push({ agent: "codex", file: path.join(deps.home, ".codex", "config.toml"), kind: "mcp" });
   }
   entries.push({ file: configPath(root), kind: "config" });
@@ -691,6 +743,9 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
     const result = await removeManagedFragment(file).catch(() => ({ changed: false }));
     if (result.changed) removed.push(path.relative(deps.home, file));
   }
+
+  // 2b. Codex hook 订阅配置（我们管理的文件；真实 Codex hook 格式未验证）。
+  if (removeCodexHookConfig(deps.home)) removed.push(path.relative(deps.home, codexHookConfigPath(deps.home)));
 
   // 3. MCP 条目（best effort）。
   for (const argv of [

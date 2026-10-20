@@ -16,6 +16,7 @@
 import { probeRuntime } from "../dist/adapters/probe.js";
 import { createFakeAdapter, RUNTIME_KINDS } from "../test/helpers/fake-runtime.mjs";
 import { createClaudeCodeAdapter } from "../dist/adapters/claude-code.js";
+import { createCodexAdapter } from "../dist/adapters/codex.js";
 
 function parseArgs(argv) {
   const args = { live: false, offline: false, runtimes: ["all"] };
@@ -73,9 +74,33 @@ function claudeCodeOfflineDeps() {
   };
 }
 
+/** The real Codex adapter's offline deps: a minimal completed rollout turn fed
+ *  through readSource (the adapter still resolves its own completed-turn refs) and
+ *  a stub model that returns no proposals. No trust marker exists, so `probe()` and
+ *  `inject()` stay honest (all-false / not delivered). Nothing is live/native. */
+function codexOfflineDeps() {
+  const rollout = [
+    '{"timestamp":"2026-10-17T03:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"01a13000-0000-7000-8000-000000000001","cwd":"/tmp/37soul-probe-offline"}}',
+    '{"timestamp":"2026-10-17T03:00:00.100Z","ordinal":1,"type":"turn_context","payload":{"turn_id":"turn-1"}}',
+    '{"timestamp":"2026-10-17T03:00:01.000Z","ordinal":2,"type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"offline probe turn"}]}}',
+    '{"timestamp":"2026-10-17T03:00:02.000Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"offline probe answer"}]}}',
+  ].join("\n");
+  return {
+    home: "/tmp/37soul-probe-offline",
+    readSource: async () => rollout,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  };
+}
+
 for (const runtime_kind of wanted) {
   const isClaudeCode = runtime_kind === "claude-code";
-  const adapter = isClaudeCode ? createClaudeCodeAdapter(claudeCodeOfflineDeps()) : createFakeAdapter(runtime_kind);
+  const isCodex = runtime_kind === "codex";
+  const adapter = isClaudeCode
+    ? createClaudeCodeAdapter(claudeCodeOfflineDeps())
+    : isCodex
+      ? createCodexAdapter(codexOfflineDeps())
+      : createFakeAdapter(runtime_kind);
   const probe = await probeRuntime(adapter);
 
   // Prove bounded source scope, structured result and local receipt offline.
@@ -102,7 +127,7 @@ for (const runtime_kind of wanted) {
 
   report.push({
     runtime_kind,
-    source: isClaudeCode ? "claude-code-offline" : "offline-fake",
+    source: isClaudeCode ? "claude-code-offline" : isCodex ? "codex-offline" : "offline-fake",
     version: probe.version,
     supported_version: null, // real supported versions are only registered after authorized live probes pass
     probe,

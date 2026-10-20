@@ -17,6 +17,34 @@ import type { ParsedEvent, SessionMetadata, TranscriptParser } from "../types.js
 import { MAX_EVENT_TEXT, MAX_TOOL_SUMMARY, toolEvent } from "./claude-code.js";
 
 const INJECTED_CONTEXT = /^\s*<(environment_context|permissions instructions|user_instructions|workspace_context)\b/;
+
+/** Read the native session id from a session_meta payload (field `id`, not `session_id`). */
+export function codexSessionIdFromMeta(payload: Record<string, any> | null | undefined): string | null {
+  if (payload && typeof payload.id === "string" && payload.id) return payload.id;
+  return null;
+}
+
+/**
+ * The native session id a whole rollout records (session_meta.payload.id). This is
+ * the ONLY place a rollout's session identity is read; the adapter reuses it so a
+ * rollout file path/directory is never mistaken for session inheritance.
+ */
+export function codexNativeSessionId(jsonl: string): string | null {
+  for (const line of jsonl.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const record = JSON.parse(trimmed) as Record<string, any> | null;
+      if (record?.type === "session_meta") {
+        const id = codexSessionIdFromMeta(record.payload);
+        if (id) return id;
+      }
+    } catch {
+      // torn line: skip
+    }
+  }
+  return null;
+}
 const CMD_IN_SCRIPT = /cmd\s*:\s*"((?:[^"\\]|\\.)*)"/;
 const PATCH_TARGET = /^\*{3}\s(?:Update|Add|Delete) File:\s*(.+)$/m;
 const SUMMARY_ARG_KEYS = ["cmd", "command", "file_path", "path", "query", "description"];
@@ -31,8 +59,9 @@ export function createCodexParser(opts: { externalId?: string } = {}): Transcrip
     const r = record as Record<string, any>;
 
     if (r.type === "session_meta") {
-      if (!nativeExternalId && typeof r.payload?.id === "string" && r.payload.id) {
-        meta.external_id = r.payload.id;
+      const nativeId = codexSessionIdFromMeta(r.payload);
+      if (!nativeExternalId && nativeId) {
+        meta.external_id = nativeId;
         nativeExternalId = true;
       }
       if (typeof r.payload?.cwd === "string" && r.payload.cwd) meta.cwd = r.payload.cwd;
