@@ -1,0 +1,1639 @@
+{
+  "protocol": "soul-assets/v1",
+  "purpose": "离线开发契约样例，不是真实账号、凭据或已实现接口",
+  "test_rules": [
+    "所有UUID为固定测试值；测试中用户42映射等可由fixture loader绑定fabricator，不调用线上。",
+    "local_only_inputs只用于工具侧提炼、隐私或网站本地处理测试，严禁将其作为HTTP DTO。",
+    "response_assertions只列需要断言的字段；真实响应完整对象形状按共同协议。",
+    "测试状态隔离；除scenario_steps显式列出的序列外，每个case从给定seed重新开始。",
+    "模型、Dodo、R2与Pusher使用stub，不运行真实模型或支付。",
+    "wire_responses为完整冻结的响应样例；applied_revisions确认原操作，objects为当前对象快照。",
+    "seed.assets与context_cases.input是DB/本地测试状态，可保留旧失效内容以验证排除；不得直接发HTTP。wire_responses中的失效对象只含协议固定墓碑字段。"
+  ],
+  "ids": {
+    "soul_uid": "10000000-0000-4000-8000-000000000001",
+    "binding_uid": "20000000-0000-4000-8000-000000000001",
+    "session_ref": "30000000-0000-4000-8000-000000000001",
+    "cloud_device_uid": "50000000-0000-4000-8000-000000000001",
+    "owner_id": "123"
+  },
+  "seed": {
+    "soul": {
+      "soul_uid": "10000000-0000-4000-8000-000000000001",
+      "legacy_host_id": 42,
+      "identity_revision": 1,
+      "identity": {
+        "name": "Growth",
+        "description": "长期合作伙伴",
+        "character": "先给证据与假设。",
+        "greeting": ""
+      },
+      "state": "active"
+    },
+    "binding": {
+      "binding_uid": "20000000-0000-4000-8000-000000000001",
+      "session_ref": "30000000-0000-4000-8000-000000000001",
+      "runtime_kind": "hermes",
+      "soul_uid": "10000000-0000-4000-8000-000000000001",
+      "revision": 1,
+      "state": "bound"
+    },
+    "assets": [
+      {
+        "asset_uid": "40000000-0000-4000-8000-000000000001",
+        "soul_uid": "10000000-0000-4000-8000-000000000001",
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "explicit_user_statement",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "state": "active",
+        "revision": 1,
+        "supersedes_uid": null,
+        "pinned": false,
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        },
+        "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+      },
+      {
+        "asset_uid": "40000000-0000-4000-8000-000000000002",
+        "soul_uid": "10000000-0000-4000-8000-000000000001",
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "默认使用中文与我沟通。",
+        "applicability": "所有交流",
+        "tags": [
+          "中文"
+        ],
+        "evidence": "explicit_user_statement",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "state": "active",
+        "revision": 3,
+        "supersedes_uid": null,
+        "pinned": false,
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        },
+        "content_digest": "565d3be095d0920f94ae6e4acc37e51466c8ecbe633439a616d81be93221ec11"
+      },
+      {
+        "asset_uid": "40000000-0000-4000-8000-000000000003",
+        "soul_uid": "10000000-0000-4000-8000-000000000001",
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "用户可能更看重短期收入。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "inference",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "state": "candidate",
+        "revision": 1,
+        "supersedes_uid": null,
+        "pinned": false,
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        },
+        "content_digest": "bfd51e4119133d37a1744413e87e72281a2165ab9fc9dd4e26a2512ebc29ad55"
+      },
+      {
+        "asset_uid": "40000000-0000-4000-8000-000000000004",
+        "soul_uid": "10000000-0000-4000-8000-000000000001",
+        "kind": "experience",
+        "trait": "fact",
+        "content": "先核对客户的真实付费与复购，再判断是否值得扩量。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "inference",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "state": "candidate",
+        "revision": 1,
+        "supersedes_uid": null,
+        "pinned": false,
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        },
+        "content_digest": "56a1b1ff816deed1d03b3ef2fe93d68527ee3334ad88b88e44ca26975b8e4aa9"
+      },
+      {
+        "asset_uid": "40000000-0000-4000-8000-000000000005",
+        "soul_uid": "10000000-0000-4000-8000-000000000001",
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "已失效的测试偏好",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "explicit_user_statement",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "state": "deleted",
+        "revision": 2,
+        "supersedes_uid": null,
+        "pinned": false,
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        },
+        "content_digest": "da7de57fb60fa268c6aef1820328fd55ada3c76ae6ae8db25772d2f999509924",
+        "restored_by_uid": null
+      }
+    ],
+    "consent": {
+      "cloud_device_uid": "50000000-0000-4000-8000-000000000001",
+      "soul_uid": "10000000-0000-4000-8000-000000000001",
+      "revision": 1,
+      "categories": [
+        "identity",
+        "relationship",
+        "experience"
+      ],
+      "enabled": true
+    }
+  },
+  "requests": {
+    "register_soul": {
+      "soul_uid": "10000000-0000-4000-8000-000000000001",
+      "identity": {
+        "name": "Growth",
+        "description": "长期合作伙伴",
+        "character": "先给证据与假设。",
+        "greeting": ""
+      },
+      "consent_categories": [
+        "identity",
+        "relationship",
+        "experience"
+      ]
+    },
+    "enable_consent": {
+      "base_revision": 0,
+      "categories": [
+        "identity",
+        "relationship",
+        "experience"
+      ],
+      "enabled": true
+    },
+    "bind_session": {
+      "base_revision": 0,
+      "session_ref": "30000000-0000-4000-8000-000000000001",
+      "runtime_kind": "hermes",
+      "soul_uid": "10000000-0000-4000-8000-000000000001",
+      "state": "bound"
+    },
+    "push_preference": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            }
+          }
+        }
+      ]
+    },
+    "push_same_retry": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            }
+          }
+        }
+      ]
+    },
+    "push_same_id_different_body": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "同一幂等键的不同正文。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            }
+          }
+        }
+      ]
+    },
+    "push_stale_binding": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000002",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000006",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            }
+          }
+        }
+      ]
+    },
+    "delete_preference": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000003",
+          "operation": "delete",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 1,
+          "actor": "owner",
+          "binding_uid": null,
+          "binding_revision": null,
+          "payload": {}
+        }
+      ]
+    },
+    "edit_preference": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000004",
+          "operation": "review",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 1,
+          "actor": "owner",
+          "binding_uid": null,
+          "binding_revision": null,
+          "payload": {
+            "action": "edit",
+            "replacement_uid": "40000000-0000-4000-8000-000000000007",
+            "content": "分析客户时，先核对真实付费及复购证据。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ]
+          }
+        }
+      ]
+    },
+    "reject_raw_envelope": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            }
+          }
+        }
+      ],
+      "events": [
+        {
+          "text": "RAW_ONLY_37SOUL_20261020_DO_NOT_UPLOAD"
+        }
+      ]
+    },
+    "reject_nested_raw_source": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "operation": "propose",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 0,
+          "actor": "model",
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "binding_revision": 1,
+          "payload": {
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z",
+              "excerpt": "RAW_ONLY_37SOUL_20261020_DO_NOT_UPLOAD"
+            }
+          }
+        }
+      ]
+    },
+    "restore_preference": {
+      "protocol": "soul-assets/v1",
+      "changes": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000005",
+          "operation": "review",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "asset_uid": "40000000-0000-4000-8000-000000000001",
+          "base_revision": 2,
+          "actor": "owner",
+          "binding_uid": null,
+          "binding_revision": null,
+          "payload": {
+            "action": "edit",
+            "replacement_uid": "40000000-0000-4000-8000-000000000008",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "scenario_steps": [
+    {
+      "name": "idempotency",
+      "start_with": "valid soul, consent and binding; no asset_uid=40000000-0000-4000-8000-000000000001",
+      "steps": [
+        {
+          "request": "push_preference",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "accepted",
+            "asset_state": "active",
+            "asset_revision": 1,
+            "new_asset_count": 1
+          }
+        },
+        {
+          "request": "push_same_retry",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "duplicate",
+            "asset_revision": 1,
+            "new_asset_count": 0,
+            "new_event_count": 0
+          }
+        },
+        {
+          "request": "push_same_id_different_body",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "conflict",
+            "error_code": "idempotency_mismatch",
+            "new_asset_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "stale_binding",
+      "start_with": "valid soul/consent; binding revision=2 state=detached",
+      "steps": [
+        {
+          "request": "push_stale_binding",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "rejected",
+            "error_code": "binding_stale",
+            "new_asset_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "delete_no_resurrection",
+      "start_with": "valid soul/consent/binding; preference active revision=1",
+      "steps": [
+        {
+          "request": "delete_preference",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "accepted",
+            "asset_state": "deleted",
+            "asset_revision": 2
+          }
+        },
+        {
+          "local_action": "submit a new propose with same content digest, a new change_id and a new asset_uid",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "rejected",
+            "error_code": "content_dismissed",
+            "new_asset_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "owner_edit",
+      "start_with": "preference active revision=1",
+      "steps": [
+        {
+          "request": "edit_preference",
+          "response_assertions": {
+            "http_status": 200,
+            "result_status": "accepted",
+            "old_state": "superseded",
+            "old_revision": 2,
+            "replacement_state": "active",
+            "replacement_revision": 1,
+            "replacement_supersedes_uid": "40000000-0000-4000-8000-000000000001"
+          }
+        }
+      ]
+    },
+    {
+      "name": "raw_envelope",
+      "start_with": "valid credentials",
+      "steps": [
+        {
+          "request": "reject_raw_envelope",
+          "response_assertions": {
+            "http_status": 422,
+            "error_code": "invalid_payload",
+            "new_asset_count": 0,
+            "new_chat_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "accepted_delete_original_retry",
+      "start_with": "valid credentials, consent, bound session; no first preference asset",
+      "steps": [
+        {
+          "request": "push_preference",
+          "response_assertions": {
+            "wire_response": "accepted",
+            "http_status": 200
+          }
+        },
+        {
+          "request": "delete_preference",
+          "response_assertions": {
+            "http_status": 200,
+            "asset_revision": 2,
+            "asset_state": "deleted"
+          }
+        },
+        {
+          "request": "push_same_retry",
+          "response_assertions": {
+            "wire_response": "duplicate_after_delete",
+            "http_status": 200,
+            "new_asset_count": 0,
+            "new_event_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "new_device_offline_tombstone",
+      "start_with": "empty local cache for same owner",
+      "steps": [
+        {
+          "local_action": "apply wire_responses.pull_tombstone and cursor in one snapshot",
+          "response_assertions": {
+            "digest_tombstone_present": true
+          }
+        },
+        {
+          "local_action": "go offline and extract the same kind/trait/content under another source event",
+          "response_assertions": {
+            "active_asset_count": 0,
+            "automatic_outbox_item_count": 0,
+            "content_dismissed": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "first_login_binding_history",
+      "start_with": "anonymous profile; local binding create revision=1 then detach revision=2; model result frozen at revision=1",
+      "steps": [
+        {
+          "local_action": "claim profile for owner123 without changing local Soul UID; consent/register selected Soul",
+          "response_assertions": {
+            "soul_uid_unchanged": true
+          }
+        },
+        {
+          "local_action": "replay binding base0 bound then base1 detached in order",
+          "response_assertions": {
+            "cloud_binding_revision": 2,
+            "cloud_binding_state": "detached"
+          }
+        },
+        {
+          "local_action": "handle model result frozen at revision1",
+          "response_assertions": {
+            "quarantine_count": 1,
+            "active_asset_count": 0,
+            "automatic_outbox_item_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "consent_control_event",
+      "start_with": "relationship downloaded/active; relationship consent currently true",
+      "steps": [
+        {
+          "local_action": "apply wire_responses.consent_revoked despite asset-category filtering",
+          "response_assertions": {
+            "cloud_cached_active_count": 0,
+            "local_originals_preserved": true,
+            "authorized_outbox_send_count": 0,
+            "pull_replay_from": "0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "nested_raw_source",
+      "start_with": "valid credentials, binding, consent and otherwise valid propose",
+      "steps": [
+        {
+          "request": "reject_nested_raw_source",
+          "response_assertions": {
+            "http_status": 422,
+            "error_code": "invalid_payload",
+            "new_asset_count": 0,
+            "new_chat_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "explicit_restore_survives_replay",
+      "start_with": "old preference deleted revision2 and digest tombstone known",
+      "steps": [
+        {
+          "request": "restore_preference",
+          "response_assertions": {
+            "http_status": 200,
+            "wire_response": "restored"
+          }
+        },
+        {
+          "local_action": "apply pull_restored then delayed old pull_tombstone revision2, or replay from cursor0",
+          "response_assertions": {
+            "tombstone_revision": 3,
+            "restored_by_uid": "40000000-0000-4000-8000-000000000008",
+            "context_manifest_contains": "40000000-0000-4000-8000-000000000008",
+            "original_uid_active": false
+          }
+        },
+        {
+          "local_action": "attempt approve on deleted/rejected/superseded UID without edit replacement",
+          "response_assertions": {
+            "result_status": "rejected",
+            "error_code": "invalid_state_transition"
+          }
+        }
+      ]
+    },
+    {
+      "name": "consent_cursor_reset_once",
+      "start_with": "local consent revision1, pull cursor=sc1-old-valid-for-device",
+      "steps": [
+        {
+          "local_action": "use old cursor after server changed consent to revision2",
+          "response_assertions": {
+            "cursor_accepted": true,
+            "consent_control_delivered": true
+          }
+        },
+        {
+          "local_action": "apply new consent2 and current page next_cursor atomically",
+          "response_assertions": {
+            "stored_pull_cursor": "0"
+          }
+        },
+        {
+          "local_action": "replay consent2 from0 again",
+          "response_assertions": {
+            "uses_page_next_cursor": true,
+            "resets_cursor_again": false
+          }
+        }
+      ]
+    }
+  ],
+  "classification_cases": [
+    {
+      "name": "explicit_durable_preference",
+      "local_only_inputs": {
+        "source_message": "以后分析客户，都先给真实付费证据，再讨论渠道。"
+      },
+      "proposed_payload": {
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "explicit_user_statement",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        }
+      },
+      "expected": {
+        "asset_state": "active",
+        "verification": "unverified"
+      }
+    },
+    {
+      "name": "one_turn_instruction",
+      "local_only_inputs": {
+        "source_message": "这次回答短一点。"
+      },
+      "expected": {
+        "proposal_count": 0
+      }
+    },
+    {
+      "name": "inferred_preference",
+      "proposed_payload": {
+        "kind": "relationship",
+        "trait": "preference",
+        "content": "用户可能更看重短期收入。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "inference",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        }
+      },
+      "expected": {
+        "asset_state": "candidate"
+      }
+    },
+    {
+      "name": "unverified_method",
+      "proposed_payload": {
+        "kind": "experience",
+        "trait": "fact",
+        "content": "先核对客户的真实付费与复购，再判断是否值得扩量。",
+        "applicability": "客户分析与营销方案",
+        "tags": [
+          "客户分析",
+          "营销"
+        ],
+        "evidence": "inference",
+        "verification": "unverified",
+        "sensitivity": "normal",
+        "source": {
+          "runtime_kind": "hermes",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "event_ref": "turn-opaque-001",
+          "occurred_at": "2026-10-20T04:00:00Z"
+        }
+      },
+      "expected": {
+        "asset_state": "candidate",
+        "verification": "unverified"
+      }
+    }
+  ],
+  "context_cases": [
+    {
+      "name": "active_only_and_relevance",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "description": "长期合作伙伴",
+            "character": "先给证据与假设。",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "assets": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000005",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "已失效的测试偏好",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "deleted",
+            "revision": 2,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "da7de57fb60fa268c6aef1820328fd55ada3c76ae6ae8db25772d2f999509924"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000004",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "experience",
+            "trait": "fact",
+            "content": "先核对客户的真实付费与复购，再判断是否值得扩量。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "inference",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "candidate",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "56a1b1ff816deed1d03b3ef2fe93d68527ee3334ad88b88e44ca26975b8e4aa9"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000002",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "默认使用中文与我沟通。",
+            "applicability": "所有交流",
+            "tags": [
+              "中文"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 3,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "565d3be095d0920f94ae6e4acc37e51466c8ecbe633439a616d81be93221ec11"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000003",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "用户可能更看重短期收入。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "inference",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "candidate",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "bfd51e4119133d37a1744413e87e72281a2165ab9fc9dd4e26a2512ebc29ad55"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        ],
+        "task_hint": "客户分析",
+        "budget_bytes": 16384
+      },
+      "expected": {
+        "manifest": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "revision": 1
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000002",
+            "revision": 3
+          }
+        ],
+        "truncated": false,
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"description\":\"长期合作伙伴\",\"character\":\"先给证据与假设。\",\"greeting\":\"\"}\n[Relationship]\n{\"asset_uid\":\"40000000-0000-4000-8000-000000000001\",\"revision\":1,\"content\":\"分析客户时，先给真实付费证据，再讨论渠道。\",\"applicability\":\"客户分析与营销方案\"}\n{\"asset_uid\":\"40000000-0000-4000-8000-000000000002\",\"revision\":3,\"content\":\"默认使用中文与我沟通。\",\"applicability\":\"所有交流\"}\n",
+        "rendered_utf8_bytes": 459,
+        "rendered_sha256": "4783a4f8797d1e4487bec240fd1e9d78a70d33fdfe3079a13f13d140f7d4fa97",
+        "rendered_utf8_bytes_max": 16384
+      }
+    },
+    {
+      "name": "unicode_budget",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "description": "长期合作伙伴",
+            "character": "证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据证据",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "assets": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        ],
+        "task_hint": "客户分析",
+        "budget_bytes": 128
+      },
+      "expected": {
+        "manifest": [],
+        "truncated": true,
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"description\":\"长期合作伙伴\",\"character\":\"证据证据证据证据证据证据证\",\"greeting\":\"\"}\n",
+        "rendered_utf8_bytes": 128,
+        "rendered_sha256": "abfe4beca56fa177f2cb7d018717cb6f15de5112c218295ea7f3b113e6967ce8",
+        "rendered_utf8_bytes_max": 128
+      }
+    },
+    {
+      "name": "exact_asset_boundary",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "description": "长期合作伙伴",
+            "character": "先给证据与假设。",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "assets": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000005",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "已失效的测试偏好",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "deleted",
+            "revision": 2,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "da7de57fb60fa268c6aef1820328fd55ada3c76ae6ae8db25772d2f999509924"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000004",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "experience",
+            "trait": "fact",
+            "content": "先核对客户的真实付费与复购，再判断是否值得扩量。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "inference",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "candidate",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "56a1b1ff816deed1d03b3ef2fe93d68527ee3334ad88b88e44ca26975b8e4aa9"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000002",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "默认使用中文与我沟通。",
+            "applicability": "所有交流",
+            "tags": [
+              "中文"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 3,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "565d3be095d0920f94ae6e4acc37e51466c8ecbe633439a616d81be93221ec11"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000003",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "用户可能更看重短期收入。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "inference",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "candidate",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "bfd51e4119133d37a1744413e87e72281a2165ab9fc9dd4e26a2512ebc29ad55"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "hermes",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "turn-opaque-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        ],
+        "task_hint": "客户分析",
+        "budget_bytes": 316
+      },
+      "expected": {
+        "manifest": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "revision": 1
+          }
+        ],
+        "truncated": true,
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"description\":\"长期合作伙伴\",\"character\":\"先给证据与假设。\",\"greeting\":\"\"}\n[Relationship]\n{\"asset_uid\":\"40000000-0000-4000-8000-000000000001\",\"revision\":1,\"content\":\"分析客户时，先给真实付费证据，再讨论渠道。\",\"applicability\":\"客户分析与营销方案\"}\n",
+        "rendered_utf8_bytes": 316,
+        "rendered_sha256": "86c9046f6079cf759a38335d18d9ab9e95f3c0d12c5c6308202499aaec7b931e",
+        "rendered_utf8_bytes_max": 316
+      }
+    },
+    {
+      "name": "digest_tombstone_blocks_local_auto_active",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "description": "长期合作伙伴",
+            "character": "先给证据与假设。",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "assets": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "state": "deleted",
+            "revision": 2,
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+            "restored_by_uid": null
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000008",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": null,
+            "pinned": false,
+            "source": {
+              "runtime_kind": "web",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "owner-restoration-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        ],
+        "task_hint": "客户分析",
+        "budget_bytes": 16384
+      },
+      "expected": {
+        "manifest": [],
+        "truncated": false,
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"description\":\"长期合作伙伴\",\"character\":\"先给证据与假设。\",\"greeting\":\"\"}\n",
+        "rendered_utf8_bytes": 113,
+        "rendered_sha256": "b45ee03fdf83f6fb201839c8cfcb2c929c57d88c0a8488e75dff6370d6ba7437",
+        "rendered_utf8_bytes_max": 16384
+      }
+    },
+    {
+      "name": "explicit_restore_overrides_current_tombstones",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "description": "长期合作伙伴",
+            "character": "先给证据与假设。",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "assets": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "state": "deleted",
+            "revision": 3,
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+            "restored_by_uid": "40000000-0000-4000-8000-000000000008"
+          },
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000008",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": "40000000-0000-4000-8000-000000000001",
+            "pinned": false,
+            "source": {
+              "runtime_kind": "web",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "owner-restoration-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        ],
+        "task_hint": "客户分析",
+        "budget_bytes": 16384
+      },
+      "expected": {
+        "manifest": [
+          {
+            "asset_uid": "40000000-0000-4000-8000-000000000008",
+            "revision": 1
+          }
+        ],
+        "truncated": false,
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"description\":\"长期合作伙伴\",\"character\":\"先给证据与假设。\",\"greeting\":\"\"}\n[Relationship]\n{\"asset_uid\":\"40000000-0000-4000-8000-000000000008\",\"revision\":1,\"content\":\"分析客户时，先给真实付费证据，再讨论渠道。\",\"applicability\":\"客户分析与营销方案\"}\n",
+        "rendered_utf8_bytes": 316,
+        "rendered_sha256": "901c7bebe93986dfc25ecdebdd024d6604f39918b3d62e026f74c24653b74fc8",
+        "rendered_utf8_bytes_max": 16384
+      }
+    }
+  ],
+  "privacy_fixture": {
+    "local_only_inputs": {
+      "source_message": "以后分析客户先看真实付费证据。 RAW_ONLY_37SOUL_20261020_DO_NOT_UPLOAD",
+      "tool_output": "sk_test_37SOUL_OFFLINE_FIXTURE_ONLY",
+      "cwd": "/private/local-only-test-project"
+    },
+    "expected_proposal_content": "分析客户时，先给真实付费证据，再讨论渠道。",
+    "forbidden_in_37soul_requests": [
+      "RAW_ONLY_37SOUL_20261020_DO_NOT_UPLOAD",
+      "sk_test_37SOUL_OFFLINE_FIXTURE_ONLY",
+      "/private/local-only-test-project"
+    ]
+  },
+  "required_sequence_assertions": [
+    "push acknowledgement never advances pull_cursor",
+    "pull objects and next_cursor commit in the same local snapshot",
+    "account switch rejects an old extraction result before store or network write",
+    "revoked credentials reject even a previously accepted idempotency key",
+    "permission-filtered empty pull page with has_more=true is followed until complete",
+    "receipt body has rendered_sha256 and manifest, never rendered_text",
+    "permanent rejected/conflict items leave sendable outbox and enter quarantine",
+    "consent revocation control events bypass asset-category filtering and clear only cloud cache",
+    "a downloaded tombstone suppresses an offline same-content proposal before injection",
+    "privacy probe must also observe the safe preference arriving, so blocking every request is not a pass",
+    "current tombstone restored_by_uid permits only its explicitly restored active UID",
+    "older tombstone replay cannot override newer restored_by_uid metadata",
+    "consent revision resets cursor0 once, then a repeat uses the page next_cursor"
+  ],
+  "wire_responses": {
+    "accepted": {
+      "protocol": "soul-assets/v1",
+      "results": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "status": "accepted",
+          "applied_revisions": [
+            {
+              "object_uid": "40000000-0000-4000-8000-000000000001",
+              "revision": 1
+            }
+          ],
+          "objects": [
+            {
+              "object_type": "asset",
+              "object": {
+                "asset_uid": "40000000-0000-4000-8000-000000000001",
+                "soul_uid": "10000000-0000-4000-8000-000000000001",
+                "kind": "relationship",
+                "trait": "preference",
+                "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+                "applicability": "客户分析与营销方案",
+                "tags": [
+                  "客户分析",
+                  "营销"
+                ],
+                "evidence": "explicit_user_statement",
+                "verification": "unverified",
+                "sensitivity": "normal",
+                "state": "active",
+                "revision": 1,
+                "supersedes_uid": null,
+                "pinned": false,
+                "source": {
+                  "runtime_kind": "hermes",
+                  "session_ref": "30000000-0000-4000-8000-000000000001",
+                  "event_ref": "turn-opaque-001",
+                  "occurred_at": "2026-10-20T04:00:00Z"
+                },
+                "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+              }
+            }
+          ],
+          "error": null
+        }
+      ]
+    },
+    "duplicate_after_delete": {
+      "protocol": "soul-assets/v1",
+      "results": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000001",
+          "status": "duplicate",
+          "applied_revisions": [
+            {
+              "object_uid": "40000000-0000-4000-8000-000000000001",
+              "revision": 1
+            }
+          ],
+          "objects": [
+            {
+              "object_type": "asset",
+              "object": {
+                "asset_uid": "40000000-0000-4000-8000-000000000001",
+                "soul_uid": "10000000-0000-4000-8000-000000000001",
+                "kind": "relationship",
+                "trait": "preference",
+                "state": "deleted",
+                "revision": 2,
+                "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+                "restored_by_uid": null
+              }
+            }
+          ],
+          "error": null
+        }
+      ]
+    },
+    "pull_tombstone": {
+      "protocol": "soul-assets/v1",
+      "events": [
+        {
+          "event_uid": "70000000-0000-4000-8000-000000000001",
+          "object_type": "asset",
+          "object": {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "state": "deleted",
+            "revision": 2,
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+            "restored_by_uid": null
+          }
+        }
+      ],
+      "next_cursor": "sc1-opaque-example",
+      "has_more": false
+    },
+    "consent_revoked": {
+      "protocol": "soul-assets/v1",
+      "events": [
+        {
+          "event_uid": "70000000-0000-4000-8000-000000000002",
+          "object_type": "consent",
+          "object": {
+            "cloud_device_uid": "50000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "revision": 2,
+            "categories": [],
+            "enabled": false
+          }
+        }
+      ],
+      "next_cursor": "sc1-opaque-revocation-example",
+      "has_more": false
+    },
+    "restored": {
+      "protocol": "soul-assets/v1",
+      "results": [
+        {
+          "change_id": "60000000-0000-4000-8000-000000000005",
+          "status": "accepted",
+          "applied_revisions": [
+            {
+              "object_uid": "40000000-0000-4000-8000-000000000001",
+              "revision": 3
+            },
+            {
+              "object_uid": "40000000-0000-4000-8000-000000000008",
+              "revision": 1
+            }
+          ],
+          "objects": [
+            {
+              "object_type": "asset",
+              "object": {
+                "asset_uid": "40000000-0000-4000-8000-000000000001",
+                "soul_uid": "10000000-0000-4000-8000-000000000001",
+                "kind": "relationship",
+                "trait": "preference",
+                "state": "deleted",
+                "revision": 3,
+                "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+                "restored_by_uid": "40000000-0000-4000-8000-000000000008"
+              }
+            },
+            {
+              "object_type": "asset",
+              "object": {
+                "asset_uid": "40000000-0000-4000-8000-000000000008",
+                "soul_uid": "10000000-0000-4000-8000-000000000001",
+                "kind": "relationship",
+                "trait": "preference",
+                "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+                "applicability": "客户分析与营销方案",
+                "tags": [
+                  "客户分析",
+                  "营销"
+                ],
+                "evidence": "explicit_user_statement",
+                "verification": "unverified",
+                "sensitivity": "normal",
+                "state": "active",
+                "revision": 1,
+                "supersedes_uid": "40000000-0000-4000-8000-000000000001",
+                "pinned": false,
+                "source": {
+                  "runtime_kind": "web",
+                  "session_ref": "30000000-0000-4000-8000-000000000001",
+                  "event_ref": "owner-restoration-001",
+                  "occurred_at": "2026-10-20T04:00:00Z"
+                },
+                "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+              }
+            }
+          ],
+          "error": null
+        }
+      ]
+    },
+    "pull_restored": {
+      "protocol": "soul-assets/v1",
+      "events": [
+        {
+          "event_uid": "70000000-0000-4000-8000-000000000003",
+          "object_type": "asset",
+          "object": {
+            "asset_uid": "40000000-0000-4000-8000-000000000001",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "state": "deleted",
+            "revision": 3,
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e",
+            "restored_by_uid": "40000000-0000-4000-8000-000000000008"
+          }
+        },
+        {
+          "event_uid": "70000000-0000-4000-8000-000000000004",
+          "object_type": "asset",
+          "object": {
+            "asset_uid": "40000000-0000-4000-8000-000000000008",
+            "soul_uid": "10000000-0000-4000-8000-000000000001",
+            "kind": "relationship",
+            "trait": "preference",
+            "content": "分析客户时，先给真实付费证据，再讨论渠道。",
+            "applicability": "客户分析与营销方案",
+            "tags": [
+              "客户分析",
+              "营销"
+            ],
+            "evidence": "explicit_user_statement",
+            "verification": "unverified",
+            "sensitivity": "normal",
+            "state": "active",
+            "revision": 1,
+            "supersedes_uid": "40000000-0000-4000-8000-000000000001",
+            "pinned": false,
+            "source": {
+              "runtime_kind": "web",
+              "session_ref": "30000000-0000-4000-8000-000000000001",
+              "event_ref": "owner-restoration-001",
+              "occurred_at": "2026-10-20T04:00:00Z"
+            },
+            "content_digest": "4ed38f717d436e23f65cb72b2024538cd0453677f3b7bdc8842f58555bff891e"
+          }
+        }
+      ],
+      "next_cursor": "sc1-opaque-restored-example",
+      "has_more": false
+    }
+  }
+}
