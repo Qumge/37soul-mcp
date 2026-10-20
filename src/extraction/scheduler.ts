@@ -38,7 +38,7 @@ import type {
 } from "../adapters/types.js";
 import { contentDigest, type AssetSource, type ProposedAsset } from "../assets/protocol.js";
 import { classifyProposalState, validateProposedAsset } from "../assets/validation.js";
-import { captureSourcePointer, extractTranscriptPath, validateTranscriptPath } from "../agentd/source-index.js";
+import { captureSourcePointer, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
 import {
   defaultStoreFs,
   openStore,
@@ -544,6 +544,14 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   const event = request.payload.event;
   if (!isRuntimeEvent(event)) {
     throw new StoreError("invalid_event", "runtime_event payload.event must be a valid RuntimeEvent");
+  }
+  // The pointer index builds <root>/sources/<profile_id>/<event_ref>.json from these
+  // two values: reject anything that could escape that directory before any write.
+  if (!isSafeProfileId(event.key.profile_id) || !isSafeEventRef(event.event_ref)) {
+    throw new StoreError(
+      "invalid_event",
+      "runtime_event payload carries an unsafe profile_id or event_ref (must be a path-safe segment; event_ref must be a UUID)",
+    );
   }
   if (isInternalEvent(event)) return { scheduled: false, reason: "internal" };
 

@@ -551,7 +551,7 @@ test("extraction: a daemon tick drains a runtime-event watermark end-to-end", as
   const writer = await startWriter(root);
 
   // The hook's assets-mode emission: a checkpoint writes a pending watermark.
-  const event = { key, event_ref: "turn-opaque-001", kind: "checkpoint", internal_job_uid: null };
+  const event = { key, event_ref: "10000000-0000-4000-8000-0000000000ee", kind: "checkpoint", internal_job_uid: null };
   const emitted = await sendWriter(root, {
     request_uid: randomUUID(),
     profile_id: "p1",

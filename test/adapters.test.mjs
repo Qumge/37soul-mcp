@@ -970,7 +970,7 @@ test("hermes: interrupted internal task stays pending", async () => {
       profile_id: "p1",
       command: "runtime_event",
       payload: {
-        event: { key, event_ref: "h-stop", kind: "turn_completed", internal_job_uid: null },
+        event: { key, event_ref: "10000000-0000-4000-8000-0000000000ee", kind: "turn_completed", internal_job_uid: null },
       },
     });
   } finally {

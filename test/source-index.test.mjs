@@ -103,6 +103,17 @@ function pointerFile(root, profileId, eventRef) {
 
 const TURN_TEXT = "I always keep my promise to water the plants.";
 
+// Production event refs are randomUUID(); the writer command requires a UUID, so the
+// writer-driven tests use realistic refs. Direct captureSourcePointer unit tests keep
+// short names (they exercise the pointer mechanics, not the writer gate).
+const REF_SRC = "10000000-0000-4000-8000-000000000001";
+const REF_REL = "10000000-0000-4000-8000-000000000002";
+const REF_MISSING = "10000000-0000-4000-8000-000000000003";
+const REF_NOFIELD = "10000000-0000-4000-8000-000000000004";
+const REF_PRUNED = "10000000-0000-4000-8000-000000000005";
+const REF_NOLOC = "10000000-0000-4000-8000-000000000006";
+const REF_INTERNAL = "10000000-0000-4000-8000-000000000007";
+
 // ---------------------------------------------------------------------------
 // field extraction + path validation (verbatim, never fabricated)
 // ---------------------------------------------------------------------------
@@ -279,7 +290,7 @@ test("source-index: hook stdin transcript_path -> pointer -> drain parses the tu
   const binding = await resolveBinding(key, undefined, { root });
 
   const writer = await startWriter(root);
-  const event = { key, event_ref: "evt-src-1", kind: "turn_completed", internal_job_uid: null };
+  const event = { key, event_ref: REF_SRC, kind: "turn_completed", internal_job_uid: null };
   // The assets-mode hook re-emits the host's transcript location as `source_path`.
   const emitted = await sendWriter(root, {
     request_uid: randomUUID(),
@@ -290,7 +301,7 @@ test("source-index: hook stdin transcript_path -> pointer -> drain parses the tu
   assert.equal(emitted.ok, true, "the runtime event is accepted");
 
   // The pointer exists, is private, and holds a location only.
-  const pointer = pointerFile(root, "p1", "evt-src-1");
+  const pointer = pointerFile(root, "p1", REF_SRC);
   assert.equal(statSync(pointer).mode & 0o777, 0o600);
   const pointerContent = readFileSync(pointer, "utf8");
   assert.ok(pointerContent.includes(transcriptPath));
@@ -357,9 +368,9 @@ test("source-index: missing/relative/nonexistent path -> no pointer, no model ca
 
   const writer = await startWriter(root);
   const cases = [
-    { ref: "evt-rel", payload: { transcript_path: "relative.jsonl" } },
-    { ref: "evt-missing", payload: { transcript_path: path.join(root, "nope.jsonl") } },
-    { ref: "evt-nofield", payload: {} },
+    { ref: REF_REL, payload: { transcript_path: "relative.jsonl" } },
+    { ref: REF_MISSING, payload: { transcript_path: path.join(root, "nope.jsonl") } },
+    { ref: REF_NOFIELD, payload: {} },
   ];
   for (const c of cases) {
     const emitted = await sendWriter(root, {
@@ -414,18 +425,18 @@ test("source-index: a pruned/expired pointer resolves to \"\" and leaves a clean
   await resolveBinding(key, undefined, { root });
 
   const writer = await startWriter(root);
-  const event = { key, event_ref: "evt-pruned", kind: "turn_completed", internal_job_uid: null };
+  const event = { key, event_ref: REF_PRUNED, kind: "turn_completed", internal_job_uid: null };
   await sendWriter(root, {
     request_uid: randomUUID(),
     profile_id: "p1",
     command: "runtime_event",
     payload: { event, transcript_path: transcriptPath },
   });
-  assert.equal(existsSync(pointerFile(root, "p1", "evt-pruned")), true);
+  assert.equal(existsSync(pointerFile(root, "p1", REF_PRUNED)), true);
 
   // The pointer is pruned before the worker drains the watermark.
-  rmSync(pointerFile(root, "p1", "evt-pruned"), { force: true });
-  assert.equal(await readSourceRefs(root, ["evt-pruned"]), "", "a pruned pointer resolves to empty source");
+  rmSync(pointerFile(root, "p1", REF_PRUNED), { force: true });
+  assert.equal(await readSourceRefs(root, [REF_PRUNED]), "", "a pruned pointer resolves to empty source");
 
   const adapter = createClaudeCodeAdapter({
     home: root,
@@ -466,7 +477,7 @@ test("source-index: runtimes with no transcript location are never indexed, and 
     profile_id: "p1",
     command: "runtime_event",
     // No transcript location of any kind: the runtime never reported one.
-    payload: { event: { key, event_ref: "evt-noloc", kind: "turn_completed", internal_job_uid: null } },
+    payload: { event: { key, event_ref: REF_NOLOC, kind: "turn_completed", internal_job_uid: null } },
   });
   assert.equal(emitted.ok, true);
   await writer.close();
@@ -510,4 +521,77 @@ test("source-index: uninstall leaves <root>/sources intact", async () => {
   assert.equal(existsSync(pointerFile(root, "p1", "evt-keep")), true, "the pointer survives uninstall");
 
   rmSync(home, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// writer-path input validation (path traversal / non-UUID refusal) + internal
+// ---------------------------------------------------------------------------
+
+test("source-index: unsafe profile_id/event_ref are refused and create no files or directories", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  const key = keyOf("p1", "dev-1", "claude-code", "ns-1");
+  await resolveBinding(key, undefined, { root });
+  const transcriptPath = path.join(root, "t.jsonl");
+  writeFileSync(transcriptPath, "x");
+
+  const writer = await startWriter(root);
+  const unsafe = [
+    { label: "traversal profile_id", event: { key: { ...key, profile_id: "../../escape" }, event_ref: REF_SRC, kind: "turn_completed", internal_job_uid: null } },
+    { label: "traversal event_ref", event: { key, event_ref: "../escape", kind: "turn_completed", internal_job_uid: null } },
+    { label: "separator event_ref", event: { key, event_ref: "a/b", kind: "turn_completed", internal_job_uid: null } },
+    { label: "non-UUID event_ref", event: { key, event_ref: "not-a-uuid", kind: "turn_completed", internal_job_uid: null } },
+    { label: "empty event_ref", event: { key, event_ref: "", kind: "turn_completed", internal_job_uid: null } },
+  ];
+  for (const c of unsafe) {
+    const res = await sendWriter(root, {
+      request_uid: randomUUID(),
+      profile_id: "p1",
+      command: "runtime_event",
+      payload: { event: c.event, source_path: transcriptPath },
+    });
+    assert.equal(res.ok, false, `${c.label} is refused`);
+    assert.equal(res.error?.code, "invalid_event", `${c.label} refuses with invalid_event`);
+  }
+  await writer.close();
+
+  assert.equal(existsSync(sourcesDir(root)), false, "no sources directory is ever created for refused events");
+  const snap = await readSnap(root, "p1");
+  assert.equal(Object.keys(snap.extraction_watermarks).length, 0, "a refused event schedules nothing");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("source-index: an internal-job event never indexes a transcript location or schedules", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  const key = keyOf("p1", "dev-1", "claude-code", "ns-1");
+  await resolveBinding(key, undefined, { root });
+  const transcriptPath = path.join(root, "t.jsonl");
+  writeFileSync(transcriptPath, `${TURN_TEXT}\n`);
+
+  const writer = await startWriter(root);
+  const emitted = await sendWriter(root, {
+    request_uid: randomUUID(),
+    profile_id: "p1",
+    command: "runtime_event",
+    payload: {
+      event: { key, event_ref: REF_INTERNAL, kind: "turn_completed", internal_job_uid: "job-internal-1" },
+      source_path: transcriptPath,
+    },
+  });
+  assert.equal(emitted.ok, true, "the internal event is accepted and short-circuits");
+  assert.equal(emitted.result?.scheduled, false, "an internal event never schedules");
+  assert.equal(emitted.result?.reason, "internal");
+  await writer.close();
+
+  assert.equal(existsSync(sourcesDir(root)), false, "no sources directory for an internal event");
+  const snap = await readSnap(root, "p1");
+  assert.equal(Object.keys(snap.extraction_watermarks).length, 0, "an internal event writes no watermark");
+
+  rmSync(root, { recursive: true, force: true });
 });

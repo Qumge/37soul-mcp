@@ -19,7 +19,8 @@
  *  - The directory is bounded and pruned (newest N per session, drop older than
  *    MAX_POINTER_AGE_MS) so it cannot grow without limit.
  */
-import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type { RuntimeKind } from "../assets/protocol.js";
 
@@ -53,6 +54,26 @@ export interface SourcePointerRecord {
 
 export function sourcesDir(root: string): string {
   return path.join(root, "sources");
+}
+
+/** Production event refs are `randomUUID()`: hyphenated 8-4-4-4-12 hex. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A single path segment that can never escape its directory (no separators/traversal). */
+function isSafeSegment(value: string): boolean {
+  if (value.length === 0 || value === "." || value === "..") return false;
+  if (value.includes("/") || value.includes("\\") || value.includes("..")) return false;
+  return true;
+}
+
+/** A profile id is safe only as a single path segment — never empty, never a traversal. */
+export function isSafeProfileId(value: string): boolean {
+  return isSafeSegment(value);
+}
+
+/** An event ref must be a single safe segment AND a UUID (it is randomUUID() in prod). */
+export function isSafeEventRef(value: string): boolean {
+  return isSafeSegment(value) && UUID_RE.test(value);
 }
 
 function profileDir(root: string, profileId: string): string {
@@ -193,14 +214,25 @@ async function readSourceRef(root: string, eventRef: string): Promise<string | n
   return null;
 }
 
-/** Read at most `maxBytes` from the start of `file` and return that prefix as UTF-8. */
-async function readPrefix(file: string, maxBytes: number): Promise<string> {
-  const handle = await open(file, "r");
+/**
+ * Read at most `maxBytes` from the start of `file` and return that prefix as UTF-8,
+ * or `null` when the file cannot be read. TOCTOU-safe: the file is opened with
+ * O_NONBLOCK (so a FIFO swapped in after the caller's stat can never block the
+ * drain), re-verified with an fstat, and any open/read error degrades to `null`
+ * exactly like the missing-file path instead of throwing and burning an attempt.
+ */
+async function readPrefix(file: string, maxBytes: number): Promise<string | null> {
+  let handle: FileHandle | null = null;
   try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (!info.isFile()) return null; // a non-regular file (e.g. FIFO) appeared between stat and open
     const buffer = Buffer.alloc(maxBytes);
     const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
     return buffer.toString("utf8", 0, bytesRead);
+  } catch {
+    return null; // ENOENT (deleted between stat and open) or any read error: skip this ref
   } finally {
-    await handle.close();
+    if (handle) await handle.close().catch(() => {});
   }
 }
