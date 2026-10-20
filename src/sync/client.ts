@@ -356,8 +356,11 @@ async function handleRegisterSoul(
         // First explicit registration resets the pull cursor once (§6).
         if ((previous?.revision ?? 0) < body.consent.revision) draft.pull_cursor = "0";
         // An enabled consent immediately rescues still-valid local_only assets
-        // extracted while consent was off (Ruling 8).
-        enqueueAuthorizedLocalAssets(draft, body.consent);
+        // extracted while consent was off (Ruling 8) — but only when the consent
+        // actually moved state forward, never on a same-revision replay.
+        if ((previous?.revision ?? 0) < body.consent.revision || previous === undefined) {
+          enqueueAuthorizedLocalAssets(draft, body.consent);
+        }
       }
       return undefined;
     });
@@ -397,7 +400,11 @@ async function handleConsent(
         }
         const narrowed = previous !== undefined && removedCategories(previous, body.consent).length > 0;
         if (narrowed) revokeConsentLocal(draft, body.consent);
-        enqueueAuthorizedLocalAssets(draft, body.consent);
+        // Enqueue only when the consent actually moved state forward; a same-revision
+        // replay must not re-enqueue an asset of a now-revoked category.
+        if (revisionIncreased || previous === undefined) {
+          enqueueAuthorizedLocalAssets(draft, body.consent);
+        }
       }
       return undefined;
     });
@@ -707,9 +714,10 @@ export async function applyPullPage(store: LocalStore, page: PullPage): Promise<
         const outcome = applyConsentEvent(draft, consent);
         if (outcome.reset) consentReset = true;
         if (outcome.revoked) revokeConsentLocal(draft, consent);
-        // A newly applied (enabled) consent also rescues still-valid local_only
-        // assets extracted while consent was off (idempotent op ids).
-        enqueueAuthorizedLocalAssets(draft, consent);
+        // Only a consent that actually moved state forward (new revision or first
+        // sight) rescues still-valid local_only assets. A stale/no-op replay must
+        // not re-enqueue an asset of a now-revoked category.
+        if (outcome.reset) enqueueAuthorizedLocalAssets(draft, consent);
       } else if (event.object_type === "soul") {
         applySoulEvent(draft, event.object as unknown as Soul);
       } else if (event.object_type === "binding") {
@@ -763,11 +771,26 @@ function opKind(draft: StoreSnapshot, op: OutboxOperation): string | null {
 function enqueueAuthorizedLocalAssets(draft: StoreSnapshot, consent: Consent): void {
   if (!consent.enabled) return;
   const authorized = new Set(consent.categories);
+  // A content digest the cloud has already dismissed (deleted/rejected/superseded
+  // from any device) must stay local_only — never re-propose a fact the person
+  // already removed elsewhere.
+  const dismissed = new Set<string>();
+  for (const list of Object.values(draft.digest_tombstones)) {
+    for (const tombstone of list) {
+      if (typeof tombstone.content_digest === "string" && tombstone.content_digest) {
+        dismissed.add(tombstone.content_digest);
+      }
+    }
+  }
   for (const [uid, asset] of Object.entries(draft.assets)) {
     if (asset.soul_uid !== consent.soul_uid) continue;
     if (asset.sync_state !== "local_only") continue;
     if (asset.state !== "active") continue;
     if (!authorized.has(asset.kind)) continue;
+    const digest = typeof asset.content_digest === "string" && asset.content_digest
+      ? asset.content_digest
+      : contentDigest(asset.content);
+    if (dismissed.has(digest)) continue;
     const operationId = `${asset.asset_uid}:rev${asset.revision}`;
     asset.sync_state = "pending_sync";
     draft.outbox[operationId] = {

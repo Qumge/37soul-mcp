@@ -1227,3 +1227,156 @@ test("sync: 404, 413 and 422 surface their server error code", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// 28 ───────────────────────────────────────────────────────────────────────────────
+test("sync: stale consent replay never re-enqueues a revoked category asset", async () => {
+  const root = tempDir();
+  const assetUid = "local-only-rel";
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 3,
+      categories: ["identity", "experience"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    // "relationship" was removed from the current consent; a stale consent that once
+    // listed it must not pull this local_only asset back into the outbox.
+    d.assets[assetUid] = localAsset(assetUid, "local relationship fact", "active", "local_only", null, 1);
+  });
+
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "stale",
+      object_type: "consent",
+      object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: ["identity", "relationship"], enabled: true },
+    }],
+    next_cursor: "c-stale",
+    has_more: false,
+  });
+  await store.close();
+
+  const snap = await readSnap(root);
+  assert.equal(snap.consents[`${IDS.cloudDevice}:${IDS.soul}`].revision, 3, "the stale lower revision never rolls back the current consent");
+  assert.equal(snap.assets[assetUid].sync_state, "local_only", "the revoked category's local_only asset stays local_only");
+  assert.equal(Object.keys(snap.outbox).length, 0, "no op is enqueued by a stale consent replay");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 29 ───────────────────────────────────────────────────────────────────────────────
+test("sync: consent enable never enqueues a cloud-dismissed digest", async () => {
+  const root = tempDir();
+  const assetUid = "local-only-dismissed";
+  const DISMISSED = "the person deleted this fact elsewhere";
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: ["identity"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    d.assets[assetUid] = localAsset(assetUid, DISMISSED, "active", "local_only", null, 1);
+    // The cloud already dismissed this exact digest from another device.
+    d.digest_tombstones[IDS.soul] = [{
+      asset_uid: "cloud-dismissed-uid",
+      soul_uid: IDS.soul,
+      kind: "relationship",
+      trait: "preference",
+      content_digest: contentDigest(DISMISSED),
+      revision: 1,
+      state: "deleted",
+      restored_by_uid: null,
+    }];
+  });
+
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "enable",
+      object_type: "consent",
+      object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true },
+    }],
+    next_cursor: "c-enable",
+    has_more: false,
+  });
+  await store.close();
+
+  const snap = await readSnap(root);
+  assert.equal(snap.assets[assetUid].sync_state, "local_only", "a cloud-dismissed digest stays local_only");
+  assert.equal(Object.keys(snap.outbox).length, 0, "no propose is enqueued for a dismissed digest");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 30 ───────────────────────────────────────────────────────────────────────────────
+test("sync: first-sight consent replay_from resets the cursor once", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    d.pull_cursor = "c0";
+    // No prior consent: the first consent PUT response is first-sight.
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 0, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const consentRev1 = { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: ["identity", "relationship"], enabled: true };
+  const pullCursors = [];
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "PUT" && p.includes("/consent")) return { status: 200, body: { consent: consentRev1, replay_from: "0" } };
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") {
+      pullCursors.push(new URL(req.url).searchParams.get("cursor"));
+      return { status: 200, body: { protocol: "soul-assets/v1", events: [], next_cursor: "c-after", has_more: false } };
+    }
+    return { status: 500, body: {} };
+  });
+
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pullCursors[0], "0", "a first-sight consent carrying replay_from resets the cursor to 0");
+
+  const store = await openStore(root, "p1");
+  await store.transact((d) => {
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 0, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+  await store.close();
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pullCursors[1], "c-after", "a same-revision replay does not reset the cursor again");
+
+  rmSync(root, { recursive: true, force: true });
+});
