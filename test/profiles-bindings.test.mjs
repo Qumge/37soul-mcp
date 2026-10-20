@@ -35,7 +35,7 @@ import {
   resolveLocalHostIdSync,
 } from "../dist/local/profiles.js";
 import { deviceLogin } from "../dist/install.js";
-import { loginCommand } from "../dist/cli.js";
+import { loginCommand, bindCommand } from "../dist/cli.js";
 
 function tempDir(prefix = "profiles-bindings-") {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -757,5 +757,202 @@ test("login: refused when no writer can be acquired — the CLI never commits di
   } finally {
     await releaseLock();
   }
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// fix round 2: login requires an explicit profile choice when a same-owner
+// profile already exists; bind surfaces needs_new_session
+// ---------------------------------------------------------------------------
+
+function makeLoginDeps(ownerId = "owner-123") {
+  const fetchImpl = async (url) => {
+    const s = String(url);
+    if (s.endsWith("/api/v1/cli/device_codes")) {
+      return {
+        status: 201,
+        ok: true,
+        async json() {
+          return { device_code: "dc", user_code: "UC", verification_url: "https://x", interval: 1, expires_in: 600 };
+        },
+      };
+    }
+    return {
+      status: 201,
+      ok: true,
+      async json() {
+        return {
+          protocol: "soul-assets/v1",
+          mode: "assets_only",
+          owner_id: ownerId,
+          cloud_device_uid: "cdu",
+          default_soul_uid: null,
+          tokens: [{ agent_kind: "hermes", token: "T" }],
+        };
+      },
+    };
+  };
+  return {
+    home: "/tmp/x",
+    apiBase: "https://x",
+    fetch: fetchImpl,
+    runCommand: async () => ({ code: 0, stdout: "", stderr: "" }),
+    nodePath: process.execPath,
+    cliScriptPath: "/tmp/cli.js",
+    agentdScriptPath: "/tmp/cli.js",
+    platform: "linux",
+    openBrowser: false,
+    now: () => 0,
+    sleep: async () => {},
+  };
+}
+
+function capturingIO() {
+  let text = "";
+  return {
+    io: {
+      stdout: (t) => {
+        text += t;
+      },
+      stderr: (t) => {
+        text += t;
+      },
+      stdin: async () => "",
+    },
+    text: () => text,
+  };
+}
+
+test("login: same-owner candidate without a flag is refused, nothing changes", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+    d.outbox["op-anon"] = makeOutboxOp("op-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+    d.outbox["op-old"] = makeOutboxOp("op-old");
+    d.quarantine["q-old"] = { operation: makeOutboxOp("q-op"), reason: "conflict" };
+  });
+
+  const { io, text } = capturingIO();
+  const code = await loginCommand(root, ["--profile", "anon"], io, makeLoginDeps("owner-123"));
+  assert.equal(code, 1, "login without an explicit choice exits non-zero");
+  assert.match(text(), /existing/, "the candidate is listed");
+  assert.match(text(), /--merge-profile/, "the rerun instruction names --merge-profile");
+  assert.match(text(), /--use-profile/, "the rerun instruction names --use-profile");
+
+  // No snapshot/index change happened.
+  const anonStore = await openStore(root, "anon");
+  const anon = await anonStore.read();
+  await anonStore.close();
+  assert.equal(anon.owner_id, null, "the anonymous profile is not silently associated");
+  const index = await readAccountsIndex(root);
+  assert.equal(index["owner-123"], undefined, "the account index is not silently switched");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: --merge-profile merges into the current profile, source kept", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+    d.outbox["op-anon"] = makeOutboxOp("op-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+    d.outbox["op-old"] = makeOutboxOp("op-old");
+    d.quarantine["q-old"] = { operation: makeOutboxOp("q-op"), reason: "conflict" };
+  });
+
+  const { io } = capturingIO();
+  const code = await loginCommand(
+    root,
+    ["--profile", "anon", "--merge-profile", "existing"],
+    io,
+    makeLoginDeps("owner-123"),
+  );
+  assert.equal(code, 0);
+
+  const anonStore = await openStore(root, "anon");
+  const anon = await anonStore.read();
+  await anonStore.close();
+  assert.equal(anon.owner_id, "owner-123");
+  assert.ok(anon.souls["s-anon"] && anon.souls["s-old"], "both sides' UIDs are kept");
+  assert.ok(anon.outbox["op-anon"] && anon.outbox["op-old"], "pending items from both sides survive");
+  assert.ok(anon.quarantine["q-old"], "conflicted items survive the merge");
+
+  const existingStore = await openStore(root, "existing");
+  const existing = await existingStore.read();
+  await existingStore.close();
+  assert.ok(existing.souls["s-old"], "the source profile is kept intact");
+
+  const index = await readAccountsIndex(root);
+  assert.equal(index["owner-123"].profile_id, "anon", "index switched to the merged target last");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("login: --use-profile switches the index, anonymous profile untouched", async () => {
+  const root = tempDir();
+  await seedProfile(root, "anon", "dev-anon", (d) => {
+    d.souls["s-anon"] = makeSoul("s-anon");
+  });
+  await seedProfile(root, "existing", "dev-existing", (d) => {
+    d.owner_id = "owner-123";
+    d.souls["s-old"] = makeSoul("s-old");
+  });
+
+  const { io } = capturingIO();
+  const code = await loginCommand(
+    root,
+    ["--profile", "anon", "--use-profile", "existing"],
+    io,
+    makeLoginDeps("owner-123"),
+  );
+  assert.equal(code, 0);
+
+  const index = await readAccountsIndex(root);
+  assert.equal(index["owner-123"].profile_id, "existing", "index points at the existing profile");
+
+  const anonStore = await openStore(root, "anon");
+  const anon = await anonStore.read();
+  await anonStore.close();
+  assert.equal(anon.owner_id, null, "the anonymous profile is untouched");
+  assert.deepEqual(Object.keys(anon.souls), ["s-anon"], "the anonymous profile's souls are untouched");
+
+  const existingStore = await openStore(root, "existing");
+  const existing = await existingStore.read();
+  await existingStore.close();
+  assert.equal(existing.owner_id, "owner-123");
+  assert.ok(existing.souls["s-old"], "the existing profile is untouched");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("bind: an injected session surfaces needs_new_session as a real error", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+    d.souls["s2"] = makeSoul("s2");
+  });
+  const key = keyOf("p1", "dev-1", "claude-code", "ns-1");
+  const bound = await selectSoul(key, "s1", { root });
+  const mark = await openStore(root, "p1");
+  await mark.transact((d) => {
+    d.receipts["r1"] = {
+      binding_uid: bound.binding_uid,
+      binding_revision: bound.revision,
+      stage: "injected",
+      manifest: [],
+      rendered_sha256: "sha",
+    };
+  });
+  await mark.close();
+
+  const { io, text } = capturingIO();
+  const code = await bindCommand(root, ["--profile", "p1", "--soul", "s2", "--session", "ns-1"], io, false);
+  assert.equal(code, 1, "bind on an injected session exits non-zero");
+  assert.match(text(), /new session/, "the user sees a real message");
+  assert.ok(!text().includes("undefined"), "never prints undefined");
   rmSync(root, { recursive: true, force: true });
 });

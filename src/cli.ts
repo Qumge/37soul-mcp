@@ -9,7 +9,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,7 @@ import { deviceLogin, install, planInstall, status as statusReport, uninstall, t
 import { runDoctor } from "./doctor.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
-import { openStore } from "./local/store.js";
+import { openStore, profilesDir, snapshotPath } from "./local/store.js";
 import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
 import type { ProfileId } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
@@ -395,7 +395,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
   return 2;
 }
 
-async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
+export async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
   const profileId = profileIdFromArgs(rest);
   const soulUid = flagValue(rest, "--soul") ?? flagValue(rest, "--soul-uid");
   const nativeSessionId = flagValue(rest, "--session") ?? flagValue(rest, "--native-session-id");
@@ -414,6 +414,13 @@ async function bindCommand(root: string, rest: string[], io: CliIO, detach: bool
     : await runWriterCommand(root, profileId, "bind", { device_id: deviceId, runtime_kind: runtimeKind, native_session_id: nativeSessionId, soul_uid: soulUid });
   if (!res.ok) {
     io.stderr(`${res.error.code}: ${res.error.message}\n`);
+    return 1;
+  }
+  // `selectSoul` reports an injected-session switch as a success-shaped writer result
+  // whose payload is `{ error: "needs_new_session" }` — surface it, don't print it.
+  const result = res.result as { error?: unknown } | null;
+  if (result !== null && typeof result === "object" && result.error === "needs_new_session") {
+    io.stderr("this session already has a different soul injected; start a new session to switch\n");
     return 1;
   }
   // Never print the native session id; report the cloud-facing binding identity only.
@@ -437,6 +444,59 @@ async function readClientVersion(cliScriptPath: string): Promise<string> {
   }
 }
 
+export interface ProfileCandidate {
+  profile_id: string;
+  soul_count: number;
+  pending_count: number;
+  conflict_count: number;
+  modified_at: number | null;
+}
+
+/**
+ * Existing local profiles already owned by `ownerId`, excluding the current one.
+ * Read-only peek for the user-visible login choice: soul count, pending/conflict
+ * counts and snapshot mtime — never tokens or native session ids.
+ */
+async function listSameOwnerProfiles(
+  root: string,
+  ownerId: string,
+  currentProfileId: string,
+): Promise<ProfileCandidate[]> {
+  const entries = await readdir(profilesDir(root), { withFileTypes: true }).catch(() => []);
+  const out: ProfileCandidate[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const id = entry.name;
+    if (id === currentProfileId) continue;
+    let snap;
+    try {
+      const store = await openStore(root, id);
+      try {
+        snap = await store.read();
+      } finally {
+        await store.close();
+      }
+    } catch {
+      continue; // a corrupt/unreadable profile is not offered as a candidate
+    }
+    if (snap.owner_id !== ownerId) continue;
+    let modifiedAt: number | null = null;
+    try {
+      modifiedAt = (await stat(snapshotPath(root, id))).mtimeMs;
+    } catch {
+      // mtime is cosmetic; a missing stat must not hide the candidate.
+    }
+    out.push({
+      profile_id: id,
+      soul_count: Object.keys(snap.souls).length,
+      pending_count: Object.keys(snap.outbox).length,
+      conflict_count: Object.keys(snap.quarantine).length,
+      modified_at: modifiedAt,
+    });
+  }
+  return out;
+}
+
 export async function loginCommand(
   root: string,
   rest: string[],
@@ -454,14 +514,43 @@ export async function loginCommand(
     return 1;
   }
 
+  // User-visible rule: if the same owner already has local profiles, never merge or
+  // switch silently. List the candidates and require an explicit flag.
+  const mergeProfileId = flagValue(rest, "--merge-profile");
+  const useProfileId = flagValue(rest, "--use-profile");
+  if (mergeProfileId && useProfileId) {
+    io.stderr("--merge-profile and --use-profile are mutually exclusive\n");
+    return 2;
+  }
+  const candidates = await listSameOwnerProfiles(root, login.owner_id, profileId);
+  if (candidates.length > 0 && !mergeProfileId && !useProfileId) {
+    io.stderr(`you already have ${candidates.length} local profile(s) for owner ${login.owner_id}:\n`);
+    for (const candidate of candidates) {
+      const modified = candidate.modified_at !== null ? `, modified ${new Date(candidate.modified_at).toISOString()}` : "";
+      io.stderr(
+        `  ${candidate.profile_id} — ${candidate.soul_count} souls, ${candidate.pending_count} pending, ${candidate.conflict_count} conflicted${modified}\n`,
+      );
+    }
+    io.stderr("rerun with --merge-profile <profile_id> (merge it into this profile) or --use-profile <profile_id> (switch to it)\n");
+    return 1;
+  }
+  const chosen = mergeProfileId ?? useProfileId;
+  if (chosen && !candidates.some((candidate) => candidate.profile_id === chosen)) {
+    io.stderr(`no same-owner local profile named ${chosen}\n`);
+    return 1;
+  }
+
   // §2.5: only the writer process commits. The whole association runs inside one
-  // `login_associate` writer dispatch (owner + cloud_device_uid + merge + defaults +
-  // soul_sync_mode); the CLI process itself never calls store.transact.
+  // `login_associate` writer dispatch (owner + cloud_device_uid + merge/defaults +
+  // soul_sync_mode, or the account-index switch for --use-profile); the CLI process
+  // itself never calls store.transact.
   const res = await runWriterCommand(root, profileId, "login_associate", {
     owner_id: login.owner_id,
     cloud_device_uid: login.cloud_device_uid ?? null,
     default_soul_uid: login.default_soul_uid ?? null,
     mode: login.mode ?? "assets_only",
+    ...(mergeProfileId ? { merge_profile_id: mergeProfileId } : {}),
+    ...(useProfileId ? { use_profile_id: useProfileId } : {}),
   });
   if (!res.ok) {
     io.stderr(`${res.error.code}: ${res.error.message}\n`);

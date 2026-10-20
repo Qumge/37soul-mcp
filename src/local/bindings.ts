@@ -508,6 +508,11 @@ registerWriterCommand("export", async ({ root, request }) => {
  * cloud_device_uid update, account default, and the §3 `mode` (as `soul_sync_mode`)
  * on the accounts index. The writer holds the lock across the whole handler, so the
  * CLI never commits the snapshot itself.
+ *
+ * `use_profile_id` (explicit `--use-profile`) switches the account index to an
+ * existing same-owner profile WITHOUT merging: the current anonymous profile is left
+ * untouched. `merge_profile_id` (explicit `--merge-profile`) merges that profile into
+ * the current one via the resumable journal path, source kept, index switched last.
  */
 registerWriterCommand("login_associate", async ({ root, request }) => {
   const p = request.payload;
@@ -515,7 +520,27 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
   const cloudDeviceUid = typeof p.cloud_device_uid === "string" ? p.cloud_device_uid : null;
   const defaultSoulUid = typeof p.default_soul_uid === "string" && p.default_soul_uid ? p.default_soul_uid : null;
   const mergeProfileId = typeof p.merge_profile_id === "string" && p.merge_profile_id ? p.merge_profile_id : undefined;
+  const useProfileId = typeof p.use_profile_id === "string" && p.use_profile_id ? p.use_profile_id : undefined;
   const mode = typeof p.mode === "string" && p.mode ? p.mode : "assets_only";
+
+  if (useProfileId) {
+    // Switch, don't merge: the existing same-owner profile becomes the account's
+    // profile; the current (anonymous) profile is never written.
+    const existing = await openStore(root, useProfileId);
+    const existingSnap = await existing.read();
+    await existing.close();
+    if (existingSnap.owner_id !== ownerId) {
+      throw new StoreError("owner_mismatch", `profile ${useProfileId} does not belong to ${ownerId}`);
+    }
+    const index = await readAccountsIndex(root);
+    index[ownerId] = {
+      profile_id: useProfileId,
+      default_soul_uid: defaultSoulUid ?? index[ownerId]?.default_soul_uid ?? null,
+      soul_sync_mode: mode,
+    };
+    await writeAccountsIndex(root, index);
+    return { profile_id: useProfileId, owner_id: ownerId, soul_sync_mode: mode };
+  }
 
   const profileId = await mergeLoginProfile(request.profile_id, ownerId, mergeProfileId, { root });
 
