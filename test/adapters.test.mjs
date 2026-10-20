@@ -739,13 +739,23 @@ test("opencode: internal task and reset stay isolated", async () => {
 test("opencode: the plugin bridge spawns only the local hook command and makes no network call", () => {
   const source = OPENCODE_PLUGIN_SOURCE;
 
-  // Fixed argv array (no shell), spawning exactly the installed launcher's hook
-  // command — never the host runtime.
-  assert.ok(source.includes('["hook", "--agent", "opencode", "--event", event]'), "the hook command is a fixed argv array");
+  // Exactly ONE spawn in the whole bridge, and that spawn is the fixed-argv hook
+  // command (no shell, never the host runtime). Count, not presence: a second
+  // `spawn(someVar, ...)` or a different argv must fail.
+  assert.equal(
+    (source.match(/spawn\s*\(/g) ?? []).length,
+    1,
+    "exactly one spawn in the bridge",
+  );
+  assert.equal(
+    (source.match(/spawn\s*\(\s*launcher\(\)\s*,\s*\[\s*"hook"\s*,\s*"--agent"\s*,\s*"opencode"\s*,\s*"--event"\s*,\s*event\s*\]/g) ?? []).length,
+    1,
+    "the single spawn is exactly the hook command",
+  );
   assert.ok(!/spawn\s*\(\s*["'`]/.test(source), "no shell-string spawn");
 
-  // No network surface anywhere in the bridge.
-  assert.ok(!/\b(fetch|http|https|net|tls|http2)\b/.test(source), "no network call");
+  // No network surface anywhere in the bridge (module imports included).
+  assert.ok(!/\b(fetch|http|https|net|tls|http2|dns|dgram|ws|undici|socket)\b/.test(source), "no network call");
 
   // The payload is bounded and the wait has a short timeout (never hangs the host).
   assert.ok(source.includes("MAX_BRIDGE_PAYLOAD_BYTES"), "payload is bounded");
