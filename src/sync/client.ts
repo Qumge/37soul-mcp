@@ -206,7 +206,7 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
     report.pending = pendingCount(await store.read());
     return report;
   } catch (error) {
-    report.error = error instanceof Error ? error.message : String(error);
+    report.error = error instanceof StoreError ? error.code : "sync_failed";
     try {
       report.pending = pendingCount(await store.read());
     } catch {
@@ -1240,6 +1240,38 @@ export function configureSyncHttp(fetch: HttpFetch | null): void {
   syncHttp = fetch;
 }
 
+export const DEFAULT_SYNC_TIMEOUT_MS = 30_000;
+export const SYNC_TIMEOUT_MIN_MS = 1_000;
+export const SYNC_TIMEOUT_MAX_MS = 60_000;
+
+/**
+ * One bounded request: a fresh AbortController per call, timer cleared in `finally`.
+ * The bound lives here — in the process that executes the writer command — so a
+ * resident daemon (agentd) that runs `sync_once` on its own fetch is protected too,
+ * not just the caller that dispatched the command.
+ */
+export function withTimeout(http: HttpFetch, timeoutMs: number): HttpFetch {
+  return async (input, init = {}) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await http(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+/**
+ * Resolve an optional `timeout_ms` from a writer payload: an integer is clamped to
+ * [SYNC_TIMEOUT_MIN_MS, SYNC_TIMEOUT_MAX_MS]; anything absent or not an integer
+ * falls back to DEFAULT_SYNC_TIMEOUT_MS.
+ */
+export function clampSyncTimeoutMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) return DEFAULT_SYNC_TIMEOUT_MS;
+  return Math.min(SYNC_TIMEOUT_MAX_MS, Math.max(SYNC_TIMEOUT_MIN_MS, value));
+}
+
 registerWriterCommand("sync_once", async ({ root, request }) => {
   // The legacy transcript mode can never push the new store: refuse before any
   // network work when no local account entry is in assets-only sync mode.
@@ -1249,7 +1281,7 @@ registerWriterCommand("sync_once", async ({ root, request }) => {
   if (!syncHttp) {
     throw new StoreError("http_not_configured", "no HTTP transport was configured for the writer");
   }
-  return syncOnce(request.profile_id, syncHttp, { root });
+  return syncOnce(request.profile_id, withTimeout(syncHttp, clampSyncTimeoutMs(request.payload?.timeout_ms)), { root });
 });
 
 registerWriterCommand("record_receipt", async ({ root, request }) => {

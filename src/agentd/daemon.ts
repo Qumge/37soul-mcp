@@ -82,7 +82,7 @@ export interface DaemonDeps {
   /** Runtime adapters (Task 6+) keyed by runtime_kind; present ones drive the extraction drain. */
   extractAdapters?: Partial<Record<string, RuntimeAdapter>>;
   /** Assets-mode cloud sync (defaults to runSyncProfiles); injected by tests. */
-  syncProfiles?: (root: string, http: typeof fetch) => Promise<Array<{ profile_id: string; report: SyncReport }>>;
+  syncProfiles?: (root: string) => Promise<Array<{ profile_id: string; report: SyncReport }>>;
 }
 
 interface SessionRuntime {
@@ -501,7 +501,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
   type SyncStats = { profiles: number; accepted: number; conflicts: number; pending: number };
 
   async function runSyncOnce(): Promise<SyncStats> {
-    const reports = await syncProfiles(config.root, fetchImpl);
+    const reports = await syncProfiles(config.root);
     const stats = reports.reduce<SyncStats>(
       (acc, { report }) => ({
         profiles: acc.profiles + 1,

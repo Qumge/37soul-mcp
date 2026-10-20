@@ -193,8 +193,8 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     case "sync": {
       const profileId = flagValue(rest, "--profile");
       const reports = profileId
-        ? [{ profile_id: profileId, report: await runSync(root, profileId, globalThis.fetch as HttpFetch) }]
-        : await runSyncProfiles(root, globalThis.fetch as HttpFetch);
+        ? [{ profile_id: profileId, report: await runSync(root, profileId) }]
+        : await runSyncProfiles(root);
       let failed = false;
       for (const { profile_id, report } of reports) {
         io.stdout(
@@ -666,7 +666,7 @@ export async function loginCommand(
   // "login then first sync": best-effort push/pull of every assets-mode profile.
   // A sync failure must never fail the login — surface it on stderr and keep going.
   try {
-    const synced = await runSyncProfiles(root, globalThis.fetch as HttpFetch);
+    const synced = await runSyncProfiles(root);
     for (const { report } of synced) {
       if (report.error) io.stderr(`sync deferred: ${report.error}\n`);
     }

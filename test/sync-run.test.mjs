@@ -16,8 +16,8 @@ import path from "node:path";
 
 import { acquireWriterLock, openStore } from "../dist/local/store.js";
 import { sendWriter, startWriter } from "../dist/local/writer.js";
-import { configureSyncHttp, isAssetsModeSync } from "../dist/sync/client.js";
-import { DEFAULT_SYNC_TIMEOUT_MS, runSync, runSyncProfiles } from "../dist/sync/run.js";
+import { clampSyncTimeoutMs, configureSyncHttp, DEFAULT_SYNC_TIMEOUT_MS, isAssetsModeSync } from "../dist/sync/client.js";
+import { runSync, runSyncProfiles } from "../dist/sync/run.js";
 
 function tempDir(prefix = "sync-run-") {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -172,10 +172,15 @@ test("C1: runSync dispatches through the writer (starts a transient writer when 
   await seedEmptyStore(root, "p1");
 
   const http = fakeHttp();
-  const report = await runSync(root, "p1", http);
+  configureSyncHttp(http);
+  try {
+    const report = await runSync(root, "p1");
 
-  assert.deepEqual(report, { accepted: 0, conflicts: 0, pending: 0 }, "a clean sync reports zeroed counts and no error");
-  assert.ok(http.calls.length > 0, "the sync actually pushed/pulled through the writer");
+    assert.deepEqual(report, { accepted: 0, conflicts: 0, pending: 0 }, "a clean sync reports zeroed counts and no error");
+    assert.ok(http.calls.length > 0, "the sync actually pushed/pulled through the writer");
+  } finally {
+    configureSyncHttp(null);
+  }
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -188,11 +193,13 @@ test("C1: runSync never bypasses the writer — a held lock surfaces writer_unav
 
   const releaseLock = await acquireWriterLock(root);
   const http = fakeHttp();
+  configureSyncHttp(http);
   try {
-    const report = await runSync(root, "p1", http);
+    const report = await runSync(root, "p1");
     assert.equal(report.error, "writer_unavailable", "the writer failure is surfaced, not a lockless write");
     assert.equal(http.calls.length, 0, "no HTTP work happens without the writer lock");
   } finally {
+    configureSyncHttp(null);
     await releaseLock();
   }
   rmSync(root, { recursive: true, force: true });
@@ -213,7 +220,13 @@ test("C1: runSyncProfiles syncs only assets-mode profiles, sequentially", async 
   await seedEmptyStore(root, "p3");
 
   const http = fakeHttp();
-  const reports = await runSyncProfiles(root, http);
+  configureSyncHttp(http);
+  let reports;
+  try {
+    reports = await runSyncProfiles(root);
+  } finally {
+    configureSyncHttp(null);
+  }
 
   assert.deepEqual(
     reports.map((r) => r.profile_id),
@@ -227,4 +240,68 @@ test("C1: runSyncProfiles syncs only assets-mode profiles, sequentially", async 
 
 test("runSync bounds each request with the default timeout constant", () => {
   assert.equal(DEFAULT_SYNC_TIMEOUT_MS, 30_000);
+});
+
+test("clampSyncTimeoutMs clamps integers into [1000, 60000] and defaults on absent/invalid", () => {
+  assert.equal(clampSyncTimeoutMs(50), 1_000);
+  assert.equal(clampSyncTimeoutMs(1_000), 1_000);
+  assert.equal(clampSyncTimeoutMs(60_000), 60_000);
+  assert.equal(clampSyncTimeoutMs(200_000), 60_000);
+  assert.equal(clampSyncTimeoutMs(undefined), 30_000);
+  assert.equal(clampSyncTimeoutMs(null), 30_000);
+  assert.equal(clampSyncTimeoutMs("50"), 30_000);
+  assert.equal(clampSyncTimeoutMs(1.5), 30_000);
+});
+
+/** A transport whose requests never settle until their AbortSignal fires. */
+function neverResolvingHttp() {
+  const signals = [];
+  const http = async (_url, init = {}) => {
+    const signal = init.signal ?? null;
+    signals.push(signal);
+    return new Promise((_resolve, reject) => {
+      if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+  };
+  http.signals = signals;
+  return http;
+}
+
+test("sync_once bounds a hung transport with the writer-side timeout (payload timeout_ms aborts)", async () => {
+  const root = tempDir();
+  seedAssetsProfile(root);
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedConfig(root);
+  await seedEmptyStore(root, "p1");
+
+  const http = neverResolvingHttp();
+  configureSyncHttp(http);
+  const writer = await startWriter(root);
+  try {
+    const started = Date.now();
+    // A sentinel keeps the suite from hanging if the writer-side timeout regresses.
+    let timer;
+    const sentinel = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("test-timeout"), 30_000);
+    });
+    const res = await Promise.race([
+      sendWriter(root, { request_uid: "r-timeout", profile_id: "p1", command: "sync_once", payload: { timeout_ms: 50 } }),
+      sentinel,
+    ]);
+    clearTimeout(timer);
+    const elapsed = Date.now() - started;
+    assert.notEqual(res, "test-timeout", "sync_once must resolve, not hang, when the transport never settles");
+    assert.equal(res.ok, true, `writer answered: ${JSON.stringify(res)}`);
+    assert.equal(res.result.error, "sync_failed", "a hung transport surfaces the sync_failed error code");
+    assert.ok(http.signals.length > 0, "the transport received at least one request signal");
+    assert.ok(http.signals.every((s) => s instanceof AbortSignal), "every request carried an AbortSignal");
+    assert.ok(http.signals.some((s) => s.aborted), "at least one request was actually aborted by the timeout");
+    // timeout_ms:50 clamps up to the 1000ms floor; with the default 2-retry backoff
+    // (400ms + 800ms sleeps) the abort path settles in ~4.2s — well under this bound.
+    assert.ok(elapsed < 8_000, `bounded wall-clock time: ${elapsed}ms`);
+  } finally {
+    await writer.close();
+    configureSyncHttp(null);
+  }
+  rmSync(root, { recursive: true, force: true });
 });

@@ -7,36 +7,19 @@
  * push/pull always serializes with every other store mutation. It never bypasses
  * the writer.
  *
- * The HTTP transport is injected into the writer via `configureSyncHttp` after being
- * wrapped in an AbortController timeout, so a hung request cannot hold the writer
+ * The HTTP transport and its timeout bound live in the writer command handler
+ * (`src/sync/client.ts`): the composition root injects the fetch via
+ * `configureSyncHttp`, and the `sync_once` handler wraps it in a fresh
+ * AbortController timeout per request, so a hung request cannot hold the writer
  * lock forever. No token, path, raw text or native session id enters the returned
  * shape: only `{ profile_id, report }`, where the report carries accepted/conflicts/
  * pending counts and, on failure, an error code.
  */
 import { randomUUID } from "node:crypto";
-import type { HttpFetch, ProfileId } from "../adapters/types.js";
+import type { ProfileId } from "../adapters/types.js";
 import { readAccountsIndex } from "../local/profiles.js";
 import { sendWriter, startWriter, type WriterRequest, type WriterResult } from "../local/writer.js";
-import { configureSyncHttp, type SyncReport } from "./client.js";
-
-export interface RunSyncOptions {
-  timeoutMs?: number;
-}
-
-export const DEFAULT_SYNC_TIMEOUT_MS = 30_000;
-
-/** One bounded request: fresh AbortController per call, timer cleared in `finally`. */
-function withTimeout(http: HttpFetch, timeoutMs: number): HttpFetch {
-  return async (input, init = {}) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await http(input, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-}
+import type { SyncReport } from "./client.js";
 
 function reportFromResult(result: WriterResult): SyncReport {
   if (result.ok) {
@@ -53,17 +36,10 @@ function reportFromResult(result: WriterResult): SyncReport {
 
 /**
  * Run one profile's sync through the writer. Never throws: on a writer failure it
- * returns a zeroed report carrying the writer's error code. The passed `http` is
- * wrapped with a timeout and injected into the writer before dispatch.
+ * returns a zeroed report carrying the writer's error code. The transport must be
+ * injected at the composition root with `configureSyncHttp` before dispatch.
  */
-export async function runSync(
-  root: string,
-  profileId: ProfileId,
-  http: HttpFetch,
-  options: RunSyncOptions = {},
-): Promise<SyncReport> {
-  configureSyncHttp(withTimeout(http, options.timeoutMs ?? DEFAULT_SYNC_TIMEOUT_MS));
-
+export async function runSync(root: string, profileId: ProfileId): Promise<SyncReport> {
   const request: WriterRequest = { request_uid: randomUUID(), profile_id: profileId, command: "sync_once", payload: {} };
   const direct = await sendWriter(root, request);
   if (direct.ok || direct.error.code !== "writer_unavailable") return reportFromResult(direct);
@@ -90,11 +66,7 @@ export interface SyncProfileReport {
  * profile's sync sequentially. Returns only profile ids and reports — never a
  * token, path, raw text or native session id.
  */
-export async function runSyncProfiles(
-  root: string,
-  http: HttpFetch,
-  options: RunSyncOptions = {},
-): Promise<SyncProfileReport[]> {
+export async function runSyncProfiles(root: string): Promise<SyncProfileReport[]> {
   const index = await readAccountsIndex(root);
   const profileIds = [
     ...new Set(
@@ -106,7 +78,7 @@ export async function runSyncProfiles(
 
   const out: SyncProfileReport[] = [];
   for (const profileId of profileIds) {
-    out.push({ profile_id: profileId, report: await runSync(root, profileId, http, options) });
+    out.push({ profile_id: profileId, report: await runSync(root, profileId) });
   }
   return out;
 }

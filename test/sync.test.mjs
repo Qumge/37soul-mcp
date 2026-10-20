@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { openStore, defaultStoreFs } from "../dist/local/store.js";
+import { openStore, defaultStoreFs, StoreError } from "../dist/local/store.js";
 import { selectContext } from "../dist/assets/context.js";
 import { contentDigest } from "../dist/assets/protocol.js";
 import {
@@ -1377,6 +1377,42 @@ test("sync: first-sight consent replay_from resets the cursor once", async () =>
   await store.close();
   await syncOnce("p1", http, syncOpts(root));
   assert.equal(pullCursors[1], "c-after", "a same-revision replay does not reset the cursor again");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 23 ───────────────────────────────────────────────────────────────────────────────
+test("sync: an internal store failure surfaces a code, never an absolute path", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.outbox["reg"] = {
+      operation_id: "reg",
+      operation_kind: "register_soul",
+      request: { soul_uid: IDS.soul, identity: { name: "Growth", description: "", character: "", greeting: "" }, consent_categories: [] },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/souls") return { status: 201, body: { soul: { soul_uid: IDS.soul } } };
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 200, body: emptyPull() };
+    return { status: 500, body: {} };
+  });
+
+  // The store's atomic commit writes the snapshot through fs.writeFile; a failure
+  // there must surface as the typed StoreError code, never its (path-bearing) message.
+  const brokenFs = {
+    ...defaultStoreFs,
+    writeFile: async () => {
+      throw new StoreError("repair_required", "/home/user/.37soul/profiles/p1/snapshot.json is unreadable");
+    },
+  };
+
+  const report = await syncOnce("p1", http, { ...syncOpts(root), fs: brokenFs });
+  assert.equal(report.error, "repair_required", "a store failure is reported as its typed code");
+  assert.ok(!JSON.stringify(report).includes("/"), "no path segment (no '/') leaks into the report");
 
   rmSync(root, { recursive: true, force: true });
 });
