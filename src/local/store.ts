@@ -6,11 +6,14 @@
  * 0600 temp file -> fsync file -> back up the current valid snapshot -> rename ->
  * fsync the directory. A corrupt main snapshot is recovered from .bak; when both
  * are corrupt the store stops writing, keeps the files untouched and reports a
- * repair_required state — it never replaces them with an empty store.
+ * repair_required state — it never replaces them with an empty store. An unreadable
+ * snapshot is likewise never conflated with a fresh store (only ENOENT means absent).
  *
  * The store lives beside the legacy state.json/config.json/spool/queue and never
  * reuses them for assets. The only legacy migration is the machine id (device_id)
- * from state.json; a corrupt state.json can never clear the new assets.
+ * from a valid state.json; a corrupt state.json can never clear the new assets. A
+ * per-profile device.json (0600) pins the generated device_id immutably so a fresh
+ * anonymous profile keeps one stable id from the very first open.
  *
  * The whole commit goes through the injectable `StoreFs` seam (openStore's third
  * argument). Tests inject crashes / errno failures at exact points, so the atomic
@@ -18,6 +21,7 @@
  */
 import { randomUUID } from "node:crypto";
 import {
+  link as fsLink,
   mkdir,
   open,
   readFile as fsReadFile,
@@ -26,6 +30,7 @@ import {
   writeFile as fsWriteFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Asset, AssetTombstone, Consent, Soul } from "../assets/protocol.js";
 import type { BindingSnapshot, ExtractionRequest, ProfileId } from "../adapters/types.js";
 import { readMachineId } from "../agentd/state.js";
@@ -128,6 +133,8 @@ export interface StoreFs {
   writeFile(file: string, data: string, options?: { mode?: number }): Promise<void>;
   readFile(file: string): Promise<string>;
   rename(from: string, to: string): Promise<void>;
+  /** Atomic create-if-not-exists (fails with EEXIST instead of overwriting). */
+  link(from: string, to: string): Promise<void>;
   rm(file: string, options?: { force?: boolean }): Promise<void>;
   open(file: string, flags: string, mode?: number): Promise<FsFileHandle>;
   fsyncFile(file: string): Promise<void>;
@@ -141,6 +148,7 @@ export const defaultStoreFs: StoreFs = {
   writeFile: (file, data, options) => fsWriteFile(file, data, options),
   readFile: (file) => fsReadFile(file, "utf8"),
   rename: (from, to) => fsRename(from, to),
+  link: (from, to) => fsLink(from, to),
   rm: (file, options) => fsRm(file, options),
   open: async (file, flags, mode) => {
     const handle = await open(file, flags, mode);
@@ -192,6 +200,10 @@ export function snapshotBackupPath(root: string, profileId: ProfileId): string {
   return path.join(profileDir(root, profileId), "snapshot.json.bak");
 }
 
+export function devicePath(root: string, profileId: ProfileId): string {
+  return path.join(profileDir(root, profileId), "device.json");
+}
+
 export function writerLockPath(root: string): string {
   return path.join(root, "writer.lock");
 }
@@ -238,7 +250,7 @@ export async function openStore(
     throw new StoreError("invalid_profile", "profile_id must be a non-empty string");
   }
   const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
-  const deviceId = options.deviceId ?? (await readMachineId(root)) ?? randomUUID();
+  const deviceId = options.deviceId ?? (await resolveDeviceId(fs, root, profileId));
 
   let closed = false;
   let mutex: Promise<void> = Promise.resolve();
@@ -291,6 +303,64 @@ export async function openStore(
   };
 }
 
+/**
+ * The per-profile device id, stable from the very first open (Task 3 keys bindings
+ * on profile_id + device_id). Precedence: an already-persisted device.json (immutable
+ * once created) -> legacy state.json machine id -> a freshly generated UUID, which is
+ * persisted to device.json atomically so repeated opens agree even without a login.
+ * `options.deviceId` (the test seam) bypasses all of this and is never persisted.
+ */
+async function resolveDeviceId(fs: StoreFs, root: string, profileId: ProfileId): Promise<string> {
+  const file = devicePath(root, profileId);
+  const persisted = await readDeviceId(fs, file);
+  if (persisted !== null) return persisted;
+
+  const machine = await readMachineId(root);
+  const candidate = machine ?? randomUUID();
+  await persistDeviceId(fs, root, profileId, candidate);
+  // A concurrent first-open may have won; read back so every caller agrees.
+  return (await readDeviceId(fs, file)) ?? candidate;
+}
+
+async function readDeviceId(fs: StoreFs, file: string): Promise<string | null> {
+  const read = await readSnapshotFile(fs, file);
+  if (read.kind !== "ok") return null;
+  try {
+    const parsed = JSON.parse(read.raw) as { device_id?: unknown };
+    return typeof parsed.device_id === "string" && parsed.device_id !== "" ? parsed.device_id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistDeviceId(
+  fs: StoreFs,
+  root: string,
+  profileId: ProfileId,
+  id: string,
+): Promise<void> {
+  const dir = profileDir(root, profileId);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const file = devicePath(root, profileId);
+  const temp = path.join(dir, `device.json.tmp-${process.pid}-${randomUUID()}`);
+  const handle = await fs.open(temp, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify({ device_id: id })}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await fs.link(temp, file); // create-if-not-exists: never clobber a concurrent winner
+  } catch (error) {
+    await fs.rm(temp, { force: true }).catch(() => {});
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw mapWriteError(error);
+    return; // a concurrent first-open already persisted it; keep theirs
+  }
+  await fs.rm(temp, { force: true }).catch(() => {});
+  await fs.fsyncDir(dir);
+}
+
 type LoadedSnapshot =
   | { kind: "ok"; snapshot: StoreSnapshot; recovered: boolean }
   | { kind: "fresh" }
@@ -304,13 +374,25 @@ async function loadSnapshot(
   const main = snapshotPath(root, profileId);
   const bak = snapshotBackupPath(root, profileId);
 
-  const mainRaw = await readIfPresent(fs, main);
-  if (mainRaw !== null) {
-    const parsed = parseValid(mainRaw, profileId);
+  const mainRead = await readSnapshotFile(fs, main);
+  if (mainRead.kind === "unreadable") {
+    return {
+      kind: "repair",
+      message: `snapshot for profile ${profileId} is unreadable (${mainRead.code}); refusing to overwrite it with an empty store (repair required)`,
+    };
+  }
+  if (mainRead.kind === "ok") {
+    const parsed = parseValid(mainRead.raw, profileId);
     if (parsed) return { kind: "ok", snapshot: parsed, recovered: false };
-    const bakRaw = await readIfPresent(fs, bak);
-    if (bakRaw !== null) {
-      const bakParsed = parseValid(bakRaw, profileId);
+    const bakRead = await readSnapshotFile(fs, bak);
+    if (bakRead.kind === "unreadable") {
+      return {
+        kind: "repair",
+        message: `snapshot for profile ${profileId} is corrupt and its backup is unreadable (${bakRead.code}); refusing to overwrite with an empty store (repair required)`,
+      };
+    }
+    if (bakRead.kind === "ok") {
+      const bakParsed = parseValid(bakRead.raw, profileId);
       if (bakParsed) return { kind: "ok", snapshot: bakParsed, recovered: true };
     }
     return {
@@ -319,24 +401,48 @@ async function loadSnapshot(
     };
   }
 
-  const bakRaw = await readIfPresent(fs, bak);
-  if (bakRaw !== null) {
-    const bakParsed = parseValid(bakRaw, profileId);
+  // Main is missing.
+  const bakRead = await readSnapshotFile(fs, bak);
+  if (bakRead.kind === "unreadable") {
+    return {
+      kind: "repair",
+      message: `snapshot for profile ${profileId} is missing and its backup is unreadable (${bakRead.code}); refusing to overwrite with an empty store (repair required)`,
+    };
+  }
+  if (bakRead.kind === "ok") {
+    const bakParsed = parseValid(bakRead.raw, profileId);
     if (bakParsed) return { kind: "ok", snapshot: bakParsed, recovered: true };
     return {
       kind: "repair",
-      message: `snapshot for profile ${profileId} is missing and its backup is corrupt; refusing to overwrite it with an empty store (repair required)`,
+      message: `snapshot for profile ${profileId} is missing and its backup is corrupt; refusing to overwrite with an empty store (repair required)`,
     };
   }
 
   return { kind: "fresh" };
 }
 
-async function readIfPresent(fs: StoreFs, file: string): Promise<string | null> {
+type ReadSnapshotResult =
+  | { kind: "ok"; raw: string }
+  | { kind: "missing" }
+  | { kind: "unreadable"; code: string; message: string };
+
+/**
+ * Only ENOENT means "absent". Any other read error on an existing path means
+ * "present but unreadable" and must never be conflated with a fresh store —
+ * otherwise an unreadable snapshot would be silently overwritten with an empty one.
+ */
+async function readSnapshotFile(fs: StoreFs, file: string): Promise<ReadSnapshotResult> {
   try {
-    return await fs.readFile(file);
-  } catch {
-    return null;
+    const raw = await fs.readFile(file);
+    return { kind: "ok", raw };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT") return { kind: "missing" };
+    return {
+      kind: "unreadable",
+      code: code ?? "EIO",
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -409,9 +515,17 @@ async function commit(
 }
 
 async function isCurrentValid(fs: StoreFs, target: string, profileId: ProfileId): Promise<boolean> {
-  const raw = await readIfPresent(fs, target);
-  if (raw === null) return false;
-  return parseValid(raw, profileId) !== null;
+  const read = await readSnapshotFile(fs, target);
+  if (read.kind === "ok") return parseValid(read.raw, profileId) !== null;
+  if (read.kind === "unreadable") {
+    // Present but unreadable now (e.g. a permission change mid-transaction): stop,
+    // never rename an empty draft over it.
+    throw new StoreError(
+      "repair_required",
+      `snapshot at ${target} is unreadable (${read.code}); refusing to overwrite it`,
+    );
+  }
+  return false;
 }
 
 function mapWriteError(error: unknown): StoreError {
@@ -438,10 +552,14 @@ function mapWriteError(error: unknown): StoreError {
 // --- single-writer process lock --------------------------------------------------
 
 /**
- * Exclusive-create lock with live-holder verification and atomic stale takeover.
- * Only one caller can win the takeover rename, so a lost-lock race can never start
- * a second writer: the losers hit ENOENT, retry, see the winner's live lock and are
- * refused with `locked`.
+ * Exclusive single-writer lock.
+ *
+ * The payload is written to a unique temp file first and then `link`ed into place:
+ * link() fails with EEXIST instead of overwriting, so the lock file is never
+ * observable empty or partial — a concurrent EEXIST reader cannot steal a live
+ * writer's lock mid-create. An empty/unparseable lock is treated as "possibly live"
+ * and given a bounded grace before a stale takeover, and release verifies the token
+ * still matches before deleting, so a writer can never delete a lock it no longer owns.
  */
 export async function acquireWriterLock(
   root: string,
@@ -449,49 +567,68 @@ export async function acquireWriterLock(
 ): Promise<() => Promise<void>> {
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
   const file = writerLockPath(root);
+  const token = randomUUID();
   const payload = JSON.stringify({
     pid: process.pid,
     started_at: new Date().toISOString(),
-    token: randomUUID(),
+    token,
   });
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
+    const temp = `${file}.create-${process.pid}-${randomUUID()}`;
+    const handle = await fs.open(temp, "wx", 0o600);
     try {
-      const handle = await fs.open(file, "wx", 0o600);
-      try {
-        await handle.writeFile(payload);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await handle.writeFile(payload);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await fs.link(temp, file);
+      await fs.rm(temp, { force: true }).catch(() => {});
       return async () => {
-        await fs.rm(file, { force: true }).catch(() => {});
+        // Release only if we still own it: never delete a lock a competitor replaced.
+        const holder = await readLockHolder(fs, file);
+        if (holder !== null && holder.token === token && holder.pid === process.pid) {
+          await fs.rm(file, { force: true }).catch(() => {});
+        }
       };
     } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => {});
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const holder = await readLockHolder(fs, file);
-      if (holder !== null && isProcessAlive(holder.pid)) {
-        throw new WriterLockBusyError(`another writer is already running (pid ${holder.pid})`);
-      }
-      const token = `${file}.stale-${process.pid}-${randomUUID()}`;
-      try {
-        await fs.rename(file, token);
-        await fs.rm(token, { force: true }).catch(() => {});
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw err;
-      }
+    }
+
+    const holder = await readLockHolder(fs, file);
+    if (holder !== null && isProcessAlive(holder.pid)) {
+      throw new WriterLockBusyError(`another writer is already running (pid ${holder.pid})`);
+    }
+    // Empty/unparseable lock: possibly live (old-format writer mid-create). Give it a
+    // bounded grace before stealing instead of ripping it away immediately.
+    if (holder === null && attempt < 7) {
+      await sleep(50 * (attempt + 1));
+      continue;
+    }
+    // Dead holder, or an unparseable lock past the grace: atomic stale takeover.
+    // Only one caller wins the rename; losers hit ENOENT, retry, and see the winner.
+    const stale = `${file}.stale-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.rename(file, stale);
+      await fs.rm(stale, { force: true }).catch(() => {});
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
     }
   }
   throw new WriterLockBusyError("could not acquire the writer lock");
 }
 
-async function readLockHolder(fs: StoreFs, file: string): Promise<{ pid: number } | null> {
-  const raw = await readIfPresent(fs, file);
-  if (raw === null) return null;
+async function readLockHolder(fs: StoreFs, file: string): Promise<{ pid: number; token?: string } | null> {
+  const read = await readSnapshotFile(fs, file);
+  if (read.kind !== "ok") return null;
   try {
-    const parsed = JSON.parse(raw) as { pid?: unknown };
-    return typeof parsed.pid === "number" ? { pid: parsed.pid } : null;
+    const parsed = JSON.parse(read.raw) as { pid?: unknown; token?: unknown };
+    if (typeof parsed.pid !== "number") return null;
+    return { pid: parsed.pid, ...(typeof parsed.token === "string" ? { token: parsed.token } : {}) };
   } catch {
     return null;
   }

@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { rename as fsRename, writeFile as fsWriteFile } from "node:fs/promises";
+import { rename as fsRename, writeFile as fsWriteFile, readFile as fsReadFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -21,6 +21,7 @@ import {
   snapshotPath,
   snapshotBackupPath,
   writerLockPath,
+  devicePath,
 } from "../dist/local/store.js";
 import { startWriter, sendWriter, registerWriterCommand } from "../dist/local/writer.js";
 
@@ -482,5 +483,80 @@ test("writer: unavailable writer and malformed requests never throw", async () =
   const unavailable = await sendWriter(root, { request_uid: "r1", profile_id: "p1", command: "status", payload: {} });
   assert.equal(unavailable.ok, false);
   assert.equal(unavailable.error.code, "writer_unavailable");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-review regressions (Important findings)
+// ---------------------------------------------------------------------------
+
+test("writer: release never deletes a lock it no longer owns", async () => {
+  const root = tempDir();
+  const writer = await startWriter(root);
+
+  // A competitor replaces the lock under the writer (live holder, different token).
+  writeFileSync(writerLockPath(root), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), token: "replacement" }));
+
+  await writer.close();
+
+  const holder = JSON.parse(readFileSync(writerLockPath(root), "utf8"));
+  assert.equal(holder.token, "replacement", "release must not delete a lock the writer no longer owns");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("store: unreadable snapshot is preserved and never overwritten with an empty store", async () => {
+  const root = tempDir();
+  const s = await openStore(root, "p1", { deviceId: "device-1" });
+  await s.transact((d) => { d.souls["v1"] = makeSoul("v1"); d.assets["a1"] = makeAsset("a1"); });
+  await s.close();
+
+  const main = snapshotPath(root, "p1");
+  const before = readFileSync(main, "utf8");
+
+  // Present but unreadable (EACCES), not missing.
+  const fs = {
+    readFile: async (file) => {
+      if (file.endsWith("snapshot.json")) {
+        const err = new Error("EACCES: permission denied (simulated)");
+        err.code = "EACCES";
+        throw err;
+      }
+      return fsReadFile(file, "utf8");
+    },
+  };
+
+  const reopened = await openStore(root, "p1", { fs, deviceId: "device-1" });
+  await assert.rejects(
+    () => reopened.read(),
+    (err) => err instanceof StoreError && err.code === "repair_required",
+  );
+  await assert.rejects(
+    () => reopened.transact((d) => { d.souls["v2"] = makeSoul("v2"); }),
+    (err) => err instanceof StoreError && err.code === "repair_required",
+    "an unreadable snapshot must stop writes, never be overwritten with an empty store",
+  );
+  await reopened.close();
+
+  assert.equal(readFileSync(main, "utf8"), before, "unreadable snapshot preserved byte-for-byte");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("store: fresh anonymous profile keeps a stable device_id across opens", async () => {
+  const root = tempDir();
+  const first = await openStore(root, "p1");
+  const snap1 = await first.read();
+  await first.close();
+
+  const second = await openStore(root, "p1");
+  const snap2 = await second.read();
+  await second.close();
+
+  assert.ok(snap1.device_id.length > 0, "a device_id is generated");
+  assert.equal(snap1.device_id, snap2.device_id, "device_id stable from the very first open");
+
+  const persisted = JSON.parse(readFileSync(devicePath(root, "p1"), "utf8"));
+  assert.equal(persisted.device_id, snap1.device_id, "generated device_id persisted immutably");
+
   rmSync(root, { recursive: true, force: true });
 });
