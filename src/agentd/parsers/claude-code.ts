@@ -25,6 +25,18 @@ const SKIP_TYPES = new Set([
   "cost-state",
 ]);
 
+/** Shared record skip predicate: sidechains, meta records, attachments and metadata
+ *  types. Task 6's adapter reuses this so the completed-turn boundary matches the
+ *  legacy transcript parser exactly. */
+export function isSkippedRecord(record: Record<string, unknown>): boolean {
+  return (
+    record.isSidechain === true ||
+    record.attachment != null ||
+    record.isMeta === true ||
+    (typeof record.type === "string" && SKIP_TYPES.has(record.type))
+  );
+}
+
 const SUMMARY_KEYS = ["file_path", "command", "pattern", "path", "url", "query", "prompt", "description"];
 
 export const MAX_EVENT_TEXT = 8000;
@@ -41,7 +53,7 @@ export function createClaudeCodeParser(opts: { externalId?: string } = {}): Tran
     const r = record as Record<string, any>;
 
     absorbMetadata(r);
-    if (r.isSidechain === true || r.attachment || SKIP_TYPES.has(r.type)) return [];
+    if (isSkippedRecord(r)) return [];
 
     if (r.type === "user") return userEvents(r);
     if (r.type === "assistant") return assistantEvents(r);

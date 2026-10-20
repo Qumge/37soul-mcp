@@ -14,6 +14,14 @@ import { cachePath, refreshBrief, ensureExclude } from "../dist/agentd/brief-cac
 import { dataRoot } from "../dist/install.js";
 import { loadState, saveConfig, saveState } from "../dist/agentd/state.js";
 import { spoolFile } from "../dist/agentd/spool.js";
+import { openStore } from "../dist/local/store.js";
+import { startWriter } from "../dist/local/writer.js";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const claudePayloads = JSON.parse(
+  readFileSync(path.join(here, "fixtures", "runtimes", "claude-code", "payloads.json"), "utf8"),
+);
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-hook-"));
@@ -370,5 +378,82 @@ test('hook command: malformed stdin exits 0 with empty stdout', async () => {
   });
   assert.equal(code, 0);
   assert.deepEqual(io.out, []);
+  cleanup();
+});
+
+test('hook command: assets-mode SessionStart injects the Soul context and records an injected receipt', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = claudePayloads.session_start.session_id;
+
+  // Seed an assets-only profile: a Soul, a bound native session and one current asset.
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(
+    path.join(root, 'profiles', profileId, 'device.json'),
+    `${JSON.stringify({ device_id: deviceId })}\n`,
+    { mode: 0o600 },
+  );
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = '123';
+    d.cloud_device_uid = 'cdu';
+    d.souls['s1'] = {
+      soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
+      identity: { name: 'Growth', description: '', character: '', greeting: '' }, state: 'active',
+    };
+    d.consents['cdu:s1'] = {
+      cloud_device_uid: 'cdu', soul_uid: 's1', revision: 1,
+      categories: ['identity', 'relationship', 'experience'], enabled: true,
+    };
+    d.bindings[`${profileId}\u0000${deviceId}\u0000claude-code\u0000${sessionId}`] = {
+      binding_uid: 'b1', session_ref: '30000000-0000-4000-8000-000000000001', runtime_kind: 'claude-code',
+      soul_uid: 's1', revision: 1, state: 'bound', profile_id: profileId, device_id: deviceId, native_session_id: sessionId,
+    };
+    d.assets['a1'] = {
+      asset_uid: 'a1', soul_uid: 's1', kind: 'relationship', trait: 'preference',
+      content: '客户要先看真实付费证据，再讨论渠道', applicability: '客户分析', tags: [],
+      evidence: 'explicit_user_statement', verification: 'unverified', sensitivity: 'normal',
+      state: 'active', revision: 1, supersedes_uid: null, pinned: false,
+      source: { runtime_kind: 'claude-code', session_ref: '30000000-0000-4000-8000-000000000001', event_ref: 'e1', occurred_at: '2026-10-20T04:00:00Z' },
+      sync_state: 'pending_sync', cloud_revision: null,
+    };
+  });
+  await store.close();
+  writeFileSync(
+    path.join(root, 'accounts.json'),
+    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    { mode: 0o600 },
+  );
+
+  // The writer is required to record the injected receipt.
+  const writer = await startWriter(root);
+
+  const io = capture();
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'SessionStart',
+    fetch: async () => { throw new Error('the repo brief must not be fetched in assets mode'); },
+    stdin: JSON.stringify({ ...claudePayloads.session_start, source: 'resume' }),
+    stdout: io.stdout, stderr: io.stderr,
+    getGitState: async () => { throw new Error('the repo brief must not be fetched in assets mode'); },
+  });
+
+  await writer.close();
+
+  assert.equal(io.out.length, 1, 'the Soul context was injected');
+  const wrapper = JSON.parse(io.out[0]);
+  assert.equal(wrapper.hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.match(wrapper.hookSpecificOutput.additionalContext, /客户要先看真实付费证据/);
+  assert.ok(!wrapper.hookSpecificOutput.additionalContext.includes('brief'), 'no repo brief leaks into the Soul context');
+
+  // The receipt is recorded as injected only after actual delivery.
+  const store2 = await openStore(root, profileId);
+  const snap = await store2.read();
+  await store2.close();
+  const receipts = Object.values(snap.receipts);
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].stage, 'injected');
+  assert.equal(receipts[0].binding_uid, 'b1');
   cleanup();
 });

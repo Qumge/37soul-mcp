@@ -1,0 +1,32 @@
+{
+  "session_start": {
+    "hook_event_name": "SessionStart",
+    "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+    "source": "startup",
+    "cwd": "/Users/dev/nimbus"
+  },
+  "user_prompt_submit": {
+    "hook_event_name": "UserPromptSubmit",
+    "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+    "prompt": "给 /users 接口加分页",
+    "cwd": "/Users/dev/nimbus"
+  },
+  "stop": {
+    "hook_event_name": "Stop",
+    "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+    "last_assistant_message": "给查询层加上 limit/offset",
+    "cwd": "/Users/dev/nimbus"
+  },
+  "pre_compact": {
+    "hook_event_name": "PreCompact",
+    "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+    "trigger": "auto",
+    "custom_instructions": ""
+  },
+  "resume": {
+    "hook_event_name": "SessionStart",
+    "session_id": "aaaaaaaa-1111-2222-3333-444444444444",
+    "source": "resume",
+    "cwd": "/Users/dev/nimbus"
+  }
+}

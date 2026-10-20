@@ -24,6 +24,10 @@ import type { RuntimeEvent, RuntimeEventKind } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { sendWriter } from "./local/writer.js";
 import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
+import { openStore } from "./local/store.js";
+import { bindingKey } from "./local/bindings.js";
+import { ownerContextInput } from "./sync/client.js";
+import { selectContext } from "./assets/context.js";
 
 export interface HookDeps {
   home: string;
@@ -229,6 +233,19 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     const channel = INJECTION_CHANNEL[deps.agentKind] ?? "none";
     if (deps.event === "SessionStart" && channel === "SessionStart") {
       if (payload.source === "compact") await clearReinjectMarker(root, sessionId).catch(() => {});
+
+      // Assets mode (soul-assets/v1): inject the bound Soul's current context instead
+      // of the repo brief. Read-only binding lookup + the shared byte-budgeted
+      // renderer; the repo brief is never fetched here, and the injected receipt is
+      // recorded through the writer only after actual stdout delivery.
+      const assets = resolveLocalAssetsProfileSync(root);
+      if (assets) {
+        await withBudget(deps.timeoutMs ?? 300, () =>
+          injectSoulContext(root, assets, deps.agentKind, sessionId, deps.stdout),
+        ).catch(() => {});
+        return 0;
+      }
+
       const reason = payload.source === "compact" ? "compact" : "start";
       const startedAt = deps.now?.() ?? Date.now();
       const text = await withBudget(deps.timeoutMs ?? 300, () => resolveBrief(deps, cwd ?? null, { sessionId, reason }));
@@ -301,6 +318,50 @@ async function emitRuntimeEvent(
     command: "runtime_event",
     payload: { event },
   });
+}
+
+/**
+ * Assets-mode Soul-context injection (Task 6). Read-only: the bound native session
+ * is looked up from the snapshot (never written here — binding creation stays with
+ * the writer/scheduler), the context is rendered by the shared selector, delivered
+ * to stdout, and only then is the `injected` receipt recorded through the writer.
+ * A missing binding, an empty render, or a missing writer never fails the session.
+ */
+async function injectSoulContext(
+  root: string,
+  assets: { profile_id: string; device_id: string },
+  agentKind: string,
+  sessionId: string,
+  stdout: (text: string) => void,
+): Promise<void> {
+  const store = await openStore(root, assets.profile_id);
+  try {
+    const snap = await store.read();
+    const key = bindingKey({
+      profile_id: assets.profile_id,
+      device_id: assets.device_id,
+      runtime_kind: agentKind as RuntimeKind,
+      native_session_id: sessionId,
+    });
+    const binding = snap.bindings[key];
+    if (!binding || binding.state !== "bound") return;
+
+    const input = ownerContextInput(snap, binding.soul_uid, binding, "session");
+    const bundle = selectContext(input);
+    if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return;
+
+    // Deliver first, then record the receipt — an injected receipt must only exist
+    // after the context actually reached the session.
+    stdout(`${wrapAdditionalContext(bundle.rendered_text)}\n`);
+    await sendWriter(root, {
+      request_uid: randomUUID(),
+      profile_id: assets.profile_id,
+      command: "record_receipt",
+      payload: { binding, bundle, stage: "injected" },
+    });
+  } finally {
+    await store.close();
+  }
 }
 
 /** hook 事件 → spool 记录（§6.3 的映射表）。返回 null = 这个载荷没有可记的事件。 */

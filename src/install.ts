@@ -16,6 +16,7 @@ import {
 } from "./config-editor.js";
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
+import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
 
 export const INSTRUCTIONS_FRAGMENT = `## 37Soul
 At the start of a session you may receive a "37Soul brief" (or find it in .37soul/brief.md
@@ -27,16 +28,9 @@ If no brief arrived and a 37soul MCP server is connected, call \`resume\` once b
 
 export const CLAUDE_HOOK_MATCHER = "startup|resume|clear|compact";
 
-/** v2 §6.3：Claude Code 订阅的事件 —— spool 需要 user/tool/assistant 和生命周期信号。 */
-export const CLAUDE_HOOK_EVENTS: Array<{ event: string; matcher?: string }> = [
-  { event: "SessionStart", matcher: CLAUDE_HOOK_MATCHER },
-  { event: "UserPromptSubmit" },
-  { event: "PostToolUse" },
-  { event: "PostToolUseFailure" },
-  { event: "Stop" },
-  { event: "PreCompact" },
-  { event: "SessionEnd" }
-];
+/** v2 §6.3 / Task 6：Claude Code 订阅的事件已收敛到运行时适配器（单一事实来源），
+ *  安装器与适配器不会再各自维护一份而漂移。 */
+export const CLAUDE_HOOK_EVENTS = CLAUDE_CODE_HOOK_EVENTS;
 
 export interface InstallDeps {
   home: string;
