@@ -235,11 +235,41 @@ export function writeOpenCodePlugin(home: string): {
 }
 
 /** Remove the managed plugin file; returns false when there is nothing to remove. */
-export function removeOpenCodePlugin(home: string): boolean {
+export interface OpenCodePluginRemoval {
+  /** The managed entry is gone (removed, or nothing was installed). */
+  removed: boolean;
+  /** A differing file was preserved as a timestamped `.37soul-*.bak` before removal. */
+  backed_up: boolean;
+  /** An unreadable file was left untouched (nothing removed). */
+  preserved: boolean;
+}
+
+/**
+ * Remove the managed plugin file, hash-aware: the on-disk content is compared with
+ * the install manifest's recorded SHA-256 (passed in by the installer), so a user-
+ * or OpenCode-modified file is backed up (same `.37soul-*.bak` convention as
+ * install) before the managed entry is removed — a modified file is never destroyed
+ * outright. An unreadable file is preserved and reported, never deleted. Without a
+ * recorded hash the file is treated as unverifiable and backed up too.
+ */
+export function removeOpenCodePlugin(home: string, opts: { expectedSha256?: string } = {}): OpenCodePluginRemoval {
   const file = openCodePluginPath(home);
-  if (!existsSync(file)) return false;
+  if (!existsSync(file)) return { removed: false, backed_up: false, preserved: false };
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    // Unreadable (e.g. permission denied): preserve it, report, remove nothing.
+    return { removed: false, backed_up: false, preserved: true };
+  }
+  const actual = createHash("sha256").update(text, "utf8").digest("hex");
+  const unchanged = opts.expectedSha256 !== undefined && actual === opts.expectedSha256;
+  if (!unchanged) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+    writeFileSync(`${file}.37soul-${stamp}.bak`, text, { mode: 0o600 });
+  }
   rmSync(file, { force: true });
-  return true;
+  return { removed: true, backed_up: !unchanged, preserved: false };
 }
 
 function parseJsonl(jsonl: string): Array<Record<string, any>> {

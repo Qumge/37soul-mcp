@@ -39,6 +39,7 @@ export const OPENCODE_PLUGIN_SOURCE = `/**
  * the local 37soul writer via \`hook --agent opencode --event <event>\`. A bridge
  * failure never fails the user's work.
  */
+import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -52,6 +53,25 @@ function launcher() {
   return "37soul";
 }
 
+// The bridge spawns exactly ONE command: the installed 37soul launcher's local
+// \`hook --agent opencode --event <event>\` — fixed argv array (no shell), never the
+// host runtime, never a network call. The payload is bounded and fed on stdin; a
+// short timeout bounds the wait; exit code 0 is the only success signal we rely on.
+const MAX_BRIDGE_PAYLOAD_BYTES = 8192;
+const BRIDGE_TIMEOUT_MS = 2000;
+
+function boundedPayload(payload) {
+  const bounded = { ...(payload ?? {}) };
+  for (const key of Object.keys(bounded)) {
+    if (typeof bounded[key] === "string") bounded[key] = bounded[key].slice(0, 1024);
+  }
+  let json = JSON.stringify(bounded);
+  if (Buffer.byteLength(json, "utf8") > MAX_BRIDGE_PAYLOAD_BYTES) {
+    json = json.slice(0, MAX_BRIDGE_PAYLOAD_BYTES);
+  }
+  return json;
+}
+
 function bridge(event, payload) {
   return new Promise((resolve) => {
     let child;
@@ -63,12 +83,27 @@ function bridge(event, payload) {
       resolve();
       return;
     }
-    child.on("error", () => resolve());
-    child.on("close", () => resolve());
-    try {
-      child.stdin.end(JSON.stringify(payload));
-    } catch {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
       resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      finish();
+    }, BRIDGE_TIMEOUT_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    child.on("error", finish);
+    child.on("close", finish);
+    try {
+      child.stdin.end(boundedPayload(payload));
+    } catch {
+      finish();
     }
   });
 }

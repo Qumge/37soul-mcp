@@ -765,6 +765,21 @@ export async function install(
   };
 }
 
+/** The install manifest's recorded SHA-256 for the managed OpenCode plugin, if any. */
+async function openCodePluginManifestSha256(home: string): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(installManifestPath(home), "utf8")) as {
+      entries?: Array<{ kind?: string; sha256?: unknown }>;
+    };
+    for (const entry of parsed.entries ?? []) {
+      if (entry.kind === "opencode_plugin" && typeof entry.sha256 === "string") return entry.sha256;
+    }
+  } catch {
+    // no manifest / unreadable: the file is treated as unverifiable (backed up)
+  }
+  return undefined;
+}
+
 export async function uninstall(deps: InstallDeps): Promise<string[]> {
   const removed: string[] = [];
   const root = dataRoot(deps.home);
@@ -805,7 +820,13 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
   if (removeCodexHookConfig(deps.home)) removed.push(path.relative(deps.home, codexHookConfigPath(deps.home)));
 
   // 2c. OpenCode 插件桥（ONE 受管静态文件；只删这一条，别的 vendor 插件不动）。
-  if (removeOpenCodePlugin(deps.home)) removed.push(path.relative(deps.home, openCodePluginPath(deps.home)));
+  // 哈希感知：只删没被改过的受管文件；被用户/OpenCode 改过的先备份再删，读不了就保留。
+  const pluginSha = await openCodePluginManifestSha256(deps.home);
+  const pluginRemoval = removeOpenCodePlugin(deps.home, { expectedSha256: pluginSha });
+  if (pluginRemoval.removed) removed.push(path.relative(deps.home, openCodePluginPath(deps.home)));
+  if (pluginRemoval.preserved) {
+    deps.log?.(`  kept ${openCodePluginPath(deps.home)} (unreadable) — remove it by hand if it is 37soul's`);
+  }
 
   // 3. MCP 条目（best effort）。
   for (const argv of [

@@ -738,6 +738,39 @@ test("uninstall: removes only the OpenCode plugin entry and leaves other plugins
   h.cleanup();
 });
 
+test("uninstall: a modified OpenCode plugin is backed up before removal, never destroyed", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+  await install(h.deps, { agents: ["opencode"] });
+
+  const pluginPath = openCodePluginPath(h.home);
+  const pluginDir = openCodePluginDir(h.home);
+  writeFileSync(pluginPath, "// user-modified\n", { mode: 0o600 });
+
+  await uninstall(h.deps);
+
+  assert.equal(statSync(pluginPath, { throwIfNoEntry: false }), undefined, "the managed entry is removed");
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${OPENCODE_PLUGIN_FILENAME}.37soul-`));
+  assert.equal(backups.length, 1, "the modified file is backed up exactly once");
+  assert.equal(readFileSync(path.join(pluginDir, backups[0]), "utf8"), "// user-modified\n", "the backup holds the modified content");
+
+  h.cleanup();
+});
+
+test("uninstall: an unchanged OpenCode plugin is simply removed (no backup)", async () => {
+  const h = harness({ fetch: opencodeDeviceFlow() });
+  await install(h.deps, { agents: ["opencode"] });
+
+  const pluginPath = openCodePluginPath(h.home);
+  const pluginDir = openCodePluginDir(h.home);
+  await uninstall(h.deps);
+
+  assert.equal(statSync(pluginPath, { throwIfNoEntry: false }), undefined, "the managed entry is removed");
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${OPENCODE_PLUGIN_FILENAME}.37soul-`));
+  assert.deepEqual(backups, [], "an unchanged file is removed without a backup");
+
+  h.cleanup();
+});
+
 test("doctor: OpenCode plugin bridge reports a specific honest state", async () => {
   const h = harness({ fetch: opencodeDeviceFlow() });
   await install(h.deps, { agents: ["opencode"] });

@@ -28,6 +28,7 @@ import {
 import {
   createOpenCodeAdapter,
   OPENCODE_PLUGIN_GENERATIONS,
+  OPENCODE_PLUGIN_SOURCE,
   openCodePluginGeneration,
   validateOpenCodeGenerations,
   inspectOpenCodePlugin,
@@ -733,4 +734,20 @@ test("opencode: internal task and reset stay isolated", async () => {
   assert.deepEqual(inspectOpenCodePlugin(root), { status: "not_loaded", generation: "v2", declared: "v2" });
 
   rmSync(root, { recursive: true, force: true });
+});
+
+test("opencode: the plugin bridge spawns only the local hook command and makes no network call", () => {
+  const source = OPENCODE_PLUGIN_SOURCE;
+
+  // Fixed argv array (no shell), spawning exactly the installed launcher's hook
+  // command — never the host runtime.
+  assert.ok(source.includes('["hook", "--agent", "opencode", "--event", event]'), "the hook command is a fixed argv array");
+  assert.ok(!/spawn\s*\(\s*["'`]/.test(source), "no shell-string spawn");
+
+  // No network surface anywhere in the bridge.
+  assert.ok(!/\b(fetch|http|https|net|tls|http2)\b/.test(source), "no network call");
+
+  // The payload is bounded and the wait has a short timeout (never hangs the host).
+  assert.ok(source.includes("MAX_BRIDGE_PAYLOAD_BYTES"), "payload is bounded");
+  assert.ok(source.includes("BRIDGE_TIMEOUT_MS"), "a short timeout bounds the wait");
 });
