@@ -505,6 +505,21 @@ test("writer: release never deletes a lock it no longer owns", async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("writer: acquires a stale 0-byte lock and serves status", async () => {
+  const root = tempDir();
+  mkdirSync(root, { recursive: true });
+  // A 0-byte/corrupt lock — exactly what the old create-then-write path could leave.
+  writeFileSync(writerLockPath(root), "");
+
+  const writer = await startWriter(root);
+  const status = await sendWriter(root, { request_uid: "r1", profile_id: "p1", command: "status", payload: {} });
+  assert.ok(status.ok, `writer must acquire the stale lock and serve: ${JSON.stringify(status)}`);
+  assert.equal(status.result.store_version, 1);
+
+  await writer.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("store: unreadable snapshot is preserved and never overwritten with an empty store", async () => {
   const root = tempDir();
   const s = await openStore(root, "p1", { deviceId: "device-1" });

@@ -574,7 +574,8 @@ export async function acquireWriterLock(
     token,
   });
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  let grace = 0;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
     const temp = `${file}.create-${process.pid}-${randomUUID()}`;
     const handle = await fs.open(temp, "wx", 0o600);
     try {
@@ -604,12 +605,15 @@ export async function acquireWriterLock(
     }
     // Empty/unparseable lock: possibly live (old-format writer mid-create). Give it a
     // bounded grace before stealing instead of ripping it away immediately.
-    if (holder === null && attempt < 7) {
-      await sleep(50 * (attempt + 1));
+    if (holder === null && grace < 7) {
+      grace += 1;
+      await sleep(50 * grace);
       continue;
     }
     // Dead holder, or an unparseable lock past the grace: atomic stale takeover.
-    // Only one caller wins the rename; losers hit ENOENT, retry, and see the winner.
+    // Only one caller wins the rename; losers hit ENOENT and retry. Always `continue`
+    // afterwards so the very next iteration links into the now-vacant path and
+    // acquires — the writer must not clean up a stale lock and then fail to start.
     const stale = `${file}.stale-${process.pid}-${randomUUID()}`;
     try {
       await fs.rename(file, stale);
@@ -618,6 +622,7 @@ export async function acquireWriterLock(
       if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw err;
     }
+    continue;
   }
   throw new WriterLockBusyError("could not acquire the writer lock");
 }
