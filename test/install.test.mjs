@@ -35,6 +35,14 @@ import {
   openCodePluginPath,
   openCodePluginSha256,
 } from "../dist/adapters/opencode.js";
+import {
+  HERMES_PLUGIN_FILENAME,
+  HERMES_PLUGIN_SOURCE,
+  hermesConfigPath,
+  hermesPluginDir,
+  hermesPluginPath,
+  hermesPluginSha256,
+} from "../dist/adapters/hermes.js";
 
 function tempHome() {
   const home = mkdtempSync(path.join(tmpdir(), "37soul-install-"));
@@ -784,6 +792,150 @@ test("doctor: OpenCode plugin bridge reports a specific honest state", async () 
   assert.ok(check, "the plugin bridge check is present");
   assert.equal(check.ok, false);
   assert.equal(check.detail, "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins");
+
+  h.cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// Hermes (Task 9): the ONE managed static Python bridge — install records it by
+// exact path + SHA-256, uninstall is hash-aware and never touches another
+// vendor's plugin, and doctor reports the gateway-only surface explicitly.
+// ---------------------------------------------------------------------------
+
+function hermesDeviceFlow() {
+  return deviceFlowFetch({ polls: [{ status: 201, body: { tokens: [{ agent_kind: "hermes", token: "TOKEN-HERMES" }] } }] });
+}
+
+test("install: records the managed Hermes bridge by exact path + SHA-256 and replaces only that entry", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+
+  // A pre-existing unrelated plugin file must survive install untouched.
+  const pluginDir = hermesPluginDir(h.home);
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(path.join(pluginDir, "some-other-plugin.py"), "print('other vendor')\n", { mode: 0o600 });
+  // A pre-existing file at OUR path gets backed up exactly once before replacement.
+  writeFileSync(hermesPluginPath(h.home), "print('old bridge')\n", { mode: 0o600 });
+
+  await install(h.deps, { agents: ["hermes"] });
+
+  const manifest = JSON.parse(readFileSync(installManifestPath(h.home), "utf8"));
+  const bridgeEntry = manifest.entries.find((entry) => entry.kind === "hermes_plugin");
+  assert.ok(bridgeEntry, "the managed bridge file is recorded in the manifest");
+  assert.equal(bridgeEntry.agent, "hermes");
+  assert.equal(bridgeEntry.file, hermesPluginPath(h.home));
+  assert.equal(bridgeEntry.sha256, hermesPluginSha256());
+
+  // The installed file is exactly our source.
+  assert.equal(readFileSync(hermesPluginPath(h.home), "utf8"), HERMES_PLUGIN_SOURCE);
+  // The pre-existing file was backed up, and the other vendor's plugin untouched.
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${HERMES_PLUGIN_FILENAME}.37soul-`));
+  assert.equal(backups.length, 1, "the pre-install file is backed up exactly once");
+  assert.equal(readFileSync(path.join(pluginDir, backups[0]), "utf8"), "print('old bridge')\n");
+  assert.equal(readFileSync(path.join(pluginDir, "some-other-plugin.py"), "utf8"), "print('other vendor')\n");
+
+  h.cleanup();
+});
+
+test("install: reports the Hermes bridge as installed-but-unverified with surface", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+
+  const result = await install(h.deps, { agents: ["hermes"] });
+  const hermesEntry = result.installed.find((entry) => entry.agentKind === "hermes");
+
+  // No global hook / instructions / MCP: the bridge file is the only managed artifact.
+  assert.equal(hermesEntry.hook, false);
+  assert.equal(hermesEntry.instructions, false);
+  assert.equal(hermesEntry.mcp, false);
+  // Honest report: our own write never makes trust/events/extraction/injection green.
+  // No `.hermes` config existed before install, so the detected surface is "none".
+  assert.deepEqual(hermesEntry.report, {
+    installed: true,
+    trusted: false,
+    events_seen: false,
+    extraction_capable: false,
+    injection_capable: false,
+    surface: "none",
+  });
+  assert.ok(
+    h.logs.some((line) => line.includes("hermes") && line.includes("trusted=pending") && line.includes("injection=no")),
+    "the honest state line is logged",
+  );
+
+  h.cleanup();
+});
+
+test("uninstall: removes only the Hermes bridge entry and leaves other plugins", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+
+  const pluginDir = hermesPluginDir(h.home);
+  mkdirSync(pluginDir, { recursive: true });
+  writeFileSync(path.join(pluginDir, "some-other-plugin.py"), "print('other vendor')\n", { mode: 0o600 });
+
+  await install(h.deps, { agents: ["hermes"] });
+  assert.ok(statSync(hermesPluginPath(h.home), { throwIfNoEntry: false }), "our bridge file exists after install");
+
+  const removed = await uninstall(h.deps);
+  assert.ok(removed.some((entry) => entry.includes(HERMES_PLUGIN_FILENAME)), "the bridge file removal is reported");
+  assert.equal(statSync(hermesPluginPath(h.home), { throwIfNoEntry: false }), undefined, "our bridge file is gone");
+  assert.equal(readFileSync(path.join(pluginDir, "some-other-plugin.py"), "utf8"), "print('other vendor')\n", "another vendor's plugin survives");
+
+  h.cleanup();
+});
+
+test("uninstall: a modified Hermes bridge is backed up before removal, never destroyed", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+  await install(h.deps, { agents: ["hermes"] });
+
+  const bridgePath = hermesPluginPath(h.home);
+  const pluginDir = hermesPluginDir(h.home);
+  writeFileSync(bridgePath, "# user-modified\n", { mode: 0o600 });
+
+  await uninstall(h.deps);
+
+  assert.equal(statSync(bridgePath, { throwIfNoEntry: false }), undefined, "the managed entry is removed");
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${HERMES_PLUGIN_FILENAME}.37soul-`));
+  assert.equal(backups.length, 1, "the modified file is backed up exactly once");
+  assert.equal(readFileSync(path.join(pluginDir, backups[0]), "utf8"), "# user-modified\n", "the backup holds the modified content");
+
+  h.cleanup();
+});
+
+test("uninstall: an unchanged Hermes bridge is simply removed (no backup)", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+  await install(h.deps, { agents: ["hermes"] });
+
+  const bridgePath = hermesPluginPath(h.home);
+  const pluginDir = hermesPluginDir(h.home);
+  await uninstall(h.deps);
+
+  assert.equal(statSync(bridgePath, { throwIfNoEntry: false }), undefined, "the managed entry is removed");
+  const backups = readdirSync(pluginDir).filter((name) => name.startsWith(`${HERMES_PLUGIN_FILENAME}.37soul-`));
+  assert.deepEqual(backups, [], "an unchanged file is removed without a backup");
+
+  h.cleanup();
+});
+
+test("doctor: Hermes gateway-only reports explicitly, never as CLI", async () => {
+  const h = harness({ fetch: hermesDeviceFlow() });
+
+  // A gateway-only config exists before install: the surface is detected and the
+  // doctor must say so instead of pretending the CLI can extract.
+  mkdirSync(path.dirname(hermesConfigPath(h.home)), { recursive: true });
+  writeFileSync(hermesConfigPath(h.home), `${JSON.stringify({ transport: "gateway", gateway: { url: "https://gateway.example" } })}\n`, { mode: 0o600 });
+
+  await install(h.deps, { agents: ["hermes"] });
+
+  const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
+  const report = await runDoctor({ ...h.deps, fetch: fetchImpl });
+  const byName = (r) => Object.fromEntries(r.checks.map((c) => [c.name, c]));
+
+  const check = byName(report)["hermes: plugin bridge"];
+  assert.ok(check, "the plugin bridge check is present");
+  assert.equal(check.ok, false);
+  assert.equal(
+    check.detail,
+    "Hermes config declares a gateway-only surface — this is not a CLI model capability, so structured extraction stays off",
+  );
 
   h.cleanup();
 });

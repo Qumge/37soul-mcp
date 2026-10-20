@@ -18,6 +18,7 @@ import { createFakeAdapter, RUNTIME_KINDS } from "../test/helpers/fake-runtime.m
 import { createClaudeCodeAdapter } from "../dist/adapters/claude-code.js";
 import { createCodexAdapter } from "../dist/adapters/codex.js";
 import { createOpenCodeAdapter } from "../dist/adapters/opencode.js";
+import { createHermesAdapter } from "../dist/adapters/hermes.js";
 
 function parseArgs(argv) {
   const args = { live: false, offline: false, runtimes: ["all"] };
@@ -113,17 +114,38 @@ function opencodeOfflineDeps() {
   };
 }
 
+/** The real Hermes adapter's offline deps: a minimal CLI-shaped turn fed through
+ *  readSource (the adapter still resolves its own completed-turn refs) and a stub
+ *  model that returns no proposals. No `.hermes` config exists, so `probe()` and
+ *  `inject()` stay honest (all-false / not delivered). Nothing is live/native. */
+function hermesOfflineDeps() {
+  const transcript = [
+    '{"type":"session.started","session_id":"h-offline-0001","cwd":"/tmp/37soul-probe-offline"}',
+    '{"type":"user_message","id":"u1","session_id":"h-offline-0001","text":"offline probe turn"}',
+    '{"type":"assistant_message","id":"a1","session_id":"h-offline-0001","text":"offline probe answer"}',
+  ].join("\n");
+  return {
+    home: "/tmp/37soul-probe-offline",
+    readSource: async () => transcript,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  };
+}
+
 for (const runtime_kind of wanted) {
   const isClaudeCode = runtime_kind === "claude-code";
   const isCodex = runtime_kind === "codex";
   const isOpenCode = runtime_kind === "opencode";
+  const isHermes = runtime_kind === "hermes";
   const adapter = isClaudeCode
     ? createClaudeCodeAdapter(claudeCodeOfflineDeps())
     : isCodex
       ? createCodexAdapter(codexOfflineDeps())
       : isOpenCode
         ? createOpenCodeAdapter(opencodeOfflineDeps())
-        : createFakeAdapter(runtime_kind);
+        : isHermes
+          ? createHermesAdapter(hermesOfflineDeps())
+          : createFakeAdapter(runtime_kind);
   const probe = await probeRuntime(adapter);
 
   // Prove bounded source scope, structured result and local receipt offline.
@@ -150,7 +172,7 @@ for (const runtime_kind of wanted) {
 
   report.push({
     runtime_kind,
-    source: isClaudeCode ? "claude-code-offline" : isCodex ? "codex-offline" : isOpenCode ? "opencode-offline" : "offline-fake",
+    source: isClaudeCode ? "claude-code-offline" : isCodex ? "codex-offline" : isOpenCode ? "opencode-offline" : isHermes ? "hermes-offline" : "offline-fake",
     version: probe.version,
     supported_version: null, // real supported versions are only registered after authorized live probes pass
     probe,

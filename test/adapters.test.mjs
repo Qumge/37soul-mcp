@@ -38,11 +38,26 @@ import {
   buildOpenCodeExtractionInvocation,
 } from "../dist/adapters/opencode.js";
 import { openStore } from "../dist/local/store.js";
+import { sendWriter, startWriter } from "../dist/local/writer.js";
 import { resolveBinding } from "../dist/local/bindings.js";
 import { handleRuntimeEvent } from "../dist/extraction/scheduler.js";
 import { ownerContextInput, recordReceipt } from "../dist/sync/client.js";
 import { selectContext } from "../dist/assets/context.js";
 import { contentDigest } from "../dist/assets/protocol.js";
+import {
+  createHermesAdapter,
+  HERMES_PLUGIN_FILENAME,
+  HERMES_PLUGIN_SOURCE,
+  detectHermesSurface,
+  hermesEventSurface,
+  hermesProbe,
+  inspectHermesPlugin,
+  writeHermesPlugin,
+  hermesCompletedTurnRefs,
+  renderHermesTurn,
+  buildHermesExtractionInvocation,
+  hermesPluginPath,
+} from "../dist/adapters/hermes.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const transcriptJsonl = readFileSync(
@@ -55,6 +70,18 @@ const codexRolloutJsonl = readFileSync(
 );
 const opencodeTurnJsonl = readFileSync(
   path.join(here, "fixtures", "runtimes", "opencode", "turn.jsonl"),
+  "utf8",
+);
+const hermesTurnJsonl = readFileSync(
+  path.join(here, "fixtures", "runtimes", "hermes", "turn.jsonl"),
+  "utf8",
+);
+const hermesGatewayJsonl = readFileSync(
+  path.join(here, "fixtures", "runtimes", "hermes", "gateway-events.jsonl"),
+  "utf8",
+);
+const hermesPySource = readFileSync(
+  path.join(here, "..", "src", "adapters", "plugins", "hermes.py"),
   "utf8",
 );
 
@@ -761,3 +788,330 @@ test("opencode: the plugin bridge spawns only the local hook command and makes n
   assert.ok(source.includes("MAX_BRIDGE_PAYLOAD_BYTES"), "payload is bounded");
   assert.ok(source.includes("BRIDGE_TIMEOUT_MS"), "a short timeout bounds the wait");
 });
+
+// ---------------------------------------------------------------------------
+// Hermes (Task 9): modeled CLI + Python bridge; gateway events are never CLI
+// capability, reset never inherits, compact reloads active revisions, and an
+// interrupted internal task stays pending without recursion.
+// ---------------------------------------------------------------------------
+
+test("hermes: CLI events drive structured extraction", async () => {
+  const root = tempDir("hermes-extract-");
+  const completedTurnRefs = ["u1", "a1", "t1", "a2"];
+
+  // A gateway-only event stream must never be judged as CLI capability: a probe
+  // built from gateway events alone reports structured_extraction false, and the
+  // version stays unverified (0.21.0 is P0-observed, never a supported version).
+  assert.equal(hermesEventSurface(hermesGatewayJsonl), "gateway");
+  const gatewayOnlyProbe = hermesProbe("gateway");
+  assert.equal(gatewayOnlyProbe.structured_extraction, false);
+  assert.equal(gatewayOnlyProbe.version, "0.0.0-unverified");
+
+  // The resolver picks the first completed turn only: the first user_message plus
+  // its assistant/tool records, and never the later turn.
+  assert.deepEqual(hermesCompletedTurnRefs(hermesTurnJsonl), {
+    session_id: "h-0001",
+    refs: completedTurnRefs,
+  });
+
+  const reads = [];
+  let modelInput = null;
+  let invokeRuntime = null;
+  let invokeJobUid = null;
+  let invokeArgs = null;
+  const adapter = createHermesAdapter({
+    home: root,
+    readSource: async (refs) => {
+      reads.push(refs.slice());
+      // The marker ref maps to the raw transcript; the resolved record refs map to
+      // the bounded turn text (what a real readSource returns for those records).
+      if (refs.length > 0 && !refs.includes("h-marker")) {
+        return renderHermesTurn(hermesTurnJsonl, refs);
+      }
+      return hermesTurnJsonl;
+    },
+    invoke: async (runtime, args, input, jobUid) => {
+      invokeRuntime = runtime;
+      invokeJobUid = jobUid;
+      invokeArgs = args;
+      modelInput = input;
+      return { code: 0, stdout: "[]", stderr: "" };
+    },
+    emit: async () => {},
+  });
+
+  const request = {
+    job_uid: "h-job-1",
+    runtime_kind: "hermes",
+    native_session_id: "h-0001",
+    source_event_refs: ["h-marker"],
+    binding_uid: "b1",
+    binding_revision: 1,
+    soul_uid: "s1",
+    internal_task: true,
+  };
+  const result = await adapter.extract(request);
+  assert.deepEqual(result, { proposals: [] });
+
+  // The adapter resolved the opaque marker into the completed turn's record ids and
+  // re-read exactly those through readSource — the effective extraction source.
+  assert.equal(reads.length, 2, "raw source is read twice through the readSource seam");
+  assert.deepEqual(reads[0], ["h-marker"]);
+  assert.deepEqual(reads[1], completedTurnRefs);
+
+  // The native command is isolated in one builder and invoked only via deps.invoke.
+  assert.deepEqual(buildHermesExtractionInvocation(request, "turn text").args, ["run", "--output", "json"]);
+  assert.deepEqual(invokeArgs, ["run", "--output", "json"]);
+  assert.equal(invokeRuntime, "hermes", "the native tool is hermes");
+  assert.equal(invokeJobUid, "h-job-1", "the model call is tagged with the job uid");
+
+  // The model received only the completed turn's source — never the later turn.
+  assert.ok(modelInput.includes("给 /users 接口加分页"), "the completed turn's user text is present");
+  assert.ok(modelInput.includes("先看现在的接口实现"), "the completed turn's assistant text is present");
+  assert.ok(modelInput.includes("sed -n '1,40p' app/controllers/users_controller.rb"), "the tool input is summarized");
+  assert.ok(modelInput.includes("给查询层加上 limit/offset"), "the final answer is present");
+  assert.ok(!modelInput.includes("默认 page size 用 20"), "the later turn is excluded");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("hermes: reset creates a new binding decision", async () => {
+  const root = tempDir("hermes-reset-");
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+    d.souls["s2"] = makeSoul("s2");
+  });
+
+  // A reset to a new native session must not inherit the old soul (never by cwd,
+  // never by guessing): with two souls and no default, the binding is null.
+  await resolveBinding(keyOf("p1", "dev-1", "hermes", "h-original"), "s1", { root });
+  const resetBinding = await resolveBinding(keyOf("p1", "dev-1", "hermes", "h-reset-new"), undefined, { root });
+  assert.equal(resetBinding, null);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("hermes: compact reloads active revisions", async () => {
+  const root = tempDir("hermes-compact-");
+  const soulUid = "s1";
+  const sessionId = "h-session-a";
+  const DELETED_CONTENT = "已删除的旧偏好，不该再注入";
+  const CURRENT_CONTENT = "客户要先看真实付费证据，再讨论渠道";
+
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = "123";
+    d.cloud_device_uid = "cdu";
+    d.souls[soulUid] = makeSoul(soulUid);
+    d.consents["cdu:s1"] = makeConsent("cdu", soulUid);
+    d.bindings[`p1\u0000dev-1\u0000hermes\u0000${sessionId}`] = {
+      binding_uid: "b1",
+      session_ref: "30000000-0000-4000-8000-000000000003",
+      runtime_kind: "hermes",
+      soul_uid: soulUid,
+      revision: 1,
+      state: "bound",
+      profile_id: "p1",
+      device_id: "dev-1",
+      native_session_id: sessionId,
+    };
+    const base = {
+      kind: "relationship",
+      trait: "preference",
+      applicability: "客户分析",
+      tags: [],
+      evidence: "explicit_user_statement",
+      verification: "unverified",
+      sensitivity: "normal",
+      supersedes_uid: null,
+      pinned: false,
+      source: {
+        runtime_kind: "hermes",
+        session_ref: "30000000-0000-4000-8000-000000000003",
+        event_ref: "e1",
+        occurred_at: "2026-10-20T04:00:00Z",
+      },
+    };
+    d.assets["a1"] = {
+      asset_uid: "a1", soul_uid: soulUid, content: CURRENT_CONTENT, state: "active", revision: 1,
+      sync_state: "pending_sync", cloud_revision: null, ...base,
+    };
+    d.assets["a2"] = {
+      asset_uid: "a2", soul_uid: soulUid, content: DELETED_CONTENT, state: "deleted", revision: 2,
+      sync_state: "pending_sync", cloud_revision: null, ...base,
+    };
+    d.digest_tombstones[soulUid] = [
+      { asset_uid: "a2", soul_uid: soulUid, kind: "relationship", trait: "preference", content_digest: contentDigest(DELETED_CONTENT), revision: 2, state: "deleted", restored_by_uid: null },
+    ];
+  });
+
+  // Compact re-selects the SAME native hermes session binding (no fresh guess).
+  const binding = await resolveBinding(keyOf("p1", "dev-1", "hermes", sessionId), undefined, { root });
+  assert.equal(binding.binding_uid, "b1", "the same native hermes session restores its binding");
+
+  const snap = await readSnap(root, "p1");
+  const input = ownerContextInput(snap, soulUid, binding, "整理客户沟通要点", 4096);
+  const compactBundle = selectContext(input);
+
+  // The bundle/manifest after compaction equals the current active manifest:
+  // the deleted asset's revision is absent, the current one is present.
+  const currentActiveManifest = [{ asset_uid: "a1", revision: 1 }];
+  assert.deepEqual(compactBundle.manifest, currentActiveManifest);
+  assert.ok(compactBundle.rendered_text.includes(CURRENT_CONTENT), "the current asset is injected");
+  assert.ok(!compactBundle.rendered_text.includes(DELETED_CONTENT), "the deleted asset is not injected");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("hermes: interrupted internal task stays pending", async () => {
+  const root = tempDir("hermes-interrupt-");
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+    d.souls["s2"] = makeSoul("s2");
+  });
+
+  const key = keyOf("p1", "dev-1", "hermes", "h-original");
+  const binding = await resolveBinding(key, "s1", { root });
+
+  // Deliver a turn_completed runtime event through the writer (the hook/bridge
+  // path). The writer writes a pending watermark and reserves the job uid WITHOUT
+  // running the model — the worker that would run it is interrupted before it can
+  // commit or fail, so the watermark stays pending.
+  const writer = await startWriter(root);
+  let runtimeEventResult;
+  try {
+    runtimeEventResult = await sendWriter(root, {
+      request_uid: "req-interrupt-1",
+      profile_id: "p1",
+      command: "runtime_event",
+      payload: {
+        event: { key, event_ref: "h-stop", kind: "turn_completed", internal_job_uid: null },
+      },
+    });
+  } finally {
+    await writer.close();
+  }
+  assert.equal(runtimeEventResult.ok, true, "the runtime event is delivered to the writer");
+  const jobUid = runtimeEventResult.result?.job_uid;
+  assert.ok(typeof jobUid === "string" && jobUid !== "", "a job uid is reserved for the interrupted job");
+
+  const snap = await readSnap(root, "p1");
+  const interruptedJob = Object.values(snap.extraction_watermarks).find(
+    (wm) => wm.request && wm.request.binding_uid === binding.binding_uid,
+  );
+  assert.ok(interruptedJob, "the interrupted job's watermark is written");
+  assert.equal(interruptedJob.state, "pending");
+  assert.equal(interruptedJob.attempts, 1);
+
+  // The interrupted job's own internal emissions carry the job uid and can never
+  // schedule another extraction (no recursion, no second attempt, no raw upload).
+  const adapter = createHermesAdapter({
+    home: root,
+    readSource: async () => hermesTurnJsonl,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  });
+  const internalOutcome = await handleRuntimeEvent(
+    { key, event_ref: "internal-stop", kind: "turn_completed", internal_job_uid: jobUid },
+    { root, adapter },
+  );
+  assert.equal(internalOutcome.scheduled, false, "an internal event never schedules");
+
+  const after = await readSnap(root, "p1");
+  const stillPending = Object.values(after.extraction_watermarks).find(
+    (wm) => wm.request && wm.request.binding_uid === binding.binding_uid,
+  );
+  assert.equal(stillPending.state, "pending", "the interrupted job stays pending");
+  assert.equal(stillPending.attempts, 1, "no recursive attempt bumped the budget");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("hermes: the python bridge spawns only the local hook command and makes no network call", () => {
+  const source = HERMES_PLUGIN_SOURCE;
+
+  // The canonical .py file and the embedded install source are byte-identical
+  // (no drift between the reviewable file and what install writes).
+  assert.equal(hermesPySource, source, "the embedded bridge source matches hermes.py");
+
+  // Exactly ONE spawn in the whole bridge, and that spawn is the fixed-argv hook
+  // command (no shell, never the host runtime). Count, not presence: a second
+  // subprocess.Popen/run call or a shell=True must fail.
+  assert.equal(
+    (source.match(/subprocess\.(Popen|run)\s*\(/g) ?? []).length,
+    1,
+    "exactly one subprocess spawn in the bridge",
+  );
+  assert.ok(
+    source.includes('[_launcher(), "hook", "--agent", "hermes", "--event", event]'),
+    "the single spawn is exactly the hook command",
+  );
+  assert.ok(!/shell\s*=\s*True/.test(source), "no shell=True");
+
+  // Standard library only and no network surface anywhere (imports included).
+  assert.ok(!/\b(urllib|http|https|socket|requests|aiohttp|ftplib|smtplib)\b/.test(source), "no network call");
+  assert.ok(!/\bimport\s+(django|flask|fastapi|requests|aiohttp|openai|anthropic)\b/.test(source), "no third-party dependency");
+
+  // The payload is bounded and the wait has a short timeout (never hangs the host),
+  // and every error path still returns 0 (main always exits 0).
+  assert.ok(source.includes("MAX_BRIDGE_PAYLOAD_BYTES"), "payload is bounded");
+  assert.ok(source.includes("BRIDGE_TIMEOUT_SECONDS"), "a short timeout bounds the wait");
+  assert.ok(source.includes("sys.exit(main())"), "the CLI entry always exits through main()");
+
+  // The bridge writes nothing to the host's stdout: the child's stdout/stderr are
+  // routed to DEVNULL.
+  assert.ok(source.includes("stdout=subprocess.DEVNULL"), "host stdout is never written");
+  assert.ok(source.includes("stderr=subprocess.DEVNULL"), "host stderr is never written");
+});
+
+test("hermes: probe and doctor report gateway-only honestly, never as CLI", async () => {
+  const root = tempDir("hermes-surface-");
+
+  // A gateway-only config is detected explicitly.
+  mkdirSync(path.join(root, ".hermes"), { recursive: true });
+  writeFileSync(
+    path.join(root, ".hermes", "config.json"),
+    `${JSON.stringify({ transport: "gateway", gateway: { url: "https://gateway.example" } })}\n`,
+    { mode: 0o600 },
+  );
+  assert.equal(detectHermesSurface(root), "gateway");
+  assert.deepEqual(inspectHermesPlugin(root), { status: "gateway_only", surface: "gateway" });
+
+  // The adapter's probe stays all-false and the gateway-only extract refuses
+  // instead of invoking the model through a gateway.
+  const adapter = createHermesAdapter({
+    home: root,
+    readSource: async () => hermesTurnJsonl,
+    invoke: async () => ({ code: 0, stdout: "[]", stderr: "" }),
+    emit: async () => {},
+  });
+  const probe = await adapter.probe();
+  assert.equal(probe.structured_extraction, false);
+  assert.equal(probe.runtime_kind, "hermes");
+  const extraction = await adapter.extract({
+    job_uid: "h-gw-1",
+    runtime_kind: "hermes",
+    native_session_id: "h-gw-session",
+    source_event_refs: ["h-marker"],
+    binding_uid: "b1",
+    binding_revision: 1,
+    soul_uid: "s1",
+    internal_task: true,
+  });
+  assert.deepEqual(extraction, { error: { code: "gateway_only", retryable: false } });
+
+  // A CLI-shaped config (any non-gateway config) is "cli"; no config is "none".
+  writeFileSync(path.join(root, ".hermes", "config.json"), `${JSON.stringify({ transport: "cli" })}\n`, { mode: 0o600 });
+  assert.equal(detectHermesSurface(root), "cli");
+  rmSync(path.join(root, ".hermes", "config.json"), { force: true });
+  assert.equal(detectHermesSurface(root), "cli", "an existing .hermes dir without a gateway marker is modeled as cli");
+
+  // Installing the bridge and inspecting again stays observation_only (never green).
+  const written = writeHermesPlugin(root);
+  assert.equal(written.installed, true);
+  assert.deepEqual(inspectHermesPlugin(root), { status: "observation_only", surface: "cli" });
+  assert.equal(readFileSync(hermesPluginPath(root), "utf8"), HERMES_PLUGIN_SOURCE);
+  assert.ok(HERMES_PLUGIN_FILENAME.endsWith(".py"), "the managed bridge is a Python file");
+
+  rmSync(root, { recursive: true, force: true });
+});
+

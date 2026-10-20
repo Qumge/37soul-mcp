@@ -8,6 +8,7 @@ import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
 import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
 import { inspectOpenCodePlugin } from "./adapters/opencode.js";
+import { inspectHermesPlugin } from "./adapters/hermes.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
@@ -119,6 +120,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       // （observation_only 是上限，直到有授权的真机 probe）。ok 固定 false 且非 fatal。
       const inspection = inspectOpenCodePlugin(deps.home);
       checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: openCodeDoctorDetail(inspection) });
+    } else if (agentKind === "hermes") {
+      // Python 桥（Task 9）：三个诚实状态；gateway-only 配置必须显式说出来，
+      // 绝不冒充 CLI 能力。observation_only 是上限，直到有授权的真机 probe。
+      const inspection = inspectHermesPlugin(deps.home);
+      checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: hermesDoctorDetail(inspection) });
     }
 
     const state = await loadState(root);
@@ -223,6 +229,20 @@ function openCodeDoctorDetail(inspection: { status: string; declared: string }):
       return "plugin file present but OpenCode has not trusted it — approve it in OpenCode";
     case "model_refused":
       return "a live probe was refused by the model — no authorized probe yet";
+    case "observation_only":
+      return "events may be observed; no model call authorized (structured extraction stays off)";
+    default:
+      return inspection.status;
+  }
+}
+
+/** Hermes Python 桥三状态 → 人话 detail；gateway-only 必须显式说不是 CLI。 */
+function hermesDoctorDetail(inspection: { status: string; surface: string }): string {
+  switch (inspection.status) {
+    case "gateway_only":
+      return "Hermes config declares a gateway-only surface — this is not a CLI model capability, so structured extraction stays off";
+    case "not_installed":
+      return "plugin bridge not installed — run `37soul install`";
     case "observation_only":
       return "events may be observed; no model call authorized (structured extraction stays off)";
     default:

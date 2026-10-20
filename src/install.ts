@@ -19,6 +19,7 @@ import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, t
 import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
 import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS } from "./adapters/codex.js";
 import { inspectOpenCodePlugin, openCodePluginPath, removeOpenCodePlugin, writeOpenCodePlugin } from "./adapters/opencode.js";
+import { detectHermesSurface, hermesPluginPath, removeHermesPlugin, writeHermesPlugin } from "./adapters/hermes.js";
 
 export const INSTRUCTIONS_FRAGMENT = `## 37Soul
 At the start of a session you may receive a "37Soul brief" (or find it in .37soul/brief.md
@@ -86,13 +87,28 @@ export interface OpenCodeInstallReport {
   generation: "v1" | "v2" | "unsupported";
 }
 
+export interface HermesInstallReport {
+  /** We wrote the ONE managed Python bridge file (a file write we performed). */
+  installed: boolean;
+  /** No Hermes-authored trust/load marker: a write we performed never flips this. */
+  trusted: boolean;
+  /** Never observed: stays false (no event-observation path). */
+  events_seen: boolean;
+  /** No verified native command (P0 matrix row stays 未验). */
+  extraction_capable: boolean;
+  /** The Python bridge is unverified, so injection is never claimed. */
+  injection_capable: boolean;
+  /** The Hermes config surface detected at install time (gateway is never CLI). */
+  surface: "gateway" | "cli" | "none";
+}
+
 export interface InstalledAgent {
   agentKind: string;
   hook: boolean;
   instructions: boolean;
   mcp: boolean;
-  /** Task 7/8: honest five-state report for runtimes with unverified hooks/plugins (codex, opencode). */
-  report?: CodexInstallReport | OpenCodeInstallReport;
+  /** Task 7/8/9: honest report for runtimes with unverified hooks/plugins (codex, opencode, hermes). */
+  report?: CodexInstallReport | OpenCodeInstallReport | HermesInstallReport;
 }
 
 export interface InstallResult {
@@ -112,7 +128,7 @@ export function installManifestPath(home: string): string {
   return path.join(dataRoot(home), "install-manifest.json");
 }
 
-const SUPPORTED_AGENTS = ["claude-code", "codex", "opencode"];
+const SUPPORTED_AGENTS = ["claude-code", "codex", "opencode", "hermes"];
 
 /** v2 §6.1：`install --plan` 只打印要动哪些文件、装哪些 hook，不写入任何东西。 */
 export async function planInstall(deps: InstallDeps, opts: { agents?: string[] } = {}): Promise<InstallPlan> {
@@ -127,6 +143,9 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
   }
   if (agents.includes("opencode")) {
     files.push(openCodePluginPath(deps.home));
+  }
+  if (agents.includes("hermes")) {
+    files.push(hermesPluginPath(deps.home));
   }
   files.push(configPath(dataRoot(deps.home)), installManifestPath(deps.home));
 
@@ -160,6 +179,7 @@ const AGENT_HOMES: Record<string, string> = {
   "claude-code": ".claude",
   codex: ".codex",
   opencode: ".config/opencode",
+  hermes: ".hermes",
   pi: ".pi",
   "gemini-cli": ".gemini",
 };
@@ -625,6 +645,32 @@ async function configureOpenCode(
   };
 }
 
+async function configureHermes(
+  deps: InstallDeps,
+  _token: string,
+): Promise<{ hook: boolean; instructions: boolean; mcp: boolean; report?: HermesInstallReport }> {
+  // Hermes 走 Python 桥（Task 9）：只写 ONE 受管静态 .py 文件，注入经桥在下一个
+  // request 边界投递。桥未验证，所以 trusted/events/extraction/injection 都不绿；
+  // 不写全局 hook、不写 instructions fragment、不注册 MCP —— 桥文件是唯一受管产物。
+  // 我们自己的写文件永远不能把 trusted 变绿。gateway-only 配置绝不冒充 CLI 能力，
+  // 只把它诚实地记进 report.surface（doctor 会显式说出来）。
+  const surface = detectHermesSurface(deps.home);
+  const written = writeHermesPlugin(deps.home);
+  return {
+    hook: false, // no global hook: injection arrives via the Python bridge at the next request boundary
+    instructions: false, // no AGENTS fragment for Hermes; the bridge file is the only managed artifact
+    mcp: false,
+    report: {
+      installed: written.installed, // our own bridge-file write
+      trusted: false, // no Hermes-authored load/trust marker
+      events_seen: false, // never observed
+      extraction_capable: false, // no verified native command (P0 未验)
+      injection_capable: false, // Python bridge unverified
+      surface,
+    },
+  };
+}
+
 export async function install(
   deps: InstallDeps,
   opts: { agents?: string[]; installService?: boolean; fallback?: string[] } = {},
@@ -683,7 +729,9 @@ export async function install(
         ? await configureClaude(runtimeDeps, token)
         : agentKind === "codex"
           ? await configureCodex(runtimeDeps, token)
-          : await configureOpenCode(runtimeDeps, token);
+          : agentKind === "opencode"
+            ? await configureOpenCode(runtimeDeps, token)
+            : await configureHermes(runtimeDeps, token);
     config.mcp = { ...(config.mcp ?? {}), [agentKind]: configured.mcp };
     results.push({
       agentKind,
@@ -750,6 +798,12 @@ export async function install(
     const plugin = writeOpenCodePlugin(deps.home);
     entries.push({ agent: "opencode", file: plugin.path, kind: "opencode_plugin", generation: plugin.generation, sha256: plugin.sha256 });
   }
+  if (selected.includes("hermes")) {
+    // 幂等：configureHermes 已写过，这里只为拿到精确 path + SHA-256 记进 manifest
+    // （备份只在内容不同时发生，二次写不会产生多余 .bak）。
+    const bridge = writeHermesPlugin(deps.home);
+    entries.push({ agent: "hermes", file: bridge.path, kind: "hermes_plugin", sha256: bridge.sha256 });
+  }
   entries.push({ file: configPath(root), kind: "config" });
   if (serviceFile) entries.push({ file: serviceFile, kind: "service" });
   await writeJsonFile(
@@ -773,6 +827,21 @@ async function openCodePluginManifestSha256(home: string): Promise<string | unde
     };
     for (const entry of parsed.entries ?? []) {
       if (entry.kind === "opencode_plugin" && typeof entry.sha256 === "string") return entry.sha256;
+    }
+  } catch {
+    // no manifest / unreadable: the file is treated as unverifiable (backed up)
+  }
+  return undefined;
+}
+
+/** The install manifest's recorded SHA-256 for the managed Hermes bridge, if any. */
+async function hermesPluginManifestSha256(home: string): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(installManifestPath(home), "utf8")) as {
+      entries?: Array<{ kind?: string; sha256?: unknown }>;
+    };
+    for (const entry of parsed.entries ?? []) {
+      if (entry.kind === "hermes_plugin" && typeof entry.sha256 === "string") return entry.sha256;
     }
   } catch {
     // no manifest / unreadable: the file is treated as unverifiable (backed up)
@@ -826,6 +895,15 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
   if (pluginRemoval.removed) removed.push(path.relative(deps.home, openCodePluginPath(deps.home)));
   if (pluginRemoval.preserved) {
     deps.log?.(`  kept ${openCodePluginPath(deps.home)} (unreadable) — remove it by hand if it is 37soul's`);
+  }
+
+  // 2d. Hermes Python 桥（ONE 受管静态文件；只删这一条，别的 vendor 插件不动）。
+  // 哈希感知：只删没被改过的受管文件；被用户/Hermes 改过的先备份再删，读不了就保留。
+  const hermesSha = await hermesPluginManifestSha256(deps.home);
+  const hermesRemoval = removeHermesPlugin(deps.home, { expectedSha256: hermesSha });
+  if (hermesRemoval.removed) removed.push(path.relative(deps.home, hermesPluginPath(deps.home)));
+  if (hermesRemoval.preserved) {
+    deps.log?.(`  kept ${hermesPluginPath(deps.home)} (unreadable) — remove it by hand if it is 37soul's`);
   }
 
   // 3. MCP 条目（best effort）。
