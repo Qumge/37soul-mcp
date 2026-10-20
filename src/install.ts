@@ -342,15 +342,54 @@ async function existsDirectory(dir: string): Promise<boolean> {
 }
 
 /** 设备码登录：拿码 → 让用户去浏览器 → 轮询换 token。 */
-export async function deviceLogin(deps: InstallDeps, agents: string[]): Promise<Record<string, string>> {
+export interface DeviceLoginResult {
+  tokens: Record<string, string>;
+  /** §3 soul-assets/v1 fields; only present in assets mode. */
+  protocol?: "soul-assets/v1";
+  mode?: "assets_only";
+  owner_id?: string;
+  cloud_device_uid?: string;
+  default_soul_uid?: string | null;
+}
+
+export interface DeviceLoginOptions {
+  /**
+   * §3 new-protocol login (`37soul login`). Sends protocol/mode/machine_id/
+   * client_version and parses owner_id/cloud_device_uid/default_soul_uid. Defaults
+   * to false so `install()` keeps its legacy behavior until Task 10 flips it.
+   */
+  assetsMode?: boolean;
+  machineId?: string;
+  clientVersion?: string;
+}
+
+export async function deviceLogin(
+  deps: InstallDeps,
+  agents: string[],
+  options: DeviceLoginOptions = {},
+): Promise<DeviceLoginResult> {
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const assetsMode = options.assetsMode === true;
+
+  if (assetsMode && !options.machineId) {
+    throw new Error("assets login requires a stable machine_id");
+  }
+
+  const fields = assetsMode
+    ? {
+        protocol: "soul-assets/v1",
+        mode: "assets_only",
+        machine_id: options.machineId,
+        client_version: options.clientVersion ?? "0.0.0",
+      }
+    : {};
 
   const created = await deps.fetch(`${deps.apiBase}/api/v1/cli/device_codes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agents }),
+    body: JSON.stringify({ agents, ...fields }),
   });
   if (created.status !== 201) {
     throw new Error(`could not start the device login (HTTP ${created.status})`);
@@ -378,11 +417,18 @@ export async function deviceLogin(deps: InstallDeps, agents: string[]): Promise<
     const poll = await deps.fetch(`${deps.apiBase}/api/v1/cli/tokens`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device_code: device.device_code, agents }),
+      body: JSON.stringify({ device_code: device.device_code, agents, ...fields }),
     });
 
     if (poll.status === 201) {
-      const body = (await poll.json()) as { tokens?: Array<{ agent_kind: string; token: string }> };
+      const body = (await poll.json()) as {
+        protocol?: string;
+        mode?: string;
+        owner_id?: string;
+        cloud_device_uid?: string;
+        default_soul_uid?: string | null;
+        tokens?: Array<{ agent_kind: string; token: string }>;
+      };
       const tokens: Record<string, string> = {};
       // 只收我们请求过的 Agent：服务端理论上一字不差，本地再兜一层，
       // 免得将来协议漂移时把「没选中的身体」也配起来。
@@ -390,7 +436,14 @@ export async function deviceLogin(deps: InstallDeps, agents: string[]): Promise<
         if (agents.includes(entry.agent_kind)) tokens[entry.agent_kind] = entry.token;
       }
       if (Object.keys(tokens).length === 0) throw new Error("the server approved nothing — run install again");
-      return tokens;
+      return {
+        tokens,
+        protocol: body.protocol === "soul-assets/v1" ? "soul-assets/v1" : undefined,
+        mode: body.mode === "assets_only" ? "assets_only" : undefined,
+        owner_id: typeof body.owner_id === "string" ? body.owner_id : undefined,
+        cloud_device_uid: typeof body.cloud_device_uid === "string" ? body.cloud_device_uid : undefined,
+        default_soul_uid: typeof body.default_soul_uid === "string" ? body.default_soul_uid : null,
+      };
     }
     if (poll.status === 202) {
       if (now() > deadline) throw new Error("the code expired before it was approved — run install again");
@@ -508,7 +561,7 @@ export async function install(
     throw new Error(`no supported agent selected (detected: ${detected.join(", ") || "none"})`);
   }
 
-  const tokens = await deviceLogin(deps, selected);
+  const tokens = (await deviceLogin(deps, selected)).tokens;
 
   const root = dataRoot(deps.home);
   const existing = (await loadConfig(root)) ?? null;

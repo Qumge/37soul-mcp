@@ -1,0 +1,434 @@
+/**
+ * Task 3: offline Souls, versioned session bindings, and the resolution chain.
+ *
+ * Bindings are one record per native session key
+ * `(profile_id, device_id, runtime_kind, native_session_id)`. `native_session_id`
+ * and any local path never leave the machine: the cloud-facing session identity is
+ * the random, persisted `session_ref`, and the outbox binding operation carries the
+ * CAS request `{ base_revision, session_ref, runtime_kind, soul_uid, state }` —
+ * never the native id.
+ *
+ * Every bind / switch / detach:
+ *   - mutates the *same* binding record and bumps `revision` (base 0 -> 1 -> 2 ...);
+ *   - appends an immutable outbox operation with a fresh `operation_id`
+ *     (Idempotency-Key) whose `predecessor_operation_ids` link it to the previous
+ *     binding operation, and whose `request` is the original frozen CAS request.
+ * The operations are never flattened or rewritten, so an offline replay re-applies
+ * base 0 -> rev 1 -> rev 2 in order, and a result frozen at an old revision is
+ * recognizably stale.
+ *
+ * `resolveBinding` is the SessionStart query. Order:
+ *   1. session explicit choice (explicitSoulUid),
+ *   2. native binding,
+ *   3. tool default,
+ *   4. account default,
+ *   5. unique Soul,
+ *   6. refuse to guess (never cwd / title / character name).
+ * A session with no native id is refused outright — there is nothing stable to key
+ * a binding on, so nothing is guessed.
+ *
+ * Tool default / account default live in the profile's 0600 `defaults.json` (a
+ * sibling of device.json), not in the fixed §2.5 snapshot.
+ */
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+import type { Binding, RuntimeKind, Soul } from "../assets/protocol.js";
+import type { BindingSnapshot, NativeSessionKey } from "../adapters/types.js";
+import {
+  defaultStoreFs,
+  openStore,
+  profileDir,
+  StoreError,
+  type OutboxOperation,
+  type StoreSnapshot,
+} from "./store.js";
+import { registerWriterCommand } from "./writer.js";
+import { resolveRoot, type LocalOptions } from "./profiles.js";
+
+/** Join the native key into one record key. Never serialized beyond the local store. */
+export function bindingKey(key: NativeSessionKey): string {
+  return [key.profile_id, key.device_id, key.runtime_kind, key.native_session_id].join("\u0000");
+}
+
+function toBinding(binding: BindingSnapshot): Binding {
+  return {
+    binding_uid: binding.binding_uid,
+    session_ref: binding.session_ref,
+    runtime_kind: binding.runtime_kind,
+    soul_uid: binding.soul_uid,
+    revision: binding.revision,
+    state: binding.state,
+  };
+}
+
+function createBinding(key: NativeSessionKey, soulUid: string): BindingSnapshot {
+  return {
+    binding_uid: randomUUID(),
+    session_ref: randomUUID(), // random + persisted; this is the only cloud-facing session identity
+    runtime_kind: key.runtime_kind,
+    soul_uid: soulUid,
+    revision: 1,
+    state: "bound",
+    profile_id: key.profile_id,
+    device_id: key.device_id,
+    native_session_id: key.native_session_id,
+  };
+}
+
+function bindingOutboxOp(
+  binding: BindingSnapshot,
+  state: "bound" | "detached",
+  baseRevision: number,
+  predecessorOperationIds: string[],
+): OutboxOperation {
+  return {
+    operation_id: randomUUID(),
+    operation_kind: "binding",
+    // The original frozen CAS request; never rewritten, never carries the native id.
+    request: {
+      base_revision: baseRevision,
+      session_ref: binding.session_ref,
+      runtime_kind: binding.runtime_kind,
+      soul_uid: binding.soul_uid,
+      state,
+    },
+    predecessor_operation_ids: predecessorOperationIds,
+  };
+}
+
+/** The most recent outbox binding operation for a session_ref (the predecessor). */
+function lastBindingOpId(snap: StoreSnapshot, sessionRef: string): string | null {
+  let last: string | null = null;
+  for (const op of Object.values(snap.outbox)) {
+    if (op.operation_kind !== "binding") continue;
+    const request = op.request as { session_ref?: unknown };
+    if (request.session_ref === sessionRef) last = op.operation_id;
+  }
+  return last;
+}
+
+/** A binding was injected once a receipt exists for it at stage "injected". */
+function isInjected(snap: StoreSnapshot, binding: BindingSnapshot): boolean {
+  return Object.values(snap.receipts).some(
+    (receipt) => receipt.binding_uid === binding.binding_uid && receipt.stage === "injected",
+  );
+}
+
+function assertNativeKey(key: NativeSessionKey): void {
+  if (typeof key.native_session_id !== "string" || key.native_session_id.length === 0) {
+    throw new StoreError("invalid_key", "native_session_id is required to bind a session");
+  }
+  if (typeof key.profile_id !== "string" || key.profile_id.length === 0) {
+    throw new StoreError("invalid_key", "profile_id is required to bind a session");
+  }
+  if (typeof key.device_id !== "string" || key.device_id.length === 0) {
+    throw new StoreError("invalid_key", "device_id is required to bind a session");
+  }
+}
+
+// --- soul-selection defaults (tool default + account default) ----------------------
+
+export interface SoulDefaults {
+  tool_defaults: Partial<Record<RuntimeKind, string>>;
+  account_default_soul_uid: string | null;
+}
+
+export function defaultsPath(root: string, profileId: string): string {
+  return path.join(profileDir(root, profileId), "defaults.json");
+}
+
+async function readDefaults(root: string, profileId: string): Promise<SoulDefaults> {
+  try {
+    const raw = await readFile(defaultsPath(root, profileId), "utf8");
+    const parsed = JSON.parse(raw) as Partial<SoulDefaults>;
+    return {
+      tool_defaults:
+        parsed.tool_defaults && typeof parsed.tool_defaults === "object" ? parsed.tool_defaults : {},
+      account_default_soul_uid:
+        typeof parsed.account_default_soul_uid === "string" ? parsed.account_default_soul_uid : null,
+    };
+  } catch {
+    return { tool_defaults: {}, account_default_soul_uid: null };
+  }
+}
+
+async function writeDefaults(root: string, profileId: string, defaults: SoulDefaults): Promise<void> {
+  await mkdir(profileDir(root, profileId), { recursive: true, mode: 0o700 });
+  const target = defaultsPath(root, profileId);
+  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temp, `${JSON.stringify(defaults, null, 2)}\n`, { mode: 0o600 });
+  await rename(temp, target);
+}
+
+export async function setToolDefault(
+  key: { profile_id: string; runtime_kind: RuntimeKind },
+  soulUid: string,
+  opts: LocalOptions = {},
+): Promise<void> {
+  const root = resolveRoot(opts.root);
+  const defaults = await readDefaults(root, key.profile_id);
+  defaults.tool_defaults[key.runtime_kind] = soulUid;
+  await writeDefaults(root, key.profile_id, defaults);
+}
+
+export async function setAccountDefaultSoul(
+  profileId: string,
+  soulUid: string | null,
+  opts: LocalOptions = {},
+): Promise<void> {
+  const root = resolveRoot(opts.root);
+  const defaults = await readDefaults(root, profileId);
+  defaults.account_default_soul_uid = soulUid;
+  await writeDefaults(root, profileId, defaults);
+}
+
+// --- resolution chain --------------------------------------------------------------
+
+async function pickSoul(
+  root: string,
+  snap: StoreSnapshot,
+  key: NativeSessionKey,
+  explicitSoulUid?: string,
+): Promise<string | null> {
+  // 1. session explicit choice
+  if (explicitSoulUid && snap.souls[explicitSoulUid]) return explicitSoulUid;
+  const defaults = await readDefaults(root, key.profile_id);
+  // 3. tool default
+  const toolDefault = defaults.tool_defaults[key.runtime_kind];
+  if (toolDefault && snap.souls[toolDefault]) return toolDefault;
+  // 4. account default
+  if (defaults.account_default_soul_uid && snap.souls[defaults.account_default_soul_uid]) {
+    return defaults.account_default_soul_uid;
+  }
+  // 5. unique Soul
+  const souls = Object.values(snap.souls);
+  if (souls.length === 1) return souls[0].soul_uid;
+  // 6. refuse to guess
+  return null;
+}
+
+/**
+ * Resolve the effective binding for a native session, or null. A bound binding is
+ * returned as-is (step 2); when none exists yet, a determinable Soul (explicit ->
+ * tool default -> account default -> unique) is auto-bound, and anything ambiguous
+ * returns null so the CLI can offer choose/create. No native id => refuse to guess.
+ */
+export async function resolveBinding(
+  key: NativeSessionKey,
+  explicitSoulUid?: string,
+  opts: LocalOptions = {},
+): Promise<BindingSnapshot | null> {
+  const root = resolveRoot(opts.root);
+  if (typeof key.native_session_id !== "string" || key.native_session_id.length === 0) {
+    return null; // no stable session identity: refuse to guess
+  }
+  const fs = { ...defaultStoreFs, ...(opts.fs ?? {}) };
+  const store = await openStore(root, key.profile_id, { fs });
+  try {
+    const snap = await store.read();
+    const k = bindingKey(key);
+    const existing = snap.bindings[k];
+    if (existing && existing.state === "bound") return existing;
+
+    const soulUid = await pickSoul(root, snap, key, explicitSoulUid);
+    if (!soulUid || !snap.souls[soulUid]) return null;
+
+    const binding = createBinding(key, soulUid);
+    const op = bindingOutboxOp(binding, "bound", 0, []);
+    const written = await store.transact((draft) => {
+      draft.bindings[k] = binding;
+      draft.outbox[op.operation_id] = op;
+    });
+    return written.bindings[k];
+  } finally {
+    await store.close();
+  }
+}
+
+/** Explicitly select (or switch) a Soul for a native session. */
+export async function selectSoul(
+  key: NativeSessionKey,
+  soulUid: string,
+  opts: LocalOptions = {},
+): Promise<Binding | { error: "needs_new_session" }> {
+  const root = resolveRoot(opts.root);
+  assertNativeKey(key);
+  const fs = { ...defaultStoreFs, ...(opts.fs ?? {}) };
+  const store = await openStore(root, key.profile_id, { fs });
+  try {
+    const snap = await store.read();
+    if (!snap.souls[soulUid]) {
+      throw new StoreError("unknown_soul", `no local soul ${soulUid} in profile ${key.profile_id}`);
+    }
+    const k = bindingKey(key);
+    const existing = snap.bindings[k];
+
+    if (existing) {
+      if (existing.state === "bound" && existing.soul_uid === soulUid) return toBinding(existing);
+      // Switching an already-injected session loses the injected context: refuse.
+      if (existing.state === "bound" && isInjected(snap, existing)) {
+        return { error: "needs_new_session" };
+      }
+      const pred = lastBindingOpId(snap, existing.session_ref);
+      const next: BindingSnapshot = {
+        ...existing,
+        soul_uid: soulUid,
+        state: "bound",
+        revision: existing.revision + 1,
+      };
+      const op = bindingOutboxOp(next, "bound", existing.revision, pred ? [pred] : []);
+      await store.transact((draft) => {
+        draft.bindings[k] = next;
+        draft.outbox[op.operation_id] = op;
+      });
+      return toBinding(next);
+    }
+
+    const binding = createBinding(key, soulUid);
+    const op = bindingOutboxOp(binding, "bound", 0, []);
+    await store.transact((draft) => {
+      draft.bindings[k] = binding;
+      draft.outbox[op.operation_id] = op;
+    });
+    return toBinding(binding);
+  } finally {
+    await store.close();
+  }
+}
+
+/** Detach a bound native session: same record, state detached, revision + 1. */
+export async function detachBinding(key: NativeSessionKey, opts: LocalOptions = {}): Promise<Binding> {
+  const root = resolveRoot(opts.root);
+  assertNativeKey(key);
+  const fs = { ...defaultStoreFs, ...(opts.fs ?? {}) };
+  const store = await openStore(root, key.profile_id, { fs });
+  try {
+    const snap = await store.read();
+    const k = bindingKey(key);
+    const existing = snap.bindings[k];
+    if (!existing || existing.state !== "bound") {
+      throw new StoreError("not_bound", "no bound session to detach");
+    }
+    const pred = lastBindingOpId(snap, existing.session_ref);
+    const next: BindingSnapshot = { ...existing, state: "detached", revision: existing.revision + 1 };
+    const op = bindingOutboxOp(next, "detached", existing.revision, pred ? [pred] : []);
+    await store.transact((draft) => {
+      draft.bindings[k] = next;
+      draft.outbox[op.operation_id] = op;
+    });
+    return toBinding(next);
+  } finally {
+    await store.close();
+  }
+}
+
+// --- writer commands (registered at module top level) -------------------------------
+
+function identityFromPayload(payload: Record<string, unknown>): Soul["identity"] {
+  const identity = (payload.identity ?? {}) as Record<string, unknown>;
+  const field = (key: string, fallback: string): string =>
+    typeof identity[key] === "string" ? (identity[key] as string) : fallback;
+  return {
+    name: field("name", ""),
+    description: field("description", ""),
+    character: field("character", ""),
+    greeting: field("greeting", ""),
+  };
+}
+
+registerWriterCommand("create_soul", async ({ root, request }) => {
+  const payload = request.payload;
+  const soulUid = typeof payload.soul_uid === "string" && payload.soul_uid ? payload.soul_uid : randomUUID();
+  const identity = identityFromPayload(payload);
+  const soul: Soul = {
+    soul_uid: soulUid,
+    legacy_host_id: null,
+    identity_revision: 1,
+    identity,
+    state: "active",
+  };
+  const op: OutboxOperation = {
+    operation_id: randomUUID(),
+    operation_kind: "register_soul",
+    request: { soul_uid: soulUid, identity, consent_categories: [] },
+    predecessor_operation_ids: [],
+  };
+  const store = await openStore(root, request.profile_id);
+  try {
+    await store.transact((draft) => {
+      if (draft.souls[soulUid]) {
+        throw new StoreError("already_exists", `soul ${soulUid} already exists in this profile`);
+      }
+      draft.souls[soulUid] = soul;
+      draft.outbox[op.operation_id] = op;
+    });
+    return soul;
+  } finally {
+    await store.close();
+  }
+});
+
+registerWriterCommand("edit_local_identity", async ({ root, request }) => {
+  const soulUid = String(request.payload.soul_uid ?? "");
+  const identity = identityFromPayload(request.payload);
+  const store = await openStore(root, request.profile_id);
+  try {
+    const snap = await store.read();
+    const soul = snap.souls[soulUid];
+    if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid}`);
+    if (soul.legacy_host_id !== null) {
+      // A registered Soul is a hosted identity: local edits would fork it.
+      throw new StoreError("edit_on_website", `soul ${soulUid} is registered — edit its identity on 37soul.com`);
+    }
+    await store.transact((draft) => {
+      const s = draft.souls[soulUid];
+      s.identity = identity;
+      s.identity_revision += 1;
+    });
+    return (await store.read()).souls[soulUid];
+  } finally {
+    await store.close();
+  }
+});
+
+registerWriterCommand("bind", async ({ root, request }) => {
+  const p = request.payload;
+  const key: NativeSessionKey = {
+    profile_id: request.profile_id,
+    device_id: String(p.device_id ?? ""),
+    runtime_kind: (p.runtime_kind ?? "claude-code") as RuntimeKind,
+    native_session_id: String(p.native_session_id ?? ""),
+  };
+  return selectSoul(key, String(p.soul_uid ?? ""), { root });
+});
+
+registerWriterCommand("detach", async ({ root, request }) => {
+  const p = request.payload;
+  const key: NativeSessionKey = {
+    profile_id: request.profile_id,
+    device_id: String(p.device_id ?? ""),
+    runtime_kind: (p.runtime_kind ?? "claude-code") as RuntimeKind,
+    native_session_id: String(p.native_session_id ?? ""),
+  };
+  return detachBinding(key, { root });
+});
+
+registerWriterCommand("export", async ({ root, request }) => {
+  // Local-only export of the owner-private core identity. Independent of any
+  // subscription; never includes tokens or native session ids.
+  const store = await openStore(root, request.profile_id);
+  try {
+    const snap = await store.read();
+    return {
+      protocol: "soul-assets/v1",
+      profile_id: snap.profile_id,
+      owner_id: snap.owner_id,
+      souls: snap.souls,
+      assets: snap.assets,
+      consents: snap.consents,
+    };
+  } finally {
+    await store.close();
+  }
+});

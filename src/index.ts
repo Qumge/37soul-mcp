@@ -13,7 +13,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -224,7 +224,35 @@ const boundHostIdSchema = z.number().int().positive().optional()
 
 /** Resolve which host a persona call is about: explicit arg first, then the bound host. */
 function resolveHostId(explicit?: number): number | null {
-  return explicit ?? BOUND_HOST_ID;
+  if (explicit != null) return explicit;
+  if (BOUND_HOST_ID != null) return BOUND_HOST_ID;
+  return resolveLocalHostId();
+}
+
+/**
+ * Assets-mode fallback: consult the local soul store only when a snapshot exists.
+ * A single local profile whose store holds exactly one Soul with a legacy host id
+ * resolves to that host. This is a synchronous, read-only peek — it returns only a
+ * host id number and never reads or exposes a native_session_id or a local path.
+ */
+function resolveLocalHostId(): number | null {
+  try {
+    const home = process.env.SOUL37_HOME || homedir();
+    const root = join(home, ".37soul");
+    const entries = readdirSync(join(root, "profiles"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    if (entries.length !== 1) return null; // only a single local profile can be consulted
+    const snapshot = JSON.parse(readFileSync(join(root, "profiles", entries[0], "snapshot.json"), "utf8")) as {
+      souls?: Record<string, { legacy_host_id?: unknown }>;
+    };
+    const souls = Object.values(snapshot.souls ?? {});
+    if (souls.length !== 1) return null;
+    const hostId = souls[0].legacy_host_id;
+    return typeof hostId === "number" && Number.isFinite(hostId) && hostId > 0 ? hostId : null;
+  } catch {
+    return null;
+  }
 }
 
 const NO_BOUND_HOST = "No host selected. Either pass host_id, or set SOUL37_HOST_ID in this server's env to bind it to one character. Use list_hosts to find the id.";

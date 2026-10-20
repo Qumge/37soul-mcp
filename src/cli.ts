@@ -7,7 +7,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,10 +18,17 @@ import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
-import { install, planInstall, status as statusReport, uninstall } from "./install.js";
+import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
 import { runDoctor } from "./doctor.js";
 import { runHookCommand } from "./hook.js";
-import { startWriter } from "./local/writer.js";
+import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
+import { openStore } from "./local/store.js";
+import { mergeLoginProfile, resolveRoot, readAccountsIndex } from "./local/profiles.js";
+import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
+import type { ProfileId } from "./adapters/types.js";
+import type { RuntimeKind } from "./assets/protocol.js";
+import { RUNTIME_KINDS } from "./assets/protocol.js";
+import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -36,6 +45,15 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul pause [--repo <path|repo-key>]          pause capture (all, or one repo)
   37soul resume                                  resume capture
   37soul uninstall                               remove hooks, instructions, service, data
+
+  37soul login [--profile <id>]                  device login; merge the local anonymous profile
+  37soul soul create --name <n> [--description <d>] [--character <c>] [--greeting <g>] [--profile <id>]
+  37soul soul list [--profile <id>]              list local Souls
+  37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
+  37soul soul edit <uid> [--name <n> ...] [--profile <id>]     edit a local (unregistered) Soul
+  37soul soul export [--profile <id>]            export the owner-private core identity
+  37soul bind --soul <uid> --session <native-id> [--agent <kind>] [--profile <id>]
+  37soul detach --session <native-id> [--agent <kind>] [--profile <id>]
 `;
 
 export function defaultHookRenderer(io: CliIO, argv: string[]): (text: string) => void {
@@ -60,6 +78,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
   };
 
   const [command, ...rest] = argv;
+  const root = path.join(home, ".37soul");
   switch (command) {
     case "install": {
       const agents = flagValue(rest, "--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
@@ -137,6 +156,14 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     }
     case "agentd":
       return startAgentd(io, home);
+    case "soul":
+      return soulCommand(root, rest, io);
+    case "bind":
+      return bindCommand(root, rest, io, false);
+    case "detach":
+      return bindCommand(root, rest, io, true);
+    case "login":
+      return loginCommand(root, rest, io, deps);
     case undefined:
     case "-h":
     case "--help":
@@ -222,6 +249,223 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   return 0;
 }
 
+// --- Task 3 local soul / binding / login commands ----------------------------------
+
+function profileIdFromArgs(rest: string[]): string {
+  return flagValue(rest, "--profile") ?? "default";
+}
+
+function runtimeFromArgs(rest: string[], defaultValue: RuntimeKind): RuntimeKind {
+  const value = flagValue(rest, "--agent") ?? defaultValue;
+  return (RUNTIME_KINDS as readonly string[]).includes(value) ? (value as RuntimeKind) : defaultValue;
+}
+
+/**
+ * Dispatch a writer command: try the running writer (agentd) first; if none is
+ * listening, start one in-process for this single request, then close it. This
+ * keeps every mutation on the single-writer path (never a private bypass).
+ */
+async function runWriterCommand(
+  root: string,
+  profileId: ProfileId,
+  command: WriterCommand,
+  payload: Record<string, unknown>,
+): Promise<WriterResult> {
+  const request = { request_uid: randomUUID(), profile_id: profileId, command, payload };
+  const direct = await sendWriter(root, request);
+  if (direct.ok || direct.error.code !== "writer_unavailable") return direct;
+  const writer = await startWriter(root).catch(() => null);
+  if (!writer) {
+    return { ok: false, error: { code: "writer_unavailable", message: "no writer is running — start agentd first" } };
+  }
+  try {
+    return await sendWriter(root, request);
+  } finally {
+    await writer.close().catch(() => {});
+  }
+}
+
+async function readProfileDeviceId(root: string, profileId: ProfileId): Promise<string> {
+  const store = await openStore(root, profileId);
+  try {
+    return (await store.read()).device_id;
+  } finally {
+    await store.close();
+  }
+}
+
+async function soulCommand(root: string, rest: string[], io: CliIO): Promise<number> {
+  const [sub, ...args] = rest;
+  const profileId = profileIdFromArgs(args);
+
+  if (sub === "create") {
+    const identity = {
+      name: flagValue(args, "--name") ?? "Soul",
+      description: flagValue(args, "--description") ?? "",
+      character: flagValue(args, "--character") ?? "",
+      greeting: flagValue(args, "--greeting") ?? "",
+    };
+    const res = await runWriterCommand(root, profileId, "create_soul", { identity });
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
+      return 1;
+    }
+    const soul = res.result as { soul_uid: string };
+    io.stdout(`created soul ${soul.soul_uid}\n`);
+    return 0;
+  }
+
+  if (sub === "list") {
+    const store = await openStore(root, profileId);
+    let souls: Array<{ soul_uid: string; legacy_host_id: number | null; identity: { name: string } }> = [];
+    try {
+      souls = Object.values((await store.read()).souls);
+    } finally {
+      await store.close();
+    }
+    if (souls.length === 0) io.stdout("no local souls\n");
+    for (const soul of souls) {
+      const registered = soul.legacy_host_id !== null ? `  (registered host #${soul.legacy_host_id})` : "  (local)";
+      io.stdout(`- ${soul.soul_uid}  ${soul.identity.name}${registered}\n`);
+    }
+    return 0;
+  }
+
+  if (sub === "select") {
+    const soulUid = args[0];
+    if (!soulUid) {
+      io.stderr("usage: 37soul soul select <soul_uid> [--agent <kind>]\n");
+      return 2;
+    }
+    const agent = flagValue(args, "--agent");
+    if (agent) {
+      await setToolDefault({ profile_id: profileId, runtime_kind: runtimeFromArgs(args, "claude-code") }, soulUid, { root });
+      io.stdout(`default soul for ${runtimeFromArgs(args, "claude-code")}: ${soulUid}\n`);
+    } else {
+      await setAccountDefaultSoul(profileId, soulUid, { root });
+      io.stdout(`account default soul: ${soulUid}\n`);
+    }
+    return 0;
+  }
+
+  if (sub === "edit") {
+    const soulUid = args[0];
+    if (!soulUid) {
+      io.stderr("usage: 37soul soul edit <soul_uid> [--name <n>] [--description <d>] [--character <c>] [--greeting <g>]\n");
+      return 2;
+    }
+    const store = await openStore(root, profileId);
+    let current: { identity: { name: string; description: string; character: string; greeting: string } } | undefined;
+    try {
+      current = (await store.read()).souls[soulUid];
+    } finally {
+      await store.close();
+    }
+    if (!current) {
+      io.stderr(`no local soul ${soulUid}\n`);
+      return 1;
+    }
+    const pick = (flag: string, key: "name" | "description" | "character" | "greeting"): string =>
+      flagValue(args, flag) ?? current!.identity[key] ?? "";
+    const identity = {
+      name: pick("--name", "name"),
+      description: pick("--description", "description"),
+      character: pick("--character", "character"),
+      greeting: pick("--greeting", "greeting"),
+    };
+    const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity });
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
+      return 1;
+    }
+    io.stdout(`updated soul ${soulUid}\n`);
+    return 0;
+  }
+
+  if (sub === "export") {
+    const res = await runWriterCommand(root, profileId, "export", {});
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
+      return 1;
+    }
+    io.stdout(`${JSON.stringify(res.result, null, 2)}\n`);
+    return 0;
+  }
+
+  io.stderr(`unknown soul command: ${sub ?? ""}\n\n${USAGE}`);
+  return 2;
+}
+
+async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
+  const profileId = profileIdFromArgs(rest);
+  const soulUid = flagValue(rest, "--soul") ?? flagValue(rest, "--soul-uid");
+  const nativeSessionId = flagValue(rest, "--session") ?? flagValue(rest, "--native-session-id");
+  const runtimeKind = runtimeFromArgs(rest, "claude-code");
+  if (!detach && !soulUid) {
+    io.stderr("usage: 37soul bind --soul <soul_uid> --session <native_id> [--agent <kind>]\n");
+    return 2;
+  }
+  if (!nativeSessionId) {
+    io.stderr("usage: 37soul bind/detach --session <native_id> [--agent <kind>]\n");
+    return 2;
+  }
+  const deviceId = await readProfileDeviceId(root, profileId);
+  const res = detach
+    ? await runWriterCommand(root, profileId, "detach", { device_id: deviceId, runtime_kind: runtimeKind, native_session_id: nativeSessionId })
+    : await runWriterCommand(root, profileId, "bind", { device_id: deviceId, runtime_kind: runtimeKind, native_session_id: nativeSessionId, soul_uid: soulUid });
+  if (!res.ok) {
+    io.stderr(`${res.error.code}: ${res.error.message}\n`);
+    return 1;
+  }
+  io.stdout(`${detach ? "detached" : "bound"} session ${nativeSessionId}\n`);
+  return 0;
+}
+
+async function readClientVersion(cliScriptPath: string): Promise<string> {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(path.dirname(cliScriptPath), "..", "package.json"), "utf8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+async function loginCommand(
+  root: string,
+  rest: string[],
+  io: CliIO,
+  deps: InstallDeps,
+): Promise<number> {
+  const profileId = profileIdFromArgs(rest);
+  const machineId = await readProfileDeviceId(root, profileId);
+  const clientVersion = await readClientVersion(fileURLToPath(import.meta.url));
+
+  const login = await deviceLogin(deps, [...RUNTIME_KINDS], { assetsMode: true, machineId, clientVersion });
+
+  if (!login.owner_id) {
+    io.stderr("login returned no owner_id\n");
+    return 1;
+  }
+  await mergeLoginProfile(profileId, login.owner_id, undefined, { root });
+  if (login.cloud_device_uid) {
+    const store = await openStore(root, profileId);
+    try {
+      await store.transact((draft) => {
+        draft.cloud_device_uid = login.cloud_device_uid ?? null;
+      });
+    } finally {
+      await store.close();
+    }
+  }
+  if (login.default_soul_uid) {
+    await setAccountDefaultSoul(profileId, login.default_soul_uid, { root });
+  }
+  io.stdout(`logged in as owner ${login.owner_id} (profile ${profileId})\n`);
+  return 0;
+}
+
 async function normalizeRepoArg(value: string): Promise<string | null> {
   if (value.startsWith("path:") || /^[A-Za-z0-9.-]+\//.test(value)) return value;
   try {
@@ -231,7 +475,6 @@ async function normalizeRepoArg(value: string): Promise<string | null> {
     return null;
   }
 }
-
 function flagValue(argv: string[], flag: string): string | undefined {
   const index = argv.indexOf(flag);
   if (index < 0) return undefined;
