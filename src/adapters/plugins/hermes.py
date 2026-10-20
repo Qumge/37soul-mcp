@@ -33,7 +33,7 @@ def _launcher():
     return "37soul"
 
 
-def _bounded_payload(payload):
+def _bounded_payload(event, payload):
     if not isinstance(payload, dict):
         payload = {}
     bounded = {}
@@ -46,7 +46,9 @@ def _bounded_payload(payload):
     except (TypeError, ValueError):
         text = "{}"
     if len(text.encode("utf-8")) > MAX_BRIDGE_PAYLOAD_BYTES:
-        text = text[:MAX_BRIDGE_PAYLOAD_BYTES]
+        # Never slice bytes (that can split JSON): emit a still-valid envelope
+        # the receiver can drop as truncated instead of failing to parse.
+        text = json.dumps({"agent": "hermes", "event": event, "payload": None, "truncated": True})
     return text
 
 
@@ -67,7 +69,7 @@ def _bridge(event, payload):
     except OSError:
         return
     try:
-        proc.communicate(_bounded_payload(payload).encode("utf-8"), timeout=BRIDGE_TIMEOUT_SECONDS)
+        proc.communicate(_bounded_payload(event, payload).encode("utf-8"), timeout=BRIDGE_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         try:
             proc.kill()

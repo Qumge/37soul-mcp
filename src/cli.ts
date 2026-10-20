@@ -25,13 +25,14 @@ import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { openStore, profilesDir, snapshotPath } from "./local/store.js";
 import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
-import type { ProfileId, RuntimeAdapter } from "./adapters/types.js";
+import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
-import { isAssetsModeSync } from "./sync/client.js";
+import { configureSyncHttp, isAssetsModeSync } from "./sync/client.js";
+import { runSync, runSyncProfiles } from "./sync/run.js";
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -66,6 +67,7 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul uninstall                               remove hooks, instructions, service, data
 
   37soul login [--profile <id>]                  device login; merge the local anonymous profile
+  37soul sync [--profile <id>]                   push/pull the local soul (all assets-mode profiles, or one)
   37soul soul create --name <n> [--description <d>] [--character <c>] [--greeting <g>] [--profile <id>]
   37soul soul list [--profile <id>]              list local Souls
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
@@ -100,6 +102,9 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
 
   const [command, ...rest] = argv;
   const root = path.join(home, ".37soul");
+  // Composition root: the sync writer command's transport is injected here (and in
+  // startAgentd), never read from `globalThis.fetch` inside the writer.
+  configureSyncHttp(globalThis.fetch as HttpFetch);
   switch (command) {
     case "install": {
       const agents = flagValue(rest, "--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
@@ -185,6 +190,21 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       return bindCommand(root, rest, io, true);
     case "login":
       return loginCommand(root, rest, io, deps);
+    case "sync": {
+      const profileId = flagValue(rest, "--profile");
+      const reports = profileId
+        ? [{ profile_id: profileId, report: await runSync(root, profileId, globalThis.fetch as HttpFetch) }]
+        : await runSyncProfiles(root, globalThis.fetch as HttpFetch);
+      let failed = false;
+      for (const { profile_id, report } of reports) {
+        io.stdout(
+          `profile ${profile_id}: pushed ${report.accepted}, conflicts ${report.conflicts}, pending ${report.pending}` +
+            `${report.error ? ` — ${report.error}` : ""}\n`,
+        );
+        if (report.error) failed = true;
+      }
+      return failed ? 1 : 0;
+    }
     case undefined:
     case "-h":
     case "--help":
@@ -239,7 +259,9 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   );
 
   // Single-writer IPC for local soul assets. Best-effort: IPC unavailability must
-  // never fail the user's working session.
+  // never fail the user's working session. The writer's sync transport is injected
+  // here (the agentd process hosts the writer), never read from `globalThis.fetch`.
+  configureSyncHttp(globalThis.fetch as HttpFetch);
   const writer = await startWriter(root).catch((error) => {
     logger.error(`writer failed to start: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -639,6 +661,17 @@ export async function loginCommand(
   const existing = await loadConfig(root);
   if (existing && login.tokens && Object.keys(login.tokens).length > 0) {
     await saveConfig(root, { ...existing, tokens: { ...(existing.tokens ?? {}), ...login.tokens } });
+  }
+
+  // "login then first sync": best-effort push/pull of every assets-mode profile.
+  // A sync failure must never fail the login — surface it on stderr and keep going.
+  try {
+    const synced = await runSyncProfiles(root, globalThis.fetch as HttpFetch);
+    for (const { report } of synced) {
+      if (report.error) io.stderr(`sync deferred: ${report.error}\n`);
+    }
+  } catch (error) {
+    io.stderr(`sync deferred: ${error instanceof Error ? error.message : String(error)}\n`);
   }
 
   // Print the profile actually adopted (the writer result), never the current/anonymous

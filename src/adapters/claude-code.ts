@@ -279,7 +279,7 @@ export function createClaudeCodeAdapter(deps: AdapterDeps): RuntimeAdapter {
       const transcript = await deps.readSource(request.source_event_refs);
       // 2. Resolve the completed turn's concrete refs (no sidechain / later turn).
       const turnRefs = completedTurnSourceRefs(transcript);
-      if (turnRefs.length === 0) return { proposals: [] };
+      if (turnRefs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderSourceTurn(transcript, turnRefs);

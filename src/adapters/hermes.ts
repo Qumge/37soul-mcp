@@ -384,7 +384,7 @@ export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
       }
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
       const { refs } = hermesCompletedTurnRefs(transcript);
-      if (refs.length === 0) return { proposals: [] };
+      if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderHermesTurn(transcript, refs);

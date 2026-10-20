@@ -60,14 +60,16 @@ function launcher() {
 const MAX_BRIDGE_PAYLOAD_BYTES = 8192;
 const BRIDGE_TIMEOUT_MS = 2000;
 
-function boundedPayload(payload) {
+export function boundedPayload(event, payload) {
   const bounded = { ...(payload ?? {}) };
   for (const key of Object.keys(bounded)) {
     if (typeof bounded[key] === "string") bounded[key] = bounded[key].slice(0, 1024);
   }
-  let json = JSON.stringify(bounded);
+  const json = JSON.stringify(bounded);
   if (Buffer.byteLength(json, "utf8") > MAX_BRIDGE_PAYLOAD_BYTES) {
-    json = json.slice(0, MAX_BRIDGE_PAYLOAD_BYTES);
+    // Never slice bytes (that can split JSON): emit a still-valid envelope the
+    // receiver can drop as truncated instead of failing to parse.
+    return JSON.stringify({ agent: "opencode", event, payload: null, truncated: true });
   }
   return json;
 }
@@ -101,7 +103,7 @@ function bridge(event, payload) {
     child.on("error", finish);
     child.on("close", finish);
     try {
-      child.stdin.end(boundedPayload(payload));
+      child.stdin.end(boundedPayload(event, payload));
     } catch {
       finish();
     }

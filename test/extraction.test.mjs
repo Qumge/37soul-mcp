@@ -656,3 +656,26 @@ test("extraction: a digest tombstone suppresses auto-activation end-to-end", asy
 
   rmSync(root, { recursive: true, force: true });
 });
+
+test("extraction: a source_unavailable failure leaves the range pending/error, never completed", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  const binding = await resolveBinding(keyOf("p1", "dev-1", "hermes", "ns-1"), undefined, { root });
+
+  await scheduleExtraction(binding, RANGE, {
+    root,
+    adapter: createFakeAdapter("hermes", {
+      extract: async () => ({ error: { code: "source_unavailable", retryable: true } }),
+    }),
+  });
+
+  const snap = await readSnap(root, "p1");
+  const watermark = snap.extraction_watermarks[watermarkKey(binding, RANGE)];
+  assert.equal(watermark.completed, false, "a zero-ref source never completes the range");
+  assert.ok(["pending", "error"].includes(watermark.state), "the range stays pending/error, not completed");
+  assert.equal(watermark.last_error, "source_unavailable", "the failure is recorded locally");
+
+  rmSync(root, { recursive: true, force: true });
+});

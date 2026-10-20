@@ -4,10 +4,12 @@
  * `syncOnce` pushes the outbox and pulls the cloud directory over the injected
  * `HttpFetch` only — it never calls `globalThis.fetch`, and no transcript, prompt,
  * cwd or native session id ever appears in an HTTP body, receipt, outbox envelope
- * or log. The HTTP layer understands every §9 status (200/201/401/403/404/409/
- * 413/422/429/5xx, Retry-After and bounded backoff), and distinguishes the
- * per-change `idempotency_mismatch` carried inside a 200 push from a whole-request
- * 409 on any other endpoint.
+ * or log. The `sync_once` writer command's transport is injected at the composition
+ * root via `configureSyncHttp` (the handler never reads `globalThis.fetch`). The
+ * HTTP layer understands every §9 status (200/201/401/403/404/409/413/422/429/5xx,
+ * Retry-After and bounded backoff), and distinguishes the per-change
+ * `idempotency_mismatch` carried inside a 200 push from a whole-request 409 on any
+ * other endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -1226,8 +1228,28 @@ export function isAssetsModeSync(root: string): boolean {
 
 // --- writer commands ---------------------------------------------------------------
 
+/**
+ * The writer's sync transport, injected at the composition root. The `sync_once`
+ * handler never reads `globalThis.fetch`: an unconfigured writer fails with a typed
+ * `http_not_configured` error instead of silently falling back to the process fetch.
+ */
+let syncHttp: HttpFetch | null = null;
+
+/** Composition-root injection point for the `sync_once` writer transport. */
+export function configureSyncHttp(fetch: HttpFetch | null): void {
+  syncHttp = fetch;
+}
+
 registerWriterCommand("sync_once", async ({ root, request }) => {
-  return syncOnce(request.profile_id, globalThis.fetch as HttpFetch, { root });
+  // The legacy transcript mode can never push the new store: refuse before any
+  // network work when no local account entry is in assets-only sync mode.
+  if (!isAssetsModeSync(root)) {
+    return { accepted: 0, conflicts: 0, pending: 0, error: "assets mode is not enabled" };
+  }
+  if (!syncHttp) {
+    throw new StoreError("http_not_configured", "no HTTP transport was configured for the writer");
+  }
+  return syncOnce(request.profile_id, syncHttp, { root });
 });
 
 registerWriterCommand("record_receipt", async ({ root, request }) => {

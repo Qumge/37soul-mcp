@@ -527,3 +527,99 @@ test("daemon: transcript fallback stays off unless the agent is listed", async (
   rmSync(offRoot, { recursive: true, force: true });
   rmSync(onRoot, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// Assets-mode cloud sync cadence (C1): gated on the interval and on assets mode,
+// fire-and-forget with an in-flight guard; a failure retries next interval.
+// ---------------------------------------------------------------------------
+
+const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+function seedAssetsMode(root, profileId = "p1") {
+  writeFileSync(
+    path.join(root, "accounts.json"),
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: "s1", soul_sync_mode: "assets_only" } })}\n`,
+    { mode: 0o600 },
+  );
+}
+
+test("daemon: assets-mode sync runs once per interval and is gated on assets mode", async () => {
+  let syncCalls = 0;
+  const h = harness({
+    config: { syncIntervalMs: 10_000 },
+    deps: {
+      syncProfiles: async () => {
+        syncCalls += 1;
+        return [{ profile_id: "p1", report: { accepted: 1, conflicts: 0, pending: 0 } }];
+      },
+    },
+  });
+  seedAssetsMode(h.root);
+
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 1, "the first tick syncs");
+
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 1, "a second tick within the interval does not sync");
+
+  h.advance(10_001);
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 2, "after the interval the next tick syncs again");
+
+  h.cleanup();
+});
+
+test("daemon: sync is skipped entirely outside assets mode", async () => {
+  let syncCalls = 0;
+  const h = harness({
+    config: { syncIntervalMs: 10_000 },
+    deps: {
+      syncProfiles: async () => {
+        syncCalls += 1;
+        return [{ profile_id: "p1", report: { accepted: 0, conflicts: 0, pending: 0 } }];
+      },
+    },
+  });
+  // No accounts.json -> legacy mode.
+
+  await h.daemon.tick();
+  await flushMicrotasks();
+  h.advance(60_000);
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 0, "legacy mode never syncs");
+
+  h.cleanup();
+});
+
+test("daemon: a failed sync retries next interval and never kills the tick loop", async () => {
+  let syncCalls = 0;
+  const h = harness({
+    config: { syncIntervalMs: 10_000 },
+    deps: {
+      syncProfiles: async () => {
+        syncCalls += 1;
+        throw new Error("sync boom");
+      },
+    },
+  });
+  seedAssetsMode(h.root);
+
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 1, "the first attempt runs and fails");
+
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 1, "within the interval the failure is not retried next tick");
+
+  h.advance(10_001);
+  await h.daemon.tick();
+  await flushMicrotasks();
+  assert.equal(syncCalls, 2, "after the interval the failure retries");
+
+  h.cleanup();
+});

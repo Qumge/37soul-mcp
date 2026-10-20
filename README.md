@@ -110,6 +110,16 @@ log in on 37soul.com. The legacy write tools (`update_host` / `remember` / `log_
 error — the local soul sync is the write path, and her identity changes on the website
 only.
 
+The sync itself is **consent-gated per device and per Soul**: only an account entry whose
+`soul_sync_mode` is `assets_only` syncs, and only the Souls bound to that profile. A legacy
+transcript-mode device never syncs. It is triggered three ways, all through the single
+writer (never a lockless store write, never `globalThis.fetch`):
+
+- **`37soul sync [--profile <id>]`** — push/pull on demand (all assets-mode profiles, or one);
+- **automatically after `37soul login`** — best-effort, so a sync failure never fails the login;
+- **the background service** — every `syncIntervalMs` (default 5 minutes) while an
+  assets-mode profile is bound, skipping the interval when a sync is already in flight.
+
 The runtime lands in `~/.37soul/runtime/<version>/` (two self-contained esbuild files and a
 launcher) and is linked as `~/.local/bin/37soul`:
 

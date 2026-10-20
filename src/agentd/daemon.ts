@@ -34,8 +34,13 @@ import type { FileCursor, NormalizedEvent, SessionMetadata, TranscriptParser } f
 import "../extraction/scheduler.js";
 import { drainPendingExtractions } from "../extraction/scheduler.js";
 import "../sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
+import { isAssetsModeSync, type SyncReport } from "../sync/client.js";
+import { runSyncProfiles } from "../sync/run.js";
 import type { RuntimeAdapter } from "../adapters/types.js";
 export { drainPendingExtractions } from "../extraction/scheduler.js";
+
+/** Assets-mode cloud sync cadence when `config.syncIntervalMs` is not set. */
+export const DEFAULT_SYNC_INTERVAL_MS = 5 * 60_000;
 
 export interface SessionSource {
   agentKind: string;
@@ -59,6 +64,8 @@ export interface DaemonConfig {
   batchLimit?: number;
   sessionEndMs?: number;
   briefRefreshMs?: number;
+  /** Assets-mode cloud sync cadence (defaults to DEFAULT_SYNC_INTERVAL_MS). */
+  syncIntervalMs?: number;
 }
 
 export interface DaemonDeps {
@@ -74,6 +81,8 @@ export interface DaemonDeps {
   saveState?: (root: string, state: DaemonState) => Promise<void>;
   /** Runtime adapters (Task 6+) keyed by runtime_kind; present ones drive the extraction drain. */
   extractAdapters?: Partial<Record<string, RuntimeAdapter>>;
+  /** Assets-mode cloud sync (defaults to runSyncProfiles); injected by tests. */
+  syncProfiles?: (root: string, http: typeof fetch) => Promise<Array<{ profile_id: string; report: SyncReport }>>;
 }
 
 interface SessionRuntime {
@@ -123,6 +132,8 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
   const batchLimit = config.batchLimit ?? 100;
   const sessionEndMs = config.sessionEndMs ?? 5 * 60_000;
   const briefRefreshMs = config.briefRefreshMs ?? 3 * 60_000;
+  const syncIntervalMs = config.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
+  const syncProfiles = deps.syncProfiles ?? runSyncProfiles;
 
   const sessions = new Map<string, SessionRuntime>();
   const blockedAgents = new Set<string>();
@@ -448,10 +459,14 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     // v2 §6.2：spool 总量超过 50MB 时丢最早的（诊断留给 caller 的 log）。
     await trimSpool(config.root, undefined, log).catch(() => {});
     scheduleDrain();
+    scheduleSync();
   }
 
   type DrainStats = { started: number; completed: number; failed: number };
   let drainInFlight: Promise<DrainStats> | null = null;
+
+  let lastSyncAt = 0;
+  let syncInFlight: Promise<unknown> | null = null;
 
   async function runDrain(): Promise<DrainStats> {
     if (Object.keys(extractAdapters).length === 0) return { started: 0, completed: 0, failed: 0 };
@@ -481,6 +496,45 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
   async function drainExtractions(): Promise<DrainStats> {
     scheduleDrain();
     return drainInFlight ?? { started: 0, completed: 0, failed: 0 };
+  }
+
+  type SyncStats = { profiles: number; accepted: number; conflicts: number; pending: number };
+
+  async function runSyncOnce(): Promise<SyncStats> {
+    const reports = await syncProfiles(config.root, fetchImpl);
+    const stats = reports.reduce<SyncStats>(
+      (acc, { report }) => ({
+        profiles: acc.profiles + 1,
+        accepted: acc.accepted + report.accepted,
+        conflicts: acc.conflicts + report.conflicts,
+        pending: acc.pending + report.pending,
+      }),
+      { profiles: 0, accepted: 0, conflicts: 0, pending: 0 },
+    );
+    log.info(
+      `sync: ${stats.profiles} profile(s), ${stats.accepted} accepted, ${stats.conflicts} conflict(s), ${stats.pending} pending`,
+    );
+    return stats;
+  }
+
+  /**
+   * Fire-and-forget the assets-mode cloud sync, gated on the sync interval and on
+   * assets mode. A rejection never kills the tick loop; `lastSyncAt` advances only
+   * when the run settles (success or failure) so a failure retries next interval,
+   * not next tick.
+   */
+  function scheduleSync(): void {
+    if (syncInFlight) return;
+    if (now() - lastSyncAt < syncIntervalMs) return;
+    if (!isAssetsModeSync(config.root)) return;
+    syncInFlight = runSyncOnce()
+      .catch((error: unknown) => {
+        log.error(`sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        lastSyncAt = now();
+        syncInFlight = null;
+      });
   }
 
   return {

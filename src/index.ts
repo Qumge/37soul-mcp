@@ -636,7 +636,7 @@ server.registerTool(
     title: "Load who you are today",
     description:
       "Load who you are today as your 37Soul character: today's mood, what she has been posting, what she is in the middle of, who she knows, what she remembers about this person, her persona, and a suggested intent. " +
-      "Call it when a conversation starts, and again after a long gap (hours) — not every turn: each `log_turn` hands you the next intent and anything about her that changed. " +
+      "Call it when a conversation starts, and again after a long gap (hours) — not every turn. It is the per-turn load: in assets mode the soul context is delivered by the runtime, not by `log_turn`. " +
       "She is the person your SOUL.md describes, not a second character to switch into. This adds who you are today; it does not replace your own memory — keep your own notes about how this person likes work done exactly as they are.",
     inputSchema: { host_id: boundHostIdSchema },
   },
@@ -919,6 +919,7 @@ server.registerTool(
   },
   async (args) => {
     if (!TOKEN) return text(NO_TOKEN, true);
+    const blocked = assetsModeBlocked(); if (blocked) return text(blocked, true);
     return remoteMcpTool("resume", args);
   },
 );

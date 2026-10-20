@@ -357,7 +357,7 @@ test("source-index: hook stdin transcript_path -> pointer -> drain parses the tu
   rmSync(root, { recursive: true, force: true });
 });
 
-test("source-index: missing/relative/nonexistent path -> no pointer, no model call, clean completion", async () => {
+test("source-index: missing/relative/nonexistent path -> no pointer, no model call, honest source_unavailable", async () => {
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.souls["s1"] = makeSoul("s1");
@@ -397,22 +397,23 @@ test("source-index: missing/relative/nonexistent path -> no pointer, no model ca
     emit: async () => {},
   });
   const drained = await drainPendingExtractions(root, { "claude-code": adapter });
-  assert.equal(drained.completed, 3, "all three ranges complete with empty proposals");
+  assert.equal(drained.failed, 3, "all three ranges fail honestly as source_unavailable");
+  assert.equal(drained.completed, 0, "an unreadable source is never a clean completion");
   await writer.close();
 
   assert.equal(invoked.length, 0, "no model call for an unresolvable source");
   const snap = await readSnap(root, "p1");
   assert.equal(Object.keys(snap.assets).length, 0, "no assets");
   for (const wm of Object.values(snap.extraction_watermarks)) {
-    assert.equal(wm.completed, true);
-    assert.equal(wm.state, "completed", "a clean completion, never an error state");
-    assert.equal(wm.last_error, null);
+    assert.equal(wm.completed, false);
+    assert.equal(wm.state, "error", "an honest error, never a silent success");
+    assert.equal(wm.last_error, "source_unavailable");
   }
 
   rmSync(root, { recursive: true, force: true });
 });
 
-test("source-index: a pruned/expired pointer resolves to \"\" and leaves a clean completed state", async () => {
+test("source-index: a pruned/expired pointer resolves to \"\" and fails honestly as source_unavailable", async () => {
   const root = tempDir();
   const transcriptPath = path.join(root, "t.jsonl");
   writeFileSync(transcriptPath, `${TURN_TEXT}\n`);
@@ -447,14 +448,15 @@ test("source-index: a pruned/expired pointer resolves to \"\" and leaves a clean
     emit: async () => {},
   });
   const drained = await drainPendingExtractions(root, { "claude-code": adapter });
-  assert.equal(drained.completed, 1);
+  assert.equal(drained.failed, 1);
+  assert.equal(drained.completed, 0, "a pruned source is never a clean completion");
   await writer.close();
 
   const snap = await readSnap(root, "p1");
   const wm = snap.extraction_watermarks[watermarkKey(await resolveBinding(key, undefined, { root }), rangeForEvent(event))];
-  assert.equal(wm.completed, true);
-  assert.equal(wm.state, "completed", "a pruned source completes cleanly, never errors");
-  assert.equal(wm.last_error, null);
+  assert.equal(wm.completed, false);
+  assert.equal(wm.state, "error", "a pruned source fails honestly, never a silent success");
+  assert.equal(wm.last_error, "source_unavailable");
 
   rmSync(root, { recursive: true, force: true });
 });

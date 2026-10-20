@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createClaudeCodeAdapter, completedTurnSourceRefs, renderSourceTurn } from "../dist/adapters/claude-code.js";
 import {
@@ -776,6 +776,49 @@ test("opencode: the plugin bridge spawns only the local hook command and makes n
   assert.ok(source.includes("BRIDGE_TIMEOUT_MS"), "a short timeout bounds the wait");
 });
 
+test("opencode: an oversized bridge payload is still valid JSON and the bridge stays live", async () => {
+  const root = tempDir("opencode-bridge-");
+  const pluginFile = path.join(root, "37soul-soul.mjs");
+  writeFileSync(pluginFile, OPENCODE_PLUGIN_SOURCE, { mode: 0o600 });
+  const mod = await import(pathToFileURL(pluginFile).href);
+
+  // An oversized payload must become a still-valid envelope, never a sliced byte
+  // string that the receiver would drop as "stdin was not valid JSON".
+  const overflowText = mod.boundedPayload("Stop", {
+    session_id: "s",
+    big: Array(4000).fill("1234567890"),
+  });
+  const overflow = JSON.parse(overflowText);
+  assert.equal(overflow.truncated, true, "oversized payload is marked truncated");
+  assert.equal(overflow.payload, null, "the payload is dropped, not sliced");
+  assert.equal(overflow.agent, "opencode", "the envelope keeps the agent");
+  assert.equal(overflow.event, "Stop", "the envelope keeps the event");
+
+  // A small payload is bounded per-field and never truncated.
+  const small = JSON.parse(mod.boundedPayload("Stop", { session_id: "s", last_assistant_message: "hi" }));
+  assert.equal(small.truncated, undefined, "small payload is not truncated");
+  assert.equal(small.session_id, "s");
+
+  // End-to-end: the bridge forwards to the local hook through the fixed argv and
+  // stays live (onEvent resolves) with valid JSON on stdin.
+  const capture = path.join(root, "captured.json");
+  const launcher = path.join(root, "37soul");
+  writeFileSync(launcher, "#!/bin/sh\ncat > \"$SOUL37_TEST_CAPTURE\"\n", { mode: 0o755 });
+  process.env.SOUL37_LAUNCHER = launcher;
+  process.env.SOUL37_TEST_CAPTURE = capture;
+  try {
+    await mod.default.onEvent({ session_id: "s", event: "request.started", prompt: "hello" });
+  } finally {
+    delete process.env.SOUL37_LAUNCHER;
+    delete process.env.SOUL37_TEST_CAPTURE;
+  }
+  const received = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(received.session_id, "s");
+  assert.equal(received.prompt, "hello");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ---------------------------------------------------------------------------
 // Hermes (Task 9): modeled CLI + Python bridge; gateway events are never CLI
 // capability, reset never inherits, compact reloads active revisions, and an
@@ -1062,6 +1105,58 @@ test("hermes: the python bridge spawns only the local hook command and makes no 
   assert.ok(source.includes("stderr=subprocess.DEVNULL"), "host stderr is never written");
 });
 
+test("hermes: an oversized bridge payload is still valid JSON and the bridge exits 0", async () => {
+  const root = tempDir("hermes-bridge-");
+  const pyFile = path.join(root, "hermes.py");
+  writeFileSync(pyFile, hermesPySource, { mode: 0o600 });
+  const { execFileSync, spawnSync } = await import("node:child_process");
+
+  // An oversized payload must become a still-valid envelope, never a sliced byte
+  // string that the receiver would drop as "stdin was not valid JSON".
+  const probe = `
+import importlib.util
+spec = importlib.util.spec_from_file_location("hermes_bridge", ${JSON.stringify(pyFile)})
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod._bounded_payload("Stop", {"session_id": "s", "big": ["1234567890"] * 4000}))
+`;
+  const overflowText = execFileSync("python3", ["-c", probe], { encoding: "utf8" }).trim();
+  const overflow = JSON.parse(overflowText);
+  assert.equal(overflow.truncated, true, "oversized payload is marked truncated");
+  assert.equal(overflow.payload, null, "the payload is dropped, not sliced");
+  assert.equal(overflow.agent, "hermes", "the envelope keeps the agent");
+  assert.equal(overflow.event, "Stop", "the envelope keeps the event");
+
+  // A small payload is bounded per-field and never truncated.
+  const smallProbe = `
+import importlib.util
+spec = importlib.util.spec_from_file_location("hermes_bridge", ${JSON.stringify(pyFile)})
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod._bounded_payload("Stop", {"session_id": "s", "last_assistant_message": "hi"}))
+`;
+  const small = JSON.parse(execFileSync("python3", ["-c", smallProbe], { encoding: "utf8" }).trim());
+  assert.equal(small.truncated, undefined, "small payload is not truncated");
+  assert.equal(small.session_id, "s");
+
+  // End-to-end: main() forwards a real hermes event (message.completed -> hook
+  // Stop) through the fixed argv and exits 0, with valid JSON on the child's stdin.
+  const capture = path.join(root, "captured.json");
+  const launcher = path.join(root, "37soul");
+  writeFileSync(launcher, "#!/bin/sh\ncat > \"$SOUL37_TEST_CAPTURE\"\n", { mode: 0o755 });
+  const run = spawnSync("python3", [pyFile, "message.completed"], {
+    input: JSON.stringify({ session_id: "s", message: "hello" }),
+    encoding: "utf8",
+    env: { ...process.env, SOUL37_LAUNCHER: launcher, SOUL37_TEST_CAPTURE: capture },
+  });
+  assert.equal(run.status, 0, "the bridge exits 0");
+  const received = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(received.session_id, "s");
+  assert.equal(received.last_assistant_message, "hello");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("hermes: probe and doctor report gateway-only honestly, never as CLI", async () => {
   const root = tempDir("hermes-surface-");
 
@@ -1137,3 +1232,51 @@ test("hermes: probe and doctor report gateway-only honestly, never as CLI", asyn
   rmSync(root, { recursive: true, force: true });
 });
 
+
+// ---------------------------------------------------------------------------
+// M1: a completed turn that resolves to zero refs is a retryable source
+// failure, never a permanent silent "nothing worth remembering" success.
+// ---------------------------------------------------------------------------
+
+test("every adapter: zero-ref source is source_unavailable and never reaches the model", async () => {
+  const cases = [
+    ["claude-code", createClaudeCodeAdapter],
+    ["codex", createCodexAdapter],
+    ["opencode", createOpenCodeAdapter],
+    ["hermes", createHermesAdapter],
+  ];
+
+  for (const [runtimeKind, make] of cases) {
+    const root = tempDir(`zero-ref-${runtimeKind}-`);
+    let invocations = 0;
+    const adapter = make({
+      home: root,
+      readSource: async () => "",
+      invoke: async () => {
+        invocations += 1;
+        return { code: 0, stdout: "[]", stderr: "" };
+      },
+      emit: async () => {},
+    });
+
+    const result = await adapter.extract({
+      job_uid: `job-${runtimeKind}`,
+      runtime_kind: runtimeKind,
+      native_session_id: "ns-1",
+      source_event_refs: ["marker"],
+      binding_uid: "b1",
+      binding_revision: 1,
+      soul_uid: "s1",
+      internal_task: true,
+    });
+
+    assert.deepEqual(
+      result,
+      { error: { code: "source_unavailable", retryable: true } },
+      `${runtimeKind} zero-ref source is source_unavailable`,
+    );
+    assert.equal(invocations, 0, `${runtimeKind} never invokes the model on zero refs`);
+
+    rmSync(root, { recursive: true, force: true });
+  }
+});

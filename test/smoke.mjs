@@ -6,7 +6,7 @@
  */
 import http from "node:http";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -280,6 +280,32 @@ check("resume/checkpoint 的 schema 与远程 MCP 对齐", () => {
   assert.ok(resumeTool.inputSchema.properties.repo);
   assert.deepEqual([...checkpointTool.inputSchema.required].sort(), ["body", "branch", "repo"]);
 });
+
+// ── assets-only mode: legacy resume/checkpoint are blocked, never forwarded ──
+const assetsHome = mkdtempSync(path.join(tmpdir(), "37soul-mcp-assets-"));
+mkdirSync(path.join(assetsHome, ".37soul"), { recursive: true });
+writeFileSync(
+  path.join(assetsHome, ".37soul", "accounts.json"),
+  `${JSON.stringify({ "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } })}\n`,
+  { mode: 0o600 },
+);
+const assetsClient = await connectClient("smoke-assets", { SOUL37_HOME: assetsHome });
+const assetsCall = async (name, args = {}) => {
+  const r = await assetsClient.callTool({ name, arguments: args });
+  return { text: r.content[0].text, isError: !!r.isError };
+};
+const blockedResume = await assetsCall("resume", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x" });
+check("assets mode blocks resume with the assets-only message", () => {
+  assert.equal(blockedResume.isError, true);
+  assert.match(blockedResume.text, /assets-only mode/);
+});
+const blockedCheckpoint = await assetsCall("checkpoint", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x", body: { goal: "ship pagination" } });
+check("assets mode blocks checkpoint the same way", () => {
+  assert.equal(blockedCheckpoint.isError, true);
+  assert.match(blockedCheckpoint.text, /assets-only mode/);
+});
+await assetsClient.close();
+rmSync(assetsHome, { recursive: true, force: true });
 
 const hosts = await call("list_hosts");
 check("list_hosts renders a compact host line", () => {

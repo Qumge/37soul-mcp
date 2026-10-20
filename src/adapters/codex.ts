@@ -266,7 +266,7 @@ export function createCodexAdapter(deps: AdapterDeps): RuntimeAdapter {
       const transcript = await deps.readSource(request.source_event_refs);
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
       const { refs } = codexCompletedTurnRefs(transcript);
-      if (refs.length === 0) return { proposals: [] };
+      if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read rollout — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderCodexTurn(transcript, refs);
