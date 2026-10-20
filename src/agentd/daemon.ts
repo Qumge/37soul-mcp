@@ -28,10 +28,12 @@ import type { FileCursor, NormalizedEvent, SessionMetadata, TranscriptParser } f
 
 // Task 4: bounded extraction jobs run in the daemon process. The side-effect
 // import registers the runtime_event / commit_extraction writer commands in the
-// writer process this daemon hosts; drainPendingExtractions is re-exported so the
-// agentd entry point can run pending/under-budget jobs (next checkpoint / explicit
-// retry), never an immediate loop.
+// writer process this daemon hosts; the daemon tick fires the extraction drain
+// fire-and-forget (bounded by the 2-attempt budget) so a pending watermark written
+// by the hook becomes an asset, without ever blocking the capture loop on a model.
 import "../extraction/scheduler.js";
+import { drainPendingExtractions } from "../extraction/scheduler.js";
+import type { RuntimeAdapter } from "../adapters/types.js";
 export { drainPendingExtractions } from "../extraction/scheduler.js";
 
 export interface SessionSource {
@@ -69,6 +71,8 @@ export interface DaemonDeps {
   refreshBrief?: (target: BriefTarget) => Promise<BriefFetchResult>;
   acquireLock?: (root: string) => Promise<() => Promise<void>>;
   saveState?: (root: string, state: DaemonState) => Promise<void>;
+  /** Runtime adapters (Task 6+) keyed by runtime_kind; present ones drive the extraction drain. */
+  extractAdapters?: Partial<Record<string, RuntimeAdapter>>;
 }
 
 interface SessionRuntime {
@@ -91,6 +95,7 @@ export interface Daemon {
   resumeAll(): Promise<void>;
   blockedAgents(): string[];
   state(): DaemonState;
+  drainExtractions(): Promise<{ started: number; completed: number; failed: number }>;
   stop(): Promise<void>;
 }
 
@@ -102,6 +107,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
   const readFn = deps.readIncrement ?? readIncrement;
   const queue = deps.queue ?? new UploadQueue({ root: config.root, now, log });
   const save = deps.saveState ?? saveState;
+  const extractAdapters = deps.extractAdapters ?? {};
   const fetchImpl = deps.fetch ?? globalThis.fetch;
   const refresh = deps.refreshBrief ?? ((target: BriefTarget) => refreshBrief({
     root: config.root,
@@ -440,6 +446,40 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     await refreshDueBriefs();
     // v2 §6.2：spool 总量超过 50MB 时丢最早的（诊断留给 caller 的 log）。
     await trimSpool(config.root, undefined, log).catch(() => {});
+    scheduleDrain();
+  }
+
+  type DrainStats = { started: number; completed: number; failed: number };
+  let drainInFlight: Promise<DrainStats> | null = null;
+
+  async function runDrain(): Promise<DrainStats> {
+    if (Object.keys(extractAdapters).length === 0) return { started: 0, completed: 0, failed: 0 };
+    return drainPendingExtractions(config.root, extractAdapters);
+  }
+
+  /** Fire-and-forget the extraction drain: never blocks the capture loop on a model call. */
+  function scheduleDrain(): void {
+    if (drainInFlight) return;
+    drainInFlight = runDrain()
+      .then((stats) => {
+        if (stats.started > 0) {
+          log.info(`extraction drain: started ${stats.started}, completed ${stats.completed}, failed ${stats.failed}`);
+        }
+        return stats;
+      })
+      .catch((error: unknown) => {
+        log.error(`extraction drain failed: ${error instanceof Error ? error.message : String(error)}`);
+        return { started: 0, completed: 0, failed: 0 };
+      })
+      .finally(() => {
+        drainInFlight = null;
+      });
+  }
+
+  /** The same bounded drain the tick fires; awaited directly by callers/tests. */
+  async function drainExtractions(): Promise<DrainStats> {
+    scheduleDrain();
+    return drainInFlight ?? { started: 0, completed: 0, failed: 0 };
   }
 
   return {
@@ -469,6 +509,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
     },
     blockedAgents: () => [...blockedAgents],
     state: daemonState,
+    drainExtractions,
     async stop() {
       if (state) await save(config.root, state);
       if (releaseLock) await releaseLock();

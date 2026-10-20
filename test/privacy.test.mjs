@@ -103,7 +103,15 @@ test("privacy: raw text, paths, tool output and secrets never reach the outbox, 
   const binding = await resolveBinding(key, undefined, { root });
 
   let readSourceCalls = 0;
-  // The adapter is the ONLY reader of raw source. The scheduler only gives it refs.
+  // The adapter's `readSource` seam (AdapterDeps.readSource) is the ONLY reader of
+  // raw source. The scheduler only hands the adapter source *refs*; it never
+  // touches this seam, so the read count here proves the raw text stays inside the
+  // adapter and never reaches the store, outbox or HTTP body below.
+  const readSource = async (refs) => {
+    readSourceCalls += 1;
+    assert.ok(Array.isArray(refs), "readSource receives only refs, never raw text");
+    return RAW_SOURCE;
+  };
   const adapter = {
     runtime_kind: "hermes",
     async probe() {
@@ -111,8 +119,7 @@ test("privacy: raw text, paths, tool output and secrets never reach the outbox, 
     },
     async extract(request) {
       assert.ok(Array.isArray(request.source_event_refs), "the adapter receives only refs, never raw text");
-      readSourceCalls += 1;
-      const raw = RAW_SOURCE;
+      const raw = await readSource(request.source_event_refs);
       assert.ok(raw.includes(privacy.local_only_inputs.source_message), "raw source was actually available");
       // The model returns a clean portable asset; raw markers must not ride along.
       return { proposals: [cleanProposal(binding.session_ref)] };
@@ -124,7 +131,7 @@ test("privacy: raw text, paths, tool output and secrets never reach the outbox, 
 
   await scheduleExtraction(binding, RANGE, { root, adapter });
 
-  assert.equal(readSourceCalls, 1, "raw source is read exactly once, by the adapter");
+  assert.equal(readSourceCalls, 1, "raw source is read exactly once, through the readSource seam");
 
   const store = await openStore(root, "p1");
   const snap = await store.read();

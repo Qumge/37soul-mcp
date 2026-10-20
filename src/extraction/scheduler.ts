@@ -22,9 +22,9 @@
  * Single-writer: the model call runs here (the worker), but every store write goes
  * through a writer command (`begin_extraction` / `commit_extraction` /
  * `fail_extraction`), so it serializes with bind/detach in the writer process.
- * When no writer is running (tests, or a crashed agentd), the same logic falls
- * back to a direct store write — which is safe only because there is no concurrent
- * writer. The writer never waits on a model call.
+ * When no writer is listening, the command is resent through a transient
+ * in-process writer started under the same writer lock — there is never a lockless
+ * snapshot write from a non-writer process. The writer never waits on a model call.
  */
 import { randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
@@ -51,7 +51,7 @@ import {
 } from "../local/store.js";
 import { assertBindingCurrent, resolveBinding } from "../local/bindings.js";
 import { resolveRoot } from "../local/profiles.js";
-import { registerWriterCommand, sendWriter } from "../local/writer.js";
+import { registerWriterCommand, sendWriter, startWriter, type WriterResult } from "../local/writer.js";
 import {
   getInternalJob,
   isInternalEvent,
@@ -103,9 +103,30 @@ function freezeRequest(binding: BindingSnapshot, range: SourceRange, jobUid: str
   };
 }
 
-function rangeForEvent(event: RuntimeEvent): SourceRange {
-  // A single-event range; real adapters supply session stream indices (Task 6+).
-  return { event_refs: [event.event_ref], start: 0, end: 0 };
+/** A deterministic, non-negative interval id for a set of source event refs. */
+function refsDigest(refs: readonly string[]): number {
+  // FNV-1a 32-bit over the sorted, joined refs (a separator between refs). Stable
+  // across runs and processes; collisions only share an attempt budget, never leak.
+  let hash = 0x811c9dc5;
+  for (const ref of [...refs].sort()) {
+    for (let i = 0; i < ref.length; i += 1) {
+      hash ^= ref.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    hash ^= 0x1f;
+  }
+  return hash >>> 0;
+}
+
+/**
+ * A single-event range. Without session stream indices (Task 6+) the interval is
+ * derived from the event refs themselves so disjoint events get disjoint ranges —
+ * and therefore independent attempt budgets — instead of every event collapsing
+ * onto the same `start=0,end=0` budget for the whole session.
+ */
+export function rangeForEvent(event: RuntimeEvent): SourceRange {
+  const interval = refsDigest([event.event_ref]);
+  return { event_refs: [event.event_ref], start: interval, end: interval };
 }
 
 function openFs(options: { fs?: Partial<StoreFs> }): StoreFs {
@@ -123,16 +144,15 @@ export async function scheduleExtraction(
   options: ExtractionOptions,
 ): Promise<void> {
   const root = resolveRoot(options.root);
-  const fs = openFs(options);
   const jobUid = randomUUID();
   const request = freezeRequest(binding, range, jobUid);
 
-  const begin = await beginExtraction(root, binding, range, jobUid, fs);
+  const begin = await beginExtraction(root, binding, range, jobUid);
   if (!begin.scheduled) return;
 
   registerInternalJob({ jobUid, root, profileId: binding.profile_id, binding, range, request });
   try {
-    await runExtraction(jobUid, options.adapter, { root, fs });
+    await runExtraction(jobUid, options.adapter, { root });
   } finally {
     unregisterInternalJob(jobUid);
   }
@@ -152,7 +172,6 @@ export async function runExtraction(
   const job = getInternalJob(jobUid);
   if (!job) throw new StoreError("unknown_job", `no extraction job ${jobUid}`);
   const root = options.root ? resolveRoot(options.root) : job.root;
-  const fs = openFs(options);
   const key = watermarkKey(job.binding, job.range);
 
   let result: ExtractionResult;
@@ -163,37 +182,58 @@ export async function runExtraction(
   }
 
   if ("error" in result) {
-    await failExtraction(root, job.profileId, key, result.error.code, fs);
+    await failExtraction(root, job.profileId, key, result.error.code);
     return result;
   }
 
-  await commitResult(root, job.binding, job.range, result.proposals, fs);
+  await commitResult(root, job.binding, job.range, result.proposals);
   return result;
 }
 
-// --- write paths: writer command first, direct fallback when no writer is up ------
+// --- write paths: every snapshot write goes through the single writer --------------
+
+type ExtractionCommand = "begin_extraction" | "commit_extraction" | "fail_extraction";
+
+/**
+ * Send a writer command, retrying through a transient in-process writer when no
+ * writer is listening (mirrors cli.ts `runWriterCommand`). On `writer_unavailable`
+ * we acquire the writer lock via `startWriter` and resend — never a lockless
+ * snapshot write. If another writer already holds the lock but is not yet
+ * listening, `startWriter` fails and we retry the send once more; the operation
+ * then fails loudly instead of writing around the lock.
+ */
+async function sendWriterCommand(
+  root: string,
+  profileId: string,
+  command: ExtractionCommand,
+  payload: Record<string, unknown>,
+): Promise<WriterResult> {
+  const request = { request_uid: randomUUID(), profile_id: profileId, command, payload };
+  const direct = await sendWriter(root, request);
+  if (direct.ok || direct.error.code !== "writer_unavailable") return direct;
+  const writer = await startWriter(root).catch(() => null);
+  if (!writer) return sendWriter(root, request); // lock held but not yet listening
+  try {
+    return await sendWriter(root, request);
+  } finally {
+    await writer.close().catch(() => {});
+  }
+}
 
 async function beginExtraction(
   root: string,
   binding: BindingSnapshot,
   range: SourceRange,
   jobUid: string,
-  fs: StoreFs,
 ): Promise<{ scheduled: boolean; reason?: string }> {
-  const viaWriter = await sendWriter(root, {
-    request_uid: randomUUID(),
-    profile_id: binding.profile_id,
-    command: "begin_extraction",
-    payload: { binding, range, job_uid: jobUid },
+  const result = await sendWriterCommand(root, binding.profile_id, "begin_extraction", {
+    binding,
+    range,
+    job_uid: jobUid,
   });
-  if (viaWriter.ok) {
-    const result = (viaWriter.result ?? {}) as { scheduled?: boolean };
-    return { scheduled: result.scheduled === true };
-  }
-  if (viaWriter.error.code !== "writer_unavailable") {
-    return { scheduled: false, reason: viaWriter.error.code };
-  }
-  return beginExtractionDirect(root, binding, range, jobUid, fs);
+  if (!result.ok) return { scheduled: false, reason: result.error.code };
+  const value = (result.result ?? {}) as { scheduled?: boolean };
+  return { scheduled: value.scheduled === true };
 }
 
 async function commitResult(
@@ -201,19 +241,13 @@ async function commitResult(
   binding: BindingSnapshot,
   range: SourceRange,
   proposals: ProposedAsset[],
-  fs: StoreFs,
 ): Promise<void> {
-  const viaWriter = await sendWriter(root, {
-    request_uid: randomUUID(),
-    profile_id: binding.profile_id,
-    command: "commit_extraction",
-    payload: { binding, range, proposals },
+  const result = await sendWriterCommand(root, binding.profile_id, "commit_extraction", {
+    binding,
+    range,
+    proposals,
   });
-  if (viaWriter.ok) return;
-  if (viaWriter.error.code !== "writer_unavailable") {
-    throw new StoreError(viaWriter.error.code, viaWriter.error.message);
-  }
-  await commitExtraction(root, binding, range, proposals, fs);
+  if (!result.ok) throw new StoreError(result.error.code, result.error.message);
 }
 
 async function failExtraction(
@@ -221,17 +255,9 @@ async function failExtraction(
   profileId: string,
   key: string,
   code: string,
-  fs: StoreFs,
 ): Promise<void> {
-  const viaWriter = await sendWriter(root, {
-    request_uid: randomUUID(),
-    profile_id: profileId,
-    command: "fail_extraction",
-    payload: { watermark_key: key, error_code: code },
-  });
-  if (viaWriter.ok) return;
-  if (viaWriter.error.code !== "writer_unavailable") return; // best-effort failure record
-  await recordFailure(root, profileId, key, code, fs);
+  // Best-effort failure record: a refused write never fails the working session.
+  await sendWriterCommand(root, profileId, "fail_extraction", { watermark_key: key, error_code: code });
 }
 
 /** Reserve one attempt (writer-serialized): write `pending` and bump the counter. */
@@ -580,7 +606,7 @@ export async function drainPendingExtractions(
     try {
       const snap = await store.read();
       for (const [key, wm] of Object.entries(snap.extraction_watermarks)) {
-        if (wm.completed || wm.state === "running" || wm.attempts >= MAX_AUTO_ATTEMPTS) continue;
+        if (wm.completed || wm.attempts >= MAX_AUTO_ATTEMPTS) continue;
         const binding = findBindingByUid(snap, wm.request.binding_uid);
         if (!binding || binding.revision !== wm.request.binding_revision) continue; // stale: explicit handling only
         pending.push({ binding, range: rangeFromKeyAndRequest(key, wm.request), request: wm.request });
@@ -592,10 +618,14 @@ export async function drainPendingExtractions(
     for (const job of pending) {
       const adapter = adapters[job.request.runtime_kind];
       if (!adapter) continue;
+      // Reserve the attempt through the same writer command the schedule path uses,
+      // so a range drained concurrently with a checkpoint cannot exceed its budget.
+      const begin = await beginExtraction(rootDir, job.binding, job.range, job.request.job_uid);
+      if (!begin.scheduled) continue; // completed or budget exhausted since the read
       const jobUid = job.request.job_uid;
       registerInternalJob({ jobUid, root: rootDir, profileId, binding: job.binding, range: job.range, request: job.request });
       try {
-        const result = await runExtraction(jobUid, adapter, { root: rootDir, fs });
+        const result = await runExtraction(jobUid, adapter, { root: rootDir });
         stats.started += 1;
         if ("error" in result) stats.failed += 1;
         else stats.completed += 1;

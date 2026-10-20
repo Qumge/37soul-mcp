@@ -358,6 +358,53 @@ test("contract: validateProposedAsset accepts valid shared payloads and rejects 
   }
 });
 
+test("contract: every length limit is enforced exactly-at and one-past (code points)", () => {
+  const base = () => structuredClone(fixture.requests.push_preference.changes[0].payload);
+  // Each field-limited limit is driven with a non-ASCII code point ("字" = 1 code
+  // point) so the code-point accounting (not UTF-16 units) is what is asserted.
+  const atMost = (label, mutateAt, mutatePast) => {
+    assert.doesNotThrow(() => validateProposedAsset(mutateAt()), `${label} exactly-at passes`);
+    assert.throws(() => validateProposedAsset(mutatePast()), ValidationError, `${label} one-past rejected`);
+  };
+  const CP = "字";
+
+  atMost(
+    "relationship content (200 code points)",
+    () => { const v = base(); v.kind = "relationship"; v.trait = "preference"; v.content = CP.repeat(LIMITS.relationshipContentMaxCodePoints); return v; },
+    () => { const v = base(); v.kind = "relationship"; v.trait = "preference"; v.content = CP.repeat(LIMITS.relationshipContentMaxCodePoints + 1); return v; },
+  );
+
+  atMost(
+    "experience content (4000 code points)",
+    () => { const v = base(); v.kind = "experience"; v.trait = "fact"; v.content = CP.repeat(LIMITS.experienceContentMaxCodePoints); return v; },
+    () => { const v = base(); v.kind = "experience"; v.trait = "fact"; v.content = CP.repeat(LIMITS.experienceContentMaxCodePoints + 1); return v; },
+  );
+
+  atMost(
+    "applicability (500 code points)",
+    () => { const v = base(); v.applicability = CP.repeat(LIMITS.applicabilityMaxCodePoints); return v; },
+    () => { const v = base(); v.applicability = CP.repeat(LIMITS.applicabilityMaxCodePoints + 1); return v; },
+  );
+
+  atMost(
+    "tags count (8 items)",
+    () => { const v = base(); v.tags = Array.from({ length: LIMITS.tagsMax }, (_, i) => `t${i}`); return v; },
+    () => { const v = base(); v.tags = Array.from({ length: LIMITS.tagsMax + 1 }, (_, i) => `t${i}`); return v; },
+  );
+
+  atMost(
+    "tag code points (32 each)",
+    () => { const v = base(); v.tags = [CP.repeat(LIMITS.tagMaxCodePoints)]; return v; },
+    () => { const v = base(); v.tags = [CP.repeat(LIMITS.tagMaxCodePoints + 1)]; return v; },
+  );
+
+  atMost(
+    "event_ref (128 code points)",
+    () => { const v = base(); v.source.event_ref = CP.repeat(LIMITS.eventRefMaxCodePoints); return v; },
+    () => { const v = base(); v.source.event_ref = CP.repeat(LIMITS.eventRefMaxCodePoints + 1); return v; },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Runtime probe interface
 // ---------------------------------------------------------------------------
