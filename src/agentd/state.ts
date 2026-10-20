@@ -107,6 +107,24 @@ export async function loadState(root: string): Promise<DaemonState> {
   }
 }
 
+/**
+ * New asset-store migration (Task 2): the stable machine id, read only when
+ * state.json is valid. The asset snapshot reuses it as `device_id`. A corrupt or
+ * missing state.json returns null — it can never clear or rewrite the new assets.
+ */
+export async function readMachineId(root: string): Promise<string | null> {
+  try {
+    const raw = await readFile(statePath(root), "utf8");
+    const parsed = JSON.parse(raw) as { machine_id?: unknown };
+    if (parsed && typeof parsed.machine_id === "string" && parsed.machine_id !== "") {
+      return parsed.machine_id;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function saveState(root: string, state: DaemonState): Promise<void> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const target = statePath(root);

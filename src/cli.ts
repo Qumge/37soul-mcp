@@ -19,6 +19,7 @@ import { repoKey } from "./repo-key.js";
 import { install, planInstall, status as statusReport, uninstall } from "./install.js";
 import { runDoctor } from "./doctor.js";
 import { runHookCommand } from "./hook.js";
+import { startWriter } from "./local/writer.js";
 
 export interface CliIO {
   stdout: (text: string) => void;
@@ -150,24 +151,36 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
 export async function startAgentd(io: CliIO, home: string): Promise<number> {
   const root = path.join(home, ".37soul");
   const config = await loadConfig(root);
-  if (!config) {
-    io.stderr("37soul is not installed here — run `37soul install` first\n");
-    return 1;
-  }
+  // New asset mode: the daemon must start even when not logged in (no config.json).
+  // With no login there are no tokens and nothing uploads, but the single-writer
+  // IPC still serves local soul/asset commands. Legacy spool/credentials/queue are
+  // untouched and stay outside the transactional asset snapshot.
+  const legacyState = await loadState(root);
+  const apiBaseUrl =
+    config?.api_base_url ?? (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
+  const machineId = config?.machine_id ?? legacyState.machine_id;
+  const tokens = config?.tokens ?? {};
 
   const logger = createRotatingLogger({ file: path.join(root, "agentd.log") });
   const daemon = createDaemon(
     {
       root,
-      apiBaseUrl: config.api_base_url,
-      machineId: config.machine_id,
-      tokens: config.tokens,
+      apiBaseUrl,
+      machineId,
+      tokens,
       home,
       // v2 §6.2：hook 是主路径；会话记录兜底只对显式开启的 Agent 生效。
-      transcriptFallback: config.transcript_fallback ?? [],
+      transcriptFallback: config?.transcript_fallback ?? [],
     },
     { log: logger, fetch: globalThis.fetch, getGitState },
   );
+
+  // Single-writer IPC for local soul assets. Best-effort: IPC unavailability must
+  // never fail the user's working session.
+  const writer = await startWriter(root).catch((error) => {
+    logger.error(`writer failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
 
   await daemon.tick();
   logger.info("agentd started");
@@ -195,6 +208,7 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   const shutdown = async () => {
     clearInterval(interval);
     if (scheduled) clearTimeout(scheduled);
+    if (writer) await writer.close().catch(() => {});
     await daemon.stop().catch(() => {});
     logger.info("agentd stopped");
     await logger.flush().catch(() => {});
