@@ -355,6 +355,9 @@ async function handleRegisterSoul(
         draft.consents[key] = body.consent;
         // First explicit registration resets the pull cursor once (§6).
         if ((previous?.revision ?? 0) < body.consent.revision) draft.pull_cursor = "0";
+        // An enabled consent immediately rescues still-valid local_only assets
+        // extracted while consent was off (Ruling 8).
+        enqueueAuthorizedLocalAssets(draft, body.consent);
       }
       return undefined;
     });
@@ -362,7 +365,7 @@ async function handleRegisterSoul(
     return null;
   }
   if (res.status === 409) {
-    return quarantineOp(store, op, "idempotency_mismatch", report, null);
+    return quarantineOp(store, op, stopCode(res.body).code, report, null);
   }
   if (res.status === 404) {
     return quarantineOp(store, op, "not_found", report, null);
@@ -385,18 +388,23 @@ async function handleConsent(
       if (body?.consent) {
         const key = consentKey(body.consent.cloud_device_uid, body.consent.soul_uid);
         const previous = draft.consents[key];
+        const revisionIncreased = (previous?.revision ?? 0) < body.consent.revision;
         draft.consents[key] = body.consent;
-        if ((previous?.revision ?? 0) < body.consent.revision) draft.pull_cursor = "0";
-        if (previous && (!body.consent.enabled || body.consent.categories.length < previous.categories.length)) {
-          revokeConsentLocal(draft, body.consent);
+        // Consent PUT may carry replay_from="0" after a server-side change; a cursor
+        // reset is applied once per new consent revision (§4/§6).
+        if (revisionIncreased || (body.replay_from !== undefined && previous === undefined)) {
+          draft.pull_cursor = "0";
         }
+        const narrowed = previous !== undefined && removedCategories(previous, body.consent).length > 0;
+        if (narrowed) revokeConsentLocal(draft, body.consent);
+        enqueueAuthorizedLocalAssets(draft, body.consent);
       }
       return undefined;
     });
     report.accepted += 1;
     return null;
   }
-  if (res.status === 409) return quarantineOp(store, op, "revision_conflict", report, null);
+  if (res.status === 409) return quarantineOp(store, op, stopCode(res.body).code, report, null);
   if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
   return fatalFromStatus(res);
 }
@@ -418,7 +426,7 @@ async function handleBinding(
     report.accepted += 1;
     return null;
   }
-  if (res.status === 409) return quarantineOp(store, op, "revision_conflict", report, null);
+  if (res.status === 409) return quarantineOp(store, op, stopCode(res.body).code, report, null);
   if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
   return fatalFromStatus(res);
 }
@@ -699,6 +707,9 @@ export async function applyPullPage(store: LocalStore, page: PullPage): Promise<
         const outcome = applyConsentEvent(draft, consent);
         if (outcome.reset) consentReset = true;
         if (outcome.revoked) revokeConsentLocal(draft, consent);
+        // A newly applied (enabled) consent also rescues still-valid local_only
+        // assets extracted while consent was off (idempotent op ids).
+        enqueueAuthorizedLocalAssets(draft, consent);
       } else if (event.object_type === "soul") {
         applySoulEvent(draft, event.object as unknown as Soul);
       } else if (event.object_type === "binding") {
@@ -716,13 +727,85 @@ function consentKey(cloudDeviceUid: string, soulUid: string): string {
   return `${cloudDeviceUid}:${soulUid}`;
 }
 
+/** Categories removed by a consent update (a full replacement, not a delta). */
+function removedCategories(previous: Consent, next: Consent): string[] {
+  if (!next.enabled) return [...previous.categories];
+  const nextSet = new Set(next.categories);
+  return previous.categories.filter((category) => !nextSet.has(category));
+}
+
+/** Categories the current device is authorized to sync for a Soul (empty when none). */
+function authorizedCategories(snap: StoreSnapshot, soulUid: string): Set<string> {
+  if (!snap.cloud_device_uid) return new Set<string>();
+  const consent = snap.consents[consentKey(snap.cloud_device_uid, soulUid)];
+  if (!consent?.enabled) return new Set<string>();
+  return new Set(consent.categories);
+}
+
+/** The asset kind an outbox asset op touches (payload.kind, else the local asset). */
+function opKind(draft: StoreSnapshot, op: OutboxOperation): string | null {
+  const payload = op.request.payload as { kind?: unknown } | undefined;
+  if (typeof payload?.kind === "string") return payload.kind;
+  const assetUid = op.request.asset_uid;
+  if (typeof assetUid === "string") {
+    const kind = draft.assets[assetUid]?.kind;
+    if (typeof kind === "string") return kind;
+  }
+  return null;
+}
+
+/**
+ * Consent turned on (or widened): work extracted while consent was off is no longer
+ * stranded. Walk the Soul's still-valid local-only assets and enqueue one propose per
+ * newly-authorized category. The operation_id is deterministic (asset_uid + revision)
+ * so a replayed enable writes the same outbox key instead of duplicating.
+ */
+function enqueueAuthorizedLocalAssets(draft: StoreSnapshot, consent: Consent): void {
+  if (!consent.enabled) return;
+  const authorized = new Set(consent.categories);
+  for (const [uid, asset] of Object.entries(draft.assets)) {
+    if (asset.soul_uid !== consent.soul_uid) continue;
+    if (asset.sync_state !== "local_only") continue;
+    if (asset.state !== "active") continue;
+    if (!authorized.has(asset.kind)) continue;
+    const operationId = `${asset.asset_uid}:rev${asset.revision}`;
+    asset.sync_state = "pending_sync";
+    draft.outbox[operationId] = {
+      operation_id: operationId,
+      operation_kind: "asset",
+      request: {
+        change_id: operationId,
+        operation: "propose",
+        soul_uid: asset.soul_uid,
+        asset_uid: asset.asset_uid,
+        base_revision: 0,
+        actor: "model",
+        binding_uid: null,
+        binding_revision: null,
+        payload: {
+          kind: asset.kind,
+          trait: asset.trait,
+          content: asset.content,
+          applicability: asset.applicability,
+          tags: asset.tags,
+          evidence: asset.evidence,
+          verification: asset.verification,
+          sensitivity: asset.sensitivity,
+          source: asset.source,
+        },
+      },
+      predecessor_operation_ids: [],
+    };
+  }
+}
+
 interface ConsentOutcome {
   reset: boolean;
   revoked: boolean;
 }
 
 /** Returns reset=true when the revision strictly increased (cursor reset once);
- *  revoked=true when a known Consent narrowed (disabled or fewer categories). */
+ *  revoked=true when a known Consent narrowed (disabled or a category removed). */
 function applyConsentEvent(draft: StoreSnapshot, consent: Consent): ConsentOutcome {
   if (!consent?.cloud_device_uid || !consent?.soul_uid) return { reset: false, revoked: false };
   const key = consentKey(consent.cloud_device_uid, consent.soul_uid);
@@ -730,14 +813,13 @@ function applyConsentEvent(draft: StoreSnapshot, consent: Consent): ConsentOutco
   if (previous && consent.revision <= previous.revision) return { reset: false, revoked: false };
   draft.consents[key] = consent;
   const reset = (previous?.revision ?? 0) < consent.revision;
-  const revoked =
-    previous !== undefined &&
-    (!consent.enabled || consent.categories.length < previous.categories.length);
+  const revoked = previous !== undefined && removedCategories(previous, consent).length > 0;
   return { reset, revoked };
 }
 
-/** Consent narrowed: drop the Soul's cloud-confirmed cache, keep local originals,
- *  and park its still-pending asset sends (§2.4 / consent_control_event). */
+/** Consent narrowed: drop the Soul's cloud-confirmed cache of the removed categories,
+ *  keep local originals, and park only the pending asset sends whose category is no
+ *  longer authorized (§2.4 / consent_control_event). */
 function revokeConsentLocal(draft: StoreSnapshot, consent: Consent): void {
   const soulUid = consent.soul_uid;
   const authorized = consent.enabled ? new Set(consent.categories) : new Set<string>();
@@ -745,17 +827,18 @@ function revokeConsentLocal(draft: StoreSnapshot, consent: Consent): void {
     if (asset.soul_uid !== soulUid) continue;
     if (asset.sync_state === "synced" && !authorized.has(asset.kind)) delete draft.assets[uid];
   }
-  if (!consent.enabled) {
-    for (const key of Object.keys(draft.digest_tombstones)) {
-      draft.digest_tombstones[key] = draft.digest_tombstones[key].filter((t) => t.soul_uid !== soulUid);
-    }
+  for (const key of Object.keys(draft.digest_tombstones)) {
+    draft.digest_tombstones[key] = draft.digest_tombstones[key].filter(
+      (t) => t.soul_uid !== soulUid || authorized.has(t.kind),
+    );
   }
   for (const [opId, op] of Object.entries(draft.outbox)) {
     if (op.operation_kind !== "asset") continue;
-    if (op.request.soul_uid === soulUid) {
-      delete draft.outbox[opId];
-      draft.quarantine[opId] = { operation: op, reason: "consent_revoked" };
-    }
+    if (op.request.soul_uid !== soulUid) continue;
+    const kind = opKind(draft, op);
+    if (kind !== null && authorized.has(kind)) continue; // still-authorized category stays sendable
+    delete draft.outbox[opId];
+    draft.quarantine[opId] = { operation: op, reason: "consent_revoked" };
   }
 }
 
@@ -1068,13 +1151,17 @@ export function ownerContextInput(
   budgetBytes?: number,
 ): ContextInput {
   const soul = snap.souls[soulUid];
+  // Inject only the Soul's assets whose category the current device is still
+  // authorized to sync — narrowed consent must never resurface removed-category
+  // assets in the injected context.
+  const authorized = authorizedCategories(snap, soulUid);
   const assets: (Asset | AssetTombstone)[] = [];
   for (const asset of Object.values(snap.assets)) {
-    if (asset.soul_uid === soulUid) assets.push(asset);
+    if (asset.soul_uid === soulUid && authorized.has(asset.kind)) assets.push(asset);
   }
   for (const list of Object.values(snap.digest_tombstones)) {
     for (const tombstone of list) {
-      if (tombstone.soul_uid === soulUid) assets.push(tombstone);
+      if (tombstone.soul_uid === soulUid && authorized.has(tombstone.kind)) assets.push(tombstone);
     }
   }
   const quarantined: string[] = [];

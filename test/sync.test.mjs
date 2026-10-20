@@ -447,7 +447,7 @@ test("sync: per change mismatch is conflict inside 200", async () => {
 
   const snap = await readSnap(root);
   assert.equal(snap.quarantine[IDS.assetA]?.reason, "idempotency_mismatch", "push per-change conflict → quarantine");
-  assert.equal(snap.quarantine["consent-op"]?.reason, "revision_conflict", "non-push 409 is a whole-request conflict, kept distinct");
+  assert.equal(snap.quarantine["consent-op"]?.reason, "idempotency_mismatch", "a consent 409 quarantines under the server's real code, not a hardcoded label");
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -892,4 +892,338 @@ test("sync: publishing a soul never widens device consent", async () => {
   assert.ok(input.assets.every((a) => a.soul_uid === IDS.soul), "other souls' assets never enter the owner's context input");
 
   rmSync(root, { recursive: true, force: true });
+});
+
+// 19 ───────────────────────────────────────────────────────────────────────────────
+test("sync: same-length consent category swap revokes the removed category immediately", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1,
+      categories: ["identity", "relationship"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    d.assets["rel-1"] = localAsset("rel-1", "relationship fact", "active", "synced", 1, 1);
+  });
+
+  // ["identity","relationship"] → ["identity","experience"]: same length, but
+  // "relationship" was replaced by "experience", so the relationship cache must go.
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "c1",
+      object_type: "consent",
+      object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "experience"], enabled: true },
+    }],
+    next_cursor: "c-swap",
+    has_more: false,
+  });
+  await store.close();
+
+  let snap = await readSnap(root);
+  assert.equal(snap.assets["rel-1"], undefined, "a swapped-out category drops its synced asset");
+  let input = ownerContextInput(snap, IDS.soul, snap.bindings[bindingKeyOf()], "task", 4096);
+  assert.ok(!input.assets.some((a) => a.asset_uid === "rel-1"), "the removed category's asset is no longer injected");
+
+  // Re-enabling relationship must not resurrect the deleted copy locally; only the
+  // next pull can bring the cloud copy back.
+  const store2 = await openStore(root, "p1");
+  await applyPullPage(store2, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "c2",
+      object_type: "consent",
+      object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 3, categories: ["identity", "relationship", "experience"], enabled: true },
+    }],
+    next_cursor: "c-reenable",
+    has_more: false,
+  });
+  await store2.close();
+
+  snap = await readSnap(root);
+  assert.equal(snap.assets["rel-1"], undefined, "re-enabling consent does not resurrect the deleted asset locally");
+  input = ownerContextInput(snap, IDS.soul, snap.bindings[bindingKeyOf()], "task", 4096);
+  assert.ok(!input.assets.some((a) => a.asset_uid === "rel-1"), "no injection before the next pull delivers it");
+
+  const store3 = await openStore(root, "p1");
+  await applyPullPage(store3, {
+    protocol: "soul-assets/v1",
+    events: [{ event_uid: "c3", object_type: "asset", object: activeAsset("rel-1", "relationship fact") }],
+    next_cursor: "c-pulled",
+    has_more: false,
+  });
+  await store3.close();
+
+  snap = await readSnap(root);
+  input = ownerContextInput(snap, IDS.soul, snap.bindings[bindingKeyOf()], "task", 4096);
+  assert.ok(input.assets.some((a) => a.asset_uid === "rel-1"), "the next pull restores the re-authorized asset for injection");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 20 ───────────────────────────────────────────────────────────────────────────────
+test("sync: enabling consent enqueues still-valid local_only assets exactly once", async () => {
+  const root = tempDir();
+  const assetUid = "local-only-rel";
+  const consentRev2 = { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true };
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: ["identity"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    // Extracted while "relationship" was not authorized.
+    d.assets[assetUid] = localAsset(assetUid, "local relationship fact", "active", "local_only", null, 1);
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 1, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const pushed = [];
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "PUT" && p.includes("/consent")) {
+      return { status: 200, body: { consent: consentRev2, replay_from: "0" } };
+    }
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/push") {
+      pushed.push(req.body.changes);
+      return { status: 200, body: { protocol: "soul-assets/v1", results: req.body.changes.map((c) => acceptedResult(c.change_id, activeAsset(c.asset_uid, "local relationship fact"))) } };
+    }
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 200, body: emptyPull() };
+    return { status: 500, body: {} };
+  });
+
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pushed.length, 1, "exactly one asset batch leaves the machine");
+  assert.equal(pushed[0].length, 1, "exactly one propose is enqueued for the rescued local_only asset");
+  assert.equal(pushed[0][0].change_id, `${assetUid}:rev1`, "the operation_id is deterministic (asset_uid + revision)");
+  assert.equal(pushed[0][0].operation, "propose", "the rescued asset is proposed, not a control op");
+
+  const snap1 = await readSnap(root);
+  assert.equal(snap1.assets[assetUid].sync_state, "synced", "the rescued asset reached the server and is now synced");
+
+  // Replay the same enable: the deterministic op id must not enqueue anything new.
+  const store = await openStore(root, "p1");
+  await store.transact((d) => {
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 1, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+  await store.close();
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pushed.length, 1, "a replayed enable does not push a second asset op");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 21 ───────────────────────────────────────────────────────────────────────────────
+test("sync: 409 quarantine honors the server's real error code per endpoint", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.outbox["reg"] = {
+      operation_id: "reg", operation_kind: "register_soul",
+      request: { soul_uid: IDS.soul, identity: { name: "Growth", description: "", character: "", greeting: "" }, consent_categories: [] },
+      predecessor_operation_ids: [],
+    };
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op", operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 1, categories: ["identity"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+    d.outbox["bind-op"] = {
+      operation_id: "bind-op", operation_kind: "binding",
+      request: { base_revision: 0, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul, state: "bound" },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/souls") return { status: 409, body: { error: { code: "idempotency_mismatch", message: "same key, different body" } } };
+    if (req.method === "PUT" && p.includes("/consent")) return { status: 409, body: { error: { code: "revision_conflict", message: "stale base_revision" } } };
+    if (req.method === "PUT" && p.includes("/bindings/")) return { status: 409, body: { error: { code: "binding_conflict", message: "binding version mismatch" } } };
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 200, body: emptyPull() };
+    return { status: 500, body: {} };
+  });
+
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, undefined, "409 is a quarantine, not a fatal error");
+  const snap = await readSnap(root);
+  assert.equal(snap.quarantine["reg"]?.reason, "idempotency_mismatch", "register 409 quarantines under the server code");
+  assert.equal(snap.quarantine["consent-op"]?.reason, "revision_conflict", "consent 409 quarantines under the server code");
+  assert.equal(snap.quarantine["bind-op"]?.reason, "binding_conflict", "binding 409 quarantines under the server code");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 22 ───────────────────────────────────────────────────────────────────────────────
+test("sync: consent PUT replay_from resets the cursor once", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d, { pull_cursor: "c0" });
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 1, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const consentRev2 = { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true };
+  const pullCursors = [];
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "PUT" && p.includes("/consent")) return { status: 200, body: { consent: consentRev2, replay_from: "0" } };
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") {
+      pullCursors.push(new URL(req.url).searchParams.get("cursor"));
+      return { status: 200, body: { protocol: "soul-assets/v1", events: [], next_cursor: "c-after", has_more: false } };
+    }
+    return { status: 500, body: {} };
+  });
+
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pullCursors[0], "0", "replay_from on a new consent revision resets the pull cursor to 0");
+
+  // Re-send the same consent op: the server replays the same revision with
+  // replay_from again — it must not reset a second time.
+  const store = await openStore(root, "p1");
+  await store.transact((d) => {
+    d.outbox["consent-op"] = {
+      operation_id: "consent-op",
+      operation_kind: "consent",
+      request: { soul_uid: IDS.soul, base_revision: 1, categories: ["identity", "relationship"], enabled: true },
+      predecessor_operation_ids: [],
+    };
+  });
+  await store.close();
+  await syncOnce("p1", http, syncOpts(root));
+  assert.equal(pullCursors[1], "c-after", "a replayed same-revision consent response must not reset the cursor again");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 23 ───────────────────────────────────────────────────────────────────────────────
+test("sync: consent narrowing parks only removed-category sends", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d); // identity, relationship, experience — all authorized
+    d.assets["rel-pending"] = localAsset("rel-pending", "relationship pending", "active", "pending_sync", null, 1);
+    d.assets["exp-pending"] = { ...localAsset("exp-pending", "experience pending", "active", "pending_sync", null, 1), kind: "experience", trait: "style" };
+    d.outbox["rel-pending"] = proposeOp("rel-pending", "relationship pending");
+    const expOp = proposeOp("exp-pending", "experience pending");
+    expOp.request.payload = { ...expOp.request.payload, kind: "experience", trait: "style" };
+    d.outbox["exp-pending"] = expOp;
+  });
+
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "c1",
+      object_type: "consent",
+      object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "experience"], enabled: true },
+    }],
+    next_cursor: "c-narrow",
+    has_more: false,
+  });
+  await store.close();
+
+  const snap = await readSnap(root);
+  assert.equal(snap.outbox["rel-pending"], undefined, "the removed-category send is parked");
+  assert.equal(snap.quarantine["rel-pending"]?.reason, "consent_revoked", "parked under consent_revoked");
+  assert.ok(snap.outbox["exp-pending"], "the still-authorized send stays sendable");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 24 ───────────────────────────────────────────────────────────────────────────────
+test("sync: 429 honors Retry-After before retrying", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => baseChange(d));
+  const delays = [];
+  let pulls = 0;
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") {
+      pulls += 1;
+      if (pulls === 1) return { status: 429, headers: { "retry-after": "7" }, body: { error: { code: "rate_limited", retryable: true } } };
+      return { status: 200, body: emptyPull() };
+    }
+    return { status: 500, body: {} };
+  });
+  await syncOnce("p1", http, { ...syncOpts(root), backoff: { maxRetries: 1, sleep: async (ms) => { delays.push(ms); } } });
+  assert.equal(pulls, 2, "the 429 was retried once");
+  assert.equal(delays[0], 7000, "Retry-After seconds are honored as the backoff delay");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 25 ───────────────────────────────────────────────────────────────────────────────
+test("sync: 5xx retries stop at the cap and report the error", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => baseChange(d));
+  let pulls = 0;
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") { pulls += 1; return { status: 503, body: { error: { code: "unavailable", retryable: true } } }; }
+    return { status: 500, body: {} };
+  });
+  const report = await syncOnce("p1", http, { ...syncOpts(root), backoff: { maxRetries: 2, sleep: async () => {} } });
+  assert.equal(pulls, 3, "maxRetries=2 means one initial attempt plus two retries, then stop");
+  assert.match(report.error, /unavailable/, "the last 5xx error is reported");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 26 ───────────────────────────────────────────────────────────────────────────────
+test("sync: 403 sync_not_authorized is surfaced", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => baseChange(d));
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 403, body: { error: { code: "sync_not_authorized", message: "this soul is not authorized for this device" } } };
+    return { status: 500, body: {} };
+  });
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, "sync_not_authorized", "403 surfaces the authorization code");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 27 ───────────────────────────────────────────────────────────────────────────────
+test("sync: 404, 413 and 422 surface their server error code", async () => {
+  for (const [status, code] of [[404, "not_found"], [413, "payload_too_large"], [422, "validation_error"]]) {
+    const root = tempDir();
+    await seedProfile(root, "p1", "dev-1", (d) => baseChange(d));
+    const http = fakeHttp((req) => {
+      const p = pathnameOf(req.url);
+      if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status, body: { error: { code, message: "boom" } } };
+      return { status: 500, body: {} };
+    });
+    const report = await syncOnce("p1", http, syncOpts(root));
+    assert.equal(report.error, code, `${status} surfaces ${code}`);
+    rmSync(root, { recursive: true, force: true });
+  }
 });

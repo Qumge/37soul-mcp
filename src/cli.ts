@@ -53,6 +53,8 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
   37soul soul edit <uid> [--name <n> ...] [--profile <id>]     edit a local (unregistered) Soul
   37soul soul export [--profile <id>]            export the owner-private core identity
+  37soul soul review <uid> --approve|--reject [--profile <id>]   approve/reject a pending asset (interactive)
+  37soul soul delete <uid> [--profile <id>]      delete an asset (interactive)
   37soul bind --soul <uid> --session <native-id> [--agent <kind>] [--profile <id>]
   37soul detach --session <native-id> [--agent <kind>] [--profile <id>]
 `;
@@ -390,6 +392,45 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
       return 1;
     }
     io.stdout(`${JSON.stringify(res.result, null, 2)}\n`);
+    return 0;
+  }
+
+  if (sub === "review" || sub === "delete") {
+    // Owner write commands are interactive-CLI-only: they mutate the Soul and must
+    // never run from a piped/scripted context (and never appear as MCP tools).
+    if (!process.stdin.isTTY) {
+      io.stderr(`refusing soul ${sub}: it changes the Soul and needs an interactive terminal (stdin is not a TTY)\n`);
+      return 2;
+    }
+    const assetUid = args[0];
+    if (!assetUid) {
+      io.stderr(`usage: 37soul soul ${sub} <asset_uid> [--profile <id>]\n`);
+      return 2;
+    }
+    if (sub === "review") {
+      const approve = args.includes("--approve");
+      const reject = args.includes("--reject");
+      if (approve === reject) {
+        io.stderr("usage: 37soul soul review <asset_uid> --approve|--reject [--profile <id>]\n");
+        return 2;
+      }
+      const res = await runWriterCommand(root, profileId, "review_asset", {
+        asset_uid: assetUid,
+        action: approve ? "approve" : "reject",
+      });
+      if (!res.ok) {
+        io.stderr(`${res.error.code}: ${res.error.message}\n`);
+        return 1;
+      }
+      io.stdout(`reviewed ${assetUid}: ${approve ? "approved" : "rejected"}\n`);
+      return 0;
+    }
+    const res = await runWriterCommand(root, profileId, "delete_asset", { asset_uid: assetUid });
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
+      return 1;
+    }
+    io.stdout(`deleted ${assetUid}\n`);
     return 0;
   }
 

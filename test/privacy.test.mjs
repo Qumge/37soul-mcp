@@ -250,10 +250,11 @@ test("privacy: a failed extraction never falls back to shipping raw text", async
   rmSync(root, { recursive: true, force: true });
 });
 
-test("privacy: native ids prompts and rendered text never reach HTTP", async () => {
+test("privacy: native ids, raw prompts and rendered text never reach HTTP", async () => {
   const root = tempDir();
   const NATIVE_ID = "ns-native-private-2026";
-  const PROMPT = "PRIVATE-CORE-PROMPT-DO-NOT-SHIP";
+  const CHARACTER = "PRIVATE-CORE-CHARACTER-MAY-SYNC";
+  const RAW_TASK = "RAW-USER-PROMPT-DO-NOT-SHIP";
   const RENDERED = "RENDERED-TEXT-DO-NOT-SHIP";
   const CONTENT = "分析客户时，先给真实付费证据，再讨论渠道。";
   const SESSION = "30000000-0000-4000-8000-000000000001";
@@ -265,7 +266,7 @@ test("privacy: native ids prompts and rendered text never reach HTTP", async () 
       soul_uid: "s1",
       legacy_host_id: 7,
       identity_revision: 1,
-      identity: { name: "Growth", description: "", character: PROMPT, greeting: "" },
+      identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" },
       state: "active",
     };
     d.consents["cdu:s1"] = {
@@ -283,6 +284,13 @@ test("privacy: native ids prompts and rendered text never reach HTTP", async () 
       supersedes_uid: null, pinned: false,
       source: { runtime_kind: "hermes", session_ref: SESSION, event_ref: "e1", occurred_at: "2026-10-20T04:00:00Z" },
       sync_state: "pending_sync", cloud_revision: null,
+    };
+    // A register_soul op actually sends the §2.1 identity over the wire, so the
+    // "character may sync" half of the assertion is exercised, not vacuous.
+    d.outbox["reg"] = {
+      operation_id: "reg", operation_kind: "register_soul",
+      request: { soul_uid: "s1", identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" }, consent_categories: [] },
+      predecessor_operation_ids: [],
     };
     d.outbox["op-1"] = {
       operation_id: "op-1", operation_kind: "asset",
@@ -302,6 +310,15 @@ test("privacy: native ids prompts and rendered text never reach HTTP", async () 
 
   const http = fakeHttp((req) => {
     const p = new URL(req.url).pathname;
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/souls") {
+      return {
+        status: 201,
+        body: {
+          soul: { soul_uid: "s1", legacy_host_id: 7, identity_revision: 1, identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" }, state: "active" },
+          consent: { cloud_device_uid: "cdu", soul_uid: "s1", revision: 0, categories: [], enabled: false },
+        },
+      };
+    }
     if (req.method === "POST" && p === "/api/v1/me/soul_sync/push") {
       return { status: 200, body: { protocol: "soul-assets/v1", results: [] } };
     }
@@ -319,14 +336,22 @@ test("privacy: native ids prompts and rendered text never reach HTTP", async () 
   });
 
   const wire = http.requests.map((r) => `${r.method} ${r.url} ${JSON.stringify(r.body)}`).join("\n");
+  assert.ok(wire.includes(CHARACTER), "the §2.1 identity character legitimately reaches the wire (the assertion is not vacuous)");
   assert.ok(!wire.includes(NATIVE_ID), "the native session id never reaches HTTP");
-  assert.ok(!wire.includes(PROMPT), "the private identity prompt never reaches HTTP");
+  assert.ok(!wire.includes(RAW_TASK), "the raw user prompt/taskHint never reaches HTTP");
   assert.ok(!wire.includes(RENDERED), "rendered text never reaches HTTP");
   assert.ok(wire.includes(CONTENT), "the portable preference still flows (not a silent no-op)");
 
-  // Receipts are local-only and carry rendered_sha256, never the rendered text itself.
+  // The raw task hint is a local scoring signal only: it enters the owner's context
+  // input, never the rendered bundle or the wire.
   const snap0 = await readSnap(root);
   const binding = Object.values(snap0.bindings)[0];
+  const input = ownerContextInput(snap0, "s1", binding, RAW_TASK, 4096);
+  assert.equal(input.taskHint, RAW_TASK, "the task hint exists in the local context input");
+  const bundle = selectContext(input);
+  assert.ok(!JSON.stringify(bundle).includes(RAW_TASK), "the task hint is never rendered into the injected bundle");
+
+  // Receipts are local-only and carry rendered_sha256, never the rendered text itself.
   await recordReceipt(
     binding,
     { rendered_text: RENDERED, manifest: [{ asset_uid: "a1", revision: 1 }] },
