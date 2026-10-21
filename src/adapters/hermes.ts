@@ -455,20 +455,21 @@ export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
         return { error: { code: "gateway_only", retryable: false } };
       }
       // 1. Read the raw transcript through the ONLY raw-source seam.
-      const transcript = await deps.readSource(request.source_event_refs);
+      const transcript = await deps.readSource(request.source_event_refs, request.source_turn_refs);
       // A gateway-shaped event stream must refuse even when config detection is
       // inconclusive: gateway records are never fed to a model invocation.
       if (hermesEventSurface(transcript) === "gateway") {
         return { error: { code: "gateway_only", retryable: false } };
       }
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+      const refs = request.source_turn_refs !== undefined
         ? request.source_turn_refs.slice()
         : hermesCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderHermesTurn(transcript, refs);
+      if (turnText.trim() === "") return { error: { code: "source_unavailable", retryable: true } };
       // 4. Invoke the native model through deps.invoke, tagged with the job uid.
       const { args, input } = buildHermesExtractionInvocation(request, turnText);
       const result = await deps.invoke("hermes", args, input, request.job_uid);

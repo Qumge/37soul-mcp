@@ -68,7 +68,7 @@ if [[ "$smoke_out" != *"not installed"* ]]; then
 fi
 rm -rf "$smoke_home"
 
-tar -C "$stage" -czf "$out/37soul-runtime.tgz" 37soul
+COPYFILE_DISABLE=1 tar -C "$stage" -czf "$out/37soul-runtime.tgz" 37soul
 
 # VERSION is the package version (single source of truth); refuse a drift.
 echo "$version" > "$out/VERSION"

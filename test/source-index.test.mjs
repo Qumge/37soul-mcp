@@ -210,14 +210,15 @@ test("source-index: refs resolve in order and the first resolvable one wins", as
   rmSync(root, { recursive: true, force: true });
 });
 
-test("source-index: reads at most one bounded 4 MiB prefix", async () => {
+test("source-index: legacy reads without turn refs return one bounded window", async () => {
   const root = tempDir();
   const big = path.join(root, "big.jsonl");
-  writeFileSync(big, Buffer.alloc(MAX_SOURCE_BYTES + 128, "x"));
+  writeFileSync(big, `${"x\n".repeat(MAX_SOURCE_BYTES + 128)}`);
   await captureSourcePointer(root, "p1", "evt-big", { runtime_kind: "claude-code", native_session_id: "ns-1", path: big, captured_at: new Date().toISOString() });
 
-  const prefix = await readSourceRefs(root, ["evt-big"]);
-  assert.equal(prefix.length, MAX_SOURCE_BYTES, "only the bounded prefix is returned");
+  const window = await readSourceRefs(root, ["evt-big"]);
+  assert.ok(window.length > 0, "a complete bounded window is returned");
+  assert.ok(window.length <= MAX_SOURCE_BYTES, "the window is bounded");
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -354,6 +355,49 @@ test("source-index: hook stdin transcript_path -> pointer -> drain parses the tu
   const wm = snap.extraction_watermarks[watermarkKey(binding, rangeForEvent(event))];
   assert.equal(wm.completed, true, "the range completes");
 
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("source-index: >4MiB long session reads the bounded tail window for the frozen turn", async () => {
+  const root = tempDir();
+  const transcriptPath = path.join(root, "long.jsonl");
+  const pad = "x".repeat(MAX_SOURCE_BYTES + 4096);
+  const lateUser = "NEEDLE: 我的长期偏好是先给结论再列行动项";
+  const lateAssistant = "明白，已记住";
+  writeFileSync(
+    transcriptPath,
+    `${pad}\n${JSON.stringify({ type: "user", uuid: "late-u", parentUuid: null, message: { role: "user", content: lateUser } })}\n${JSON.stringify({ type: "assistant", uuid: "late-a", parentUuid: "late-u", message: { role: "assistant", content: [{ type: "text", text: lateAssistant }] } })}\n`,
+    { mode: 0o600 },
+  );
+  await captureSourcePointer(root, "p1", "evt-long", { runtime_kind: "claude-code", native_session_id: "ns-long", path: transcriptPath, captured_at: new Date().toISOString() });
+
+  const window = await readSourceRefs(root, ["evt-long"], ["late-u", "late-a"]);
+  assert.ok(window.includes(lateUser), "the bounded tail includes the frozen late turn");
+  assert.ok(window.includes(lateAssistant));
+  assert.ok(!window.includes("x".repeat(1000)), "the 4MiB head is not read into model input");
+  assert.ok(window.length <= MAX_SOURCE_BYTES, "the source window remains bounded");
+
+  // The real adapter receives the exact refs and never invokes the model with the
+  // head/garbage; a missing ref instead fails source_unavailable.
+  let modelInput = "";
+  const adapter = createClaudeCodeAdapter({
+    home: root,
+    readSource: async (refs, turnRefs) => readSourceRefs(root, refs, turnRefs),
+    invoke: async (_r, _a, input) => { modelInput = input; return { code: 0, stdout: JSON.stringify({ proposals: [] }), stderr: "" }; },
+    emit: async () => {},
+  });
+  const ok = await adapter.extract({ job_uid: "long-1", runtime_kind: "claude-code", native_session_id: "ns-long", source_event_refs: ["evt-long"], source_turn_refs: ["late-u", "late-a"], binding_uid: "b", binding_revision: 1, soul_uid: "s", internal_task: true });
+  assert.ok("proposals" in ok);
+  assert.match(modelInput, /NEEDLE/);
+  assert.ok(!modelInput.includes("x".repeat(1000)));
+
+  const missing = await adapter.extract({ job_uid: "long-2", runtime_kind: "claude-code", native_session_id: "ns-long", source_event_refs: ["evt-long"], source_turn_refs: ["not-in-window"], binding_uid: "b", binding_revision: 1, soul_uid: "s", internal_task: true });
+  assert.deepEqual(missing, { error: { code: "source_unavailable", retryable: true } });
+
+  // Appending later lines must not change the frozen refs selection.
+  writeFileSync(transcriptPath, `${readFileSync(transcriptPath, "utf8")}${JSON.stringify({ type: "user", uuid: "later", parentUuid: "late-a", message: { role: "user", content: "LATER" } })}\n`);
+  const again = await readSourceRefs(root, ["evt-long"], ["late-u", "late-a"]);
+  assert.ok(again.includes(lateUser));
   rmSync(root, { recursive: true, force: true });
 });
 

@@ -10,7 +10,7 @@ you explicitly log in and authorize a Soul.
 > host adapters have local live smoke evidence for extraction, but full cross-session
 > adoption (website correction → new native Session) is still being independently verified;
 > observed CLI versions are recorded below.
-> Node 18, 20 and 24 full suites pass locally (327/327); the CI workflow is defined but
+> Node 18, 20 and 24 full suites pass locally (330/330); the CI workflow is defined but
 > has not been run on GitHub yet.
 
 ## Quick start: a new Soul
@@ -142,7 +142,7 @@ only — publishing the tarball, `.sha256` and `VERSION` as a GitHub Release is 
 explicitly-authorized step.
 
 ```bash
-git tag v0.11.5 && git push origin v0.11.5
+git tag v0.11.6 && git push origin v0.11.6
 ```
 
 The tarball root is `37soul/` and carries `package.json`, `dist/bundle/{cli,index}.js`,

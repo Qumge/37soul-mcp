@@ -71,6 +71,8 @@ export interface ExtractionWatermark {
   attempts: number;
   state: ExtractionWatermarkState;
   last_error: string | null;
+  /** Set when a worker atomically claims the range; stale claims may be reclaimed. */
+  claimed_at?: string | null;
   /** The frozen extraction request this watermark belongs to. */
   request: ExtractionRequest;
 }

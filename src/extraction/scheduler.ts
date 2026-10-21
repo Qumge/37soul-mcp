@@ -97,7 +97,7 @@ function freezeRequest(binding: BindingSnapshot, range: SourceRange, jobUid: str
     runtime_kind: binding.runtime_kind,
     native_session_id: binding.native_session_id,
     source_event_refs: range.event_refs.slice(),
-    ...(range.turn_refs && range.turn_refs.length > 0 ? { source_turn_refs: range.turn_refs.slice() } : {}),
+    ...(range.turn_refs !== undefined ? { source_turn_refs: range.turn_refs.slice() } : {}),
     binding_uid: binding.binding_uid,
     binding_revision: binding.revision,
     soul_uid: binding.soul_uid,
@@ -130,11 +130,9 @@ export function rangeForEvent(event: RuntimeEvent): SourceRange {
   // Use the actual host turn ids for the stable watermark interval when present.
   // The random event_ref remains the source-pointer key, so repetitive Stop/
   // SessionEnd events for the same turn share one budget instead of re-extracting.
-  const turnRefs = event.source_turn_refs && event.source_turn_refs.length > 0
-    ? event.source_turn_refs.slice()
-    : null;
-  const interval = refsDigest(turnRefs ?? [event.event_ref]);
-  return { event_refs: [event.event_ref], start: interval, end: interval, ...(turnRefs ? { turn_refs: turnRefs } : {}) };
+  const turnRefs = event.source_turn_refs !== undefined ? event.source_turn_refs.slice() : null;
+  const interval = refsDigest(turnRefs && turnRefs.length > 0 ? turnRefs : [event.event_ref]);
+  return { event_refs: [event.event_ref], start: interval, end: interval, ...(turnRefs !== null ? { turn_refs: turnRefs } : {}) };
 }
 
 function openFs(options: { fs?: Partial<StoreFs> }): StoreFs {
@@ -268,37 +266,73 @@ async function failExtraction(
   await sendWriterCommand(root, profileId, "fail_extraction", { watermark_key: key, error_code: code });
 }
 
-/** Reserve one attempt (writer-serialized): write `pending` and bump the counter. */
-async function beginExtractionDirect(
+/** Lifecycle enqueue: write one pending range without spending a model attempt. */
+async function enqueueExtractionDirect(
   root: string,
   binding: BindingSnapshot,
   range: SourceRange,
   jobUid: string,
   fs: StoreFs,
 ): Promise<{ scheduled: boolean; reason?: string }> {
-  const profileId = binding.profile_id;
   const key = watermarkKey(binding, range);
-  const store = await openStore(root, profileId, { fs });
+  const store = await openStore(root, binding.profile_id, { fs });
   try {
     const snap = await store.read();
     const existing = snap.extraction_watermarks[key];
     if (existing?.completed) return { scheduled: false, reason: "completed" };
-    // A completed-turn hook can fire Stop and SessionEnd for the same host turn.
-    // Replaying a stable turn_refs range must not spend another automatic attempt;
-    // a prior error remains explicitly retryable.
-    if (range.turn_refs && range.turn_refs.length > 0 && existing && existing.state !== "error") {
+    if (existing) {
+      // Stop/SessionEnd for the same host turn are lifecycle duplicates. Pending,
+      // running and failed ranges are already owned by the worker/retry path.
       return { scheduled: false, reason: "duplicate_turn" };
     }
-    if (existing && existing.attempts >= MAX_AUTO_ATTEMPTS) {
-      return { scheduled: false, reason: "budget_exhausted" };
+    await store.transact((draft) => {
+      draft.extraction_watermarks[key] = {
+        completed: false,
+        attempts: 0,
+        state: "pending",
+        last_error: null,
+        claimed_at: null,
+        request: freezeRequest(binding, range, jobUid),
+      };
+    });
+    return { scheduled: true };
+  } finally {
+    await store.close();
+  }
+}
+
+/** Worker claim: atomically transition pending/error (or a stale running claim) to
+ *  running and consume exactly one of the two model attempts. */
+async function claimExtractionDirect(
+  root: string,
+  binding: BindingSnapshot,
+  range: SourceRange,
+  jobUid: string,
+  fs: StoreFs,
+): Promise<{ scheduled: boolean; reason?: string }> {
+  const key = watermarkKey(binding, range);
+  const store = await openStore(root, binding.profile_id, { fs });
+  try {
+    const snap = await store.read();
+    const existing = snap.extraction_watermarks[key];
+    if (existing?.completed) return { scheduled: false, reason: "completed" };
+    if (existing) {
+      if (existing.attempts >= MAX_AUTO_ATTEMPTS) return { scheduled: false, reason: "budget_exhausted" };
+      if (existing.state === "running") {
+        const claimedAt = existing.claimed_at ? Date.parse(existing.claimed_at) : NaN;
+        const stale = !Number.isFinite(claimedAt) || Date.now() - claimedAt > 10 * 60 * 1000;
+        if (!stale) return { scheduled: false, reason: "claimed" };
+      }
     }
     await store.transact((draft) => {
       const prior = draft.extraction_watermarks[key];
+      const attempts = (prior?.attempts ?? 0) + 1;
       draft.extraction_watermarks[key] = {
         completed: false,
-        attempts: (prior?.attempts ?? 0) + 1,
-        state: "pending",
+        attempts,
+        state: "running",
         last_error: prior?.last_error ?? null,
+        claimed_at: new Date().toISOString(),
         request: freezeRequest(binding, range, jobUid),
       };
     });
@@ -600,7 +634,7 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   }
 
   const jobUid = randomUUID();
-  const result = await beginExtractionDirect(root, binding, rangeForEvent(event), jobUid, defaultStoreFs);
+  const result = await enqueueExtractionDirect(root, binding, rangeForEvent(event), jobUid, defaultStoreFs);
   return { ...result, job_uid: jobUid };
 });
 
@@ -610,7 +644,7 @@ registerWriterCommand("begin_extraction", async ({ root, request }) => {
     throw new StoreError("invalid_payload", "begin_extraction requires a binding and a range");
   }
   const jobUid = typeof p.job_uid === "string" && p.job_uid ? p.job_uid : randomUUID();
-  return beginExtractionDirect(root, p.binding, p.range, jobUid, defaultStoreFs);
+  return claimExtractionDirect(root, p.binding, p.range, jobUid, defaultStoreFs);
 });
 
 registerWriterCommand("commit_extraction", async ({ root, request }) => {
@@ -698,7 +732,7 @@ function rangeFromKeyAndRequest(key: string, request: ExtractionRequest): Source
     event_refs: request.source_event_refs.slice(),
     start,
     end,
-    ...(request.source_turn_refs && request.source_turn_refs.length > 0 ? { turn_refs: request.source_turn_refs.slice() } : {}),
+    ...(request.source_turn_refs !== undefined ? { turn_refs: request.source_turn_refs.slice() } : {}),
   };
 }
 

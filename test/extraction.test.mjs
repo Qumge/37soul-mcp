@@ -101,6 +101,48 @@ function assetOutboxOps(snap) {
   return Object.values(snap.outbox).filter((op) => op.operation_kind === "asset");
 }
 
+test("P1: lifecycle enqueue -> pending -> drain claims once and commits assets", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+    d.consents["cdu:s1"] = makeConsent("cdu", "s1");
+  });
+  const key = keyOf("p1", "dev-1", "hermes", "ns-pending");
+  const binding = await resolveBinding(key, undefined, { root });
+  let modelCalls = 0;
+  const adapter = createFakeAdapter("hermes", {
+    extract: async (request) => {
+      modelCalls += 1;
+      assert.deepEqual(request.source_turn_refs, ["user-turn", "assistant-turn"]);
+      return { proposals: [caseProposal("explicit_durable_preference")] };
+    },
+  });
+  const writer = await startWriter(root);
+  const enqueued = await sendWriter(root, {
+    request_uid: randomUUID(), profile_id: "p1", command: "runtime_event",
+    payload: { event: { key, event_ref: randomUUID(), kind: "turn_completed", source_turn_refs: ["user-turn", "assistant-turn"], internal_job_uid: null } },
+  });
+  assert.equal(enqueued.ok, true);
+  const before = await readSnap(root, "p1");
+  const watermarkKeyBefore = Object.keys(before.extraction_watermarks)[0];
+  assert.equal(before.extraction_watermarks[watermarkKeyBefore].state, "pending");
+  assert.equal(before.extraction_watermarks[watermarkKeyBefore].attempts, 0, "enqueue does not consume a model attempt");
+
+  const first = await drainPendingExtractions(root, { hermes: adapter });
+  const second = await drainPendingExtractions(root, { hermes: adapter });
+  await writer.close();
+  assert.deepEqual(first, { started: 1, completed: 1, failed: 0 });
+  assert.deepEqual(second, { started: 0, completed: 0, failed: 0 });
+  assert.equal(modelCalls, 1, "the pending range is claimed and extracted exactly once");
+  const after = await readSnap(root, "p1");
+  const wm = after.extraction_watermarks[watermarkKeyBefore];
+  assert.equal(wm.completed, true);
+  assert.equal(wm.attempts, 1);
+  assert.ok(Object.values(after.assets).some((asset) => asset.content === "分析客户时，先给真实付费证据，再讨论渠道。"));
+  assert.ok(assetOutboxOps(after).length > 0, "the committed asset is queued for upload");
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ---------------------------------------------------------------------------
 // 1. internal hooks never schedule another job
 // ---------------------------------------------------------------------------

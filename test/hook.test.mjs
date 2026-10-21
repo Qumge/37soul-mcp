@@ -562,7 +562,7 @@ test('hook command: each Stop selects its own latest turn and replay shares one 
   const watermarks = Object.values(snap.extraction_watermarks);
   assert.equal(watermarks.length, 1, 'Stop/SessionEnd replay created one extraction range');
   assert.deepEqual(watermarks[0].request.source_turn_refs, ['u2', 'a2'], 'the second turn, not the first turn');
-  assert.equal(watermarks[0].attempts, 1, 'replay did not spend another attempt');
+  assert.equal(watermarks[0].attempts, 0, 'lifecycle enqueue does not spend a model attempt');
   cleanup();
 });
 

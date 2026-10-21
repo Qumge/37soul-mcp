@@ -5,11 +5,17 @@
 > **MVP 后续（同日）：** 本文件记录的 0.11.2 是 R1–R9/F1–F3 复审基线。之后补了
 > Task 0 同 Session 改选残留、重复安装保留凭据、首次恢复默认 Soul、状态文案、
 > 真实宿主接入（Claude/Codex/OpenCode/Hermes）、按任务 hint 的 before-prompt 注入、
-> 同版本云端资产状态收敛和 Node20 本地测试，最终候选为 **0.11.5**，tar hash
-> `8c7b79de1aa2c4f0ceefefd12c1cde4b9a0808bf3ed793cfec0a7651995baf5e`。
-> Node18.20.4 / Node20.20.2 / Node24.18.0 均 327/327；四工具实机、GitHub CI、
+> 同版本云端资产状态收敛和 Node20 本地测试，最终候选为 **0.11.6**，tar hash
+> `b4c62071f33cbaa522c9f0a4c2ce2c8e342f470b030a885a991bc371fc496075`。
+> Node18.20.4 / Node20.20.2 / Node24.18.0 均 330/330；四工具实机、GitHub CI、
 > 发布和生产仍未执行。详细验收以
 > `37soul/docs/superpowers/plans/2026-10-21-persistent-soul-mvp-launch.md` 为准。
+>
+> **上线复审 P1 补修：** lifecycle enqueue 与 worker claim 拆开；pending 不再被
+> duplicate_turn 拒绝，claim 原子计数（每范围/绑定至多 2 次），运行中 claim 防止
+> 并发双跑，失败可重试。长会话按冻结 turn refs 读取有界尾部窗口，refs 不解析或
+> turn 文本为空一律 `source_unavailable`，不再零结果完成。Claude 原生 user 容器内
+> 的 tool_result 标为 `Tool result`，不再伪装成 User 长期偏好。
 
 分支：`fix/persistent-soul-r1-r9`
 提交：`c5a8350`（R1–R9）+ `5ccd6e6`（F1–F3 补修）；运行包版本 `0.11.2`

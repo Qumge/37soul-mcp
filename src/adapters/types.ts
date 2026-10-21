@@ -101,7 +101,7 @@ export type NativeInvoker = (
 export interface AdapterDeps {
   home: string;
   invoke: NativeInvoker;
-  readSource: (refs: readonly string[]) => Promise<string>;
+  readSource: (refs: readonly string[], turnRefs?: readonly string[]) => Promise<string>;
   emit: (event: RuntimeEvent) => Promise<void>;
 }
 

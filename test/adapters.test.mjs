@@ -1048,7 +1048,7 @@ test("hermes: interrupted internal task stays pending", async () => {
   );
   assert.ok(interruptedJob, "the interrupted job's watermark is written");
   assert.equal(interruptedJob.state, "pending");
-  assert.equal(interruptedJob.attempts, 1);
+  assert.equal(interruptedJob.attempts, 0, "enqueue does not spend a model attempt");
 
   // The interrupted job's own internal emissions carry the job uid and can never
   // schedule another extraction (no recursion, no second attempt, no raw upload).
@@ -1069,7 +1069,7 @@ test("hermes: interrupted internal task stays pending", async () => {
     (wm) => wm.request && wm.request.binding_uid === binding.binding_uid,
   );
   assert.equal(stillPending.state, "pending", "the interrupted job stays pending");
-  assert.equal(stillPending.attempts, 1, "no recursive attempt bumped the budget");
+  assert.equal(stillPending.attempts, 0, "no recursive attempt bumped the budget");
 
   rmSync(root, { recursive: true, force: true });
 });

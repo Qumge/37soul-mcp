@@ -305,15 +305,16 @@ export function createCodexAdapter(deps: AdapterDeps): RuntimeAdapter {
 
     async extract(request: ExtractionRequest): Promise<ExtractionResult> {
       // 1. Read the raw rollout through the ONLY raw-source seam.
-      const transcript = await deps.readSource(request.source_event_refs);
+      const transcript = await deps.readSource(request.source_event_refs, request.source_turn_refs);
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+      const refs = request.source_turn_refs !== undefined
         ? request.source_turn_refs.slice()
         : codexCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read rollout — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderCodexTurn(transcript, refs);
+      if (turnText.trim() === "") return { error: { code: "source_unavailable", retryable: true } };
       // 4. Invoke the native model through deps.invoke, tagged with the job uid.
       const { args, input } = buildCodexExtractionInvocation(request, turnText);
       const result = await deps.invoke("codex", args, input, request.job_uid);

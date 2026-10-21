@@ -177,16 +177,16 @@ export async function pruneSourcePointers(root: string, profileId: string, sessi
  * prefix of the first resolvable transcript. Returns "" when no pointer (or no
  * underlying file) exists. No network, no copy, no write.
  */
-export async function readSourceRefs(root: string, refs: readonly string[]): Promise<string> {
+export async function readSourceRefs(root: string, refs: readonly string[], turnRefs?: readonly string[]): Promise<string> {
   for (const ref of refs) {
     if (typeof ref !== "string" || ref === "") continue;
-    const content = await readSourceRef(root, ref);
+    const content = await readSourceRef(root, ref, turnRefs);
     if (content !== null) return content;
   }
   return "";
 }
 
-async function readSourceRef(root: string, eventRef: string): Promise<string | null> {
+async function readSourceRef(root: string, eventRef: string, turnRefs?: readonly string[]): Promise<string | null> {
   let profileDirs: string[];
   try {
     profileDirs = (await readdir(sourcesDir(root), { withFileTypes: true }))
@@ -209,9 +209,90 @@ async function readSourceRef(root: string, eventRef: string): Promise<string | n
     } catch {
       continue;
     }
-    return readPrefix(record.path, MAX_SOURCE_BYTES);
+    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs);
   }
   return null;
+}
+
+/** Read a bounded tail of a host transcript (no whole-file read). */
+export async function readSourceTail(file: string, maxBytes = MAX_SOURCE_BYTES): Promise<string> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (!info.isFile()) return "";
+    const start = Math.max(0, info.size - maxBytes);
+    const buffer = Buffer.alloc(Math.min(maxBytes, info.size));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    let text = buffer.toString("utf8", 0, bytesRead);
+    if (start > 0) {
+      const newline = text.indexOf("\n");
+      text = newline >= 0 ? text.slice(newline + 1) : "";
+    }
+    return text;
+  } catch {
+    return "";
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+/** Does a complete JSONL window contain every requested host turn ref? */
+function windowContainsTurnRefs(text: string, turnRefs: readonly string[]): boolean {
+  if (turnRefs.length === 0) return true;
+  const wanted = new Set(turnRefs);
+  const found = new Set<string>();
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    let record: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      record = parsed as Record<string, unknown>;
+    } catch {
+      continue; // a partial boundary line is not evidence
+    }
+    for (const key of ["uuid", "id", "ordinal"]) {
+      const value = record[key];
+      if (typeof value === "string" || typeof value === "number") found.add(String(value));
+    }
+  }
+  return [...wanted].every((ref) => found.has(ref));
+}
+
+/**
+ * Bounded source window for a completed turn. Short files are returned in full
+ * (up to maxBytes). Long files are read from the tail so the just-completed turn
+ * is included; a partial first line is discarded and every requested host turn ref
+ * must be present, otherwise the adapter gets "" and reports source_unavailable.
+ * The file location never leaves the machine; only this bounded text reaches the
+ * local adapter.
+ */
+async function readSourceWindow(file: string, maxBytes: number, turnRefs?: readonly string[]): Promise<string | null> {
+  // Legacy callers without frozen turn refs get the bounded tail (short files are
+  // whole). Production extraction passes turnRefs and still verifies every ref.
+  if (!turnRefs || turnRefs.length === 0) return readSourceTail(file, maxBytes);
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (!info.isFile()) return null;
+    const size = info.size;
+    const start = Math.max(0, size - maxBytes);
+    const buffer = Buffer.alloc(Math.min(maxBytes, size));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    let text = buffer.toString("utf8", 0, bytesRead);
+    if (start > 0) {
+      const newline = text.indexOf("\n");
+      text = newline >= 0 ? text.slice(newline + 1) : "";
+    }
+    return windowContainsTurnRefs(text, turnRefs) ? text : "";
+  } catch {
+    return null;
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
 }
 
 /**

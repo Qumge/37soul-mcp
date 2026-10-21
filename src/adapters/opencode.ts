@@ -458,15 +458,16 @@ export function createOpenCodeAdapter(deps: AdapterDeps): RuntimeAdapter {
 
     async extract(request: ExtractionRequest): Promise<ExtractionResult> {
       // 1. Read the raw transcript through the ONLY raw-source seam.
-      const transcript = await deps.readSource(request.source_event_refs);
+      const transcript = await deps.readSource(request.source_event_refs, request.source_turn_refs);
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+      const refs = request.source_turn_refs !== undefined
         ? request.source_turn_refs.slice()
         : opencodeCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderOpenCodeTurn(transcript, refs);
+      if (turnText.trim() === "") return { error: { code: "source_unavailable", retryable: true } };
       // 4. Invoke the native model through deps.invoke, tagged with the job uid,
       //    using the ONE bridge generation this adapter ships (never mixed).
       const built = buildOpenCodeExtractionInvocation(request, turnText, OPENCODE_PLUGIN_GENERATION);

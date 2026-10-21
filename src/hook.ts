@@ -12,7 +12,6 @@
  */
 
 import path from "node:path";
-import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { GitStateResult } from "./agentd/git-state.js";
 import { getGitState } from "./agentd/git-state.js";
@@ -29,7 +28,7 @@ import { openStore, StoreError } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
-import { extractTranscriptPath } from "./agentd/source-index.js";
+import { extractTranscriptPath, readSourceTail } from "./agentd/source-index.js";
 import { latestCompletedTurnSourceRefs } from "./adapters/claude-code.js";
 import { latestCodexCompletedTurnRefs } from "./adapters/codex.js";
 import { latestOpenCodeCompletedTurnRefs } from "./adapters/opencode.js";
@@ -235,12 +234,12 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     let sourceTurnRefs: string[] | undefined;
     if (deps.event === "Stop" && sourcePath) {
       try {
-        const transcript = readFileSync(sourcePath, "utf8");
+        const transcript = await readSourceTail(sourcePath);
         if (deps.agentKind === "claude-code") sourceTurnRefs = latestCompletedTurnSourceRefs(transcript);
         else if (deps.agentKind === "codex") sourceTurnRefs = latestCodexCompletedTurnRefs(transcript).refs;
         else if (deps.agentKind === "opencode") sourceTurnRefs = latestOpenCodeCompletedTurnRefs(transcript).refs;
         else if (deps.agentKind === "hermes") sourceTurnRefs = latestHermesCompletedTurnRefs(transcript).refs;
-        if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = undefined;
+        if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
       } catch {
         // A missing/unreadable transcript leaves the old event-ref range intact.
       }
@@ -349,7 +348,7 @@ async function emitRuntimeEvent(
     },
     event_ref: randomUUID(),
     kind,
-    ...(sourceTurnRefs && sourceTurnRefs.length > 0 ? { source_turn_refs: sourceTurnRefs.slice() } : {}),
+    ...(sourceTurnRefs !== undefined ? { source_turn_refs: sourceTurnRefs.slice() } : {}),
     internal_job_uid: process.env.SOUL37_INTERNAL_JOB_UID ?? null,
   };
   await sendWriter(root, {

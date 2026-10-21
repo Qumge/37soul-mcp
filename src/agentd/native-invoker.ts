@@ -98,7 +98,7 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
  */
 export function createExtractAdapters(home: string, log?: NativeInvokerLog, root = path.join(home, ".37soul")): Partial<Record<RuntimeKind, RuntimeAdapter>> {
   const invoke = createNativeInvoker(log);
-  const readSource = async (refs: readonly string[]) => readSourceRefs(root, refs);
+  const readSource = async (refs: readonly string[], turnRefs?: readonly string[]) => readSourceRefs(root, refs, turnRefs);
   const emit = async () => {};
   const deps: AdapterDeps = { home, invoke, readSource, emit };
   return {
