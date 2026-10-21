@@ -27,12 +27,15 @@ jq --arg v "$new" '.version = $v' package.json > "$tmp" && mv "$tmp" package.jso
 # The version the running server reports over MCP, so clients see the real one.
 perl -pi -e 's/^(const MCP_VERSION = ")[^"]+(";)/${1}'"$new"'${2}/' src/index.ts
 
-# server.json is only present once the server is registered.
+# server.json is only present once the server is registered. A remote-only
+# manifest has no `packages` array; never invent one.
 if [ -f server.json ]; then
   tmp=$(mktemp)
   jq --arg v "$new" '
     .version = $v
-    | .packages = [.packages[] | if .identifier == "37soul-mcp" then .version = $v else . end]
+    | if (.packages | type) == "array" then
+        .packages = [.packages[] | if .identifier == "37soul-mcp" then .version = $v else . end]
+      else . end
   ' server.json > "$tmp" && mv "$tmp" server.json
 fi
 
@@ -40,7 +43,9 @@ report() { printf '%-24s %s\n' "$1" "$2"; }
 report "package.json" "$(jq -r .version package.json)"
 report "src/index.ts" "$(grep -o 'const MCP_VERSION = "[^"]*"' src/index.ts | cut -d'"' -f2)"
 [ -f server.json ] && report "server.json" "$(jq -r .version server.json)"
-[ -f server.json ] && report "server.json packages" "$(jq -r '[.packages[] | select(.identifier=="37soul-mcp") | .version] | unique | join(",")' server.json)"
+if [ -f server.json ] && jq -e '(.packages | type) == "array"' server.json >/dev/null; then
+  report "server.json packages" "$(jq -r '[.packages[] | select(.identifier=="37soul-mcp") | .version] | unique | join(",")' server.json)"
+fi
 
 # Fail rather than leave a half-bumped tree — that state is exactly how npm and
 # the registry end up pointing at different versions.
@@ -48,7 +53,9 @@ expected=$(jq -r .version package.json)
 checks=( "$(grep -o 'const MCP_VERSION = "[^"]*"' src/index.ts | cut -d'"' -f2)" )
 if [ -f server.json ]; then
   checks+=( "$(jq -r .version server.json)" )
-  checks+=( "$(jq -r '[.packages[] | select(.identifier=="37soul-mcp") | .version] | unique | join(",")' server.json)" )
+  if jq -e '(.packages | type) == "array"' server.json >/dev/null; then
+    checks+=( "$(jq -r '[.packages[] | select(.identifier=="37soul-mcp") | .version] | unique | join(",")' server.json)" )
+  fi
 fi
 for got in "${checks[@]}"; do
   if [ "$got" != "$expected" ]; then

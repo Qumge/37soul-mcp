@@ -615,11 +615,14 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   if (candidate !== null) {
     const valid = await validateTranscriptPath(candidate);
     if (valid !== null) {
+      const rawEnd = (request.payload as Record<string, unknown>).source_end_offset;
+      const endOffset = typeof rawEnd === "number" && Number.isSafeInteger(rawEnd) && rawEnd >= 0 ? rawEnd : undefined;
       await captureSourcePointer(root, event.key.profile_id, event.event_ref, {
         runtime_kind: event.key.runtime_kind,
         native_session_id: event.key.native_session_id,
         path: valid,
         captured_at: new Date().toISOString(),
+        ...(endOffset !== undefined ? { end_offset: endOffset } : {}),
       }).catch(() => {});
     }
   }

@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import type { ContextBundle } from "../assets/protocol.js";
 import { buildExtractionInvocation, parseExtractionOutput } from "./claude-code.js";
+import { serializeSourceTurn, type TurnMessage } from "./source-turn.js";
 import {
   OPENCODE_PLUGIN_FILENAME,
   OPENCODE_PLUGIN_GENERATION,
@@ -390,24 +391,24 @@ function truncateOpenCodeToolOutput(output: unknown): string {
  */
 export function renderOpenCodeTurn(jsonl: string, refs: readonly string[]): string {
   const wanted = new Set(refs);
-  const lines: string[] = [];
+  const messages: TurnMessage[] = [];
   for (const record of parseJsonl(jsonl)) {
     if (typeof record.id !== "string" || !wanted.has(record.id)) continue;
     if (record.type === "request") {
       const text = renderOpenCodeRequestText(record);
-      if (text.trim() !== "") lines.push(`User: ${text}`);
+      if (text.trim() !== "") messages.push({ source: "user", kind: "text", text });
     } else if (record.type === "message") {
       const text = renderOpenCodeMessageText(record);
-      if (text.trim() !== "") lines.push(`Assistant: ${text}`);
+      if (text.trim() !== "") messages.push({ source: "assistant", kind: "text", text });
     } else if (record.type === "tool") {
       const name = typeof record.name === "string" && record.name !== "" ? record.name : "tool";
       const summary = [summarizeOpenCodeToolInput(record.input), truncateOpenCodeToolOutput(record.output)]
         .filter((part) => part.trim() !== "")
         .join(" => ");
-      lines.push(summary ? `[tool:${name} ${summary}]` : `[tool:${name}]`);
+      messages.push({ source: "tool", kind: "tool_result", name, text: summary });
     }
   }
-  return lines.join("\n");
+  return serializeSourceTurn(messages);
 }
 
 /**

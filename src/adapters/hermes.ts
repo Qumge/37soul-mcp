@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import type { ContextBundle } from "../assets/protocol.js";
 import { buildExtractionInvocation, parseExtractionOutput } from "./claude-code.js";
+import { serializeSourceTurn, type TurnMessage } from "./source-turn.js";
 import { HERMES_PLUGIN_FILENAME, HERMES_PLUGIN_SOURCE } from "./plugins/hermes.js";
 export { HERMES_PLUGIN_FILENAME, HERMES_PLUGIN_SOURCE };
 import type {
@@ -401,21 +402,23 @@ function truncateHermesToolOutput(output: unknown): string {
  */
 export function renderHermesTurn(jsonl: string, refs: readonly string[]): string {
   const wanted = new Set(refs);
-  const lines: string[] = [];
+  const messages: TurnMessage[] = [];
   for (const record of parseJsonl(jsonl)) {
     if (typeof record.id !== "string" || !wanted.has(record.id)) continue;
     if (record.type === "user_message" || record.type === "assistant_message") {
       const text = typeof record.text === "string" ? record.text : "";
-      if (text.trim() !== "") lines.push(`${record.type === "user_message" ? "User" : "Assistant"}: ${text}`);
+      if (text.trim() !== "") {
+        messages.push({ source: record.type === "user_message" ? "user" : "assistant", kind: "text", text });
+      }
     } else if (record.type === "tool_call") {
       const name = typeof record.name === "string" && record.name !== "" ? record.name : "tool";
       const summary = [summarizeHermesToolInput(record.input), truncateHermesToolOutput(record.output)]
         .filter((part) => part.trim() !== "")
         .join(" => ");
-      lines.push(summary ? `[tool:${name} ${summary}]` : `[tool:${name}]`);
+      messages.push({ source: "tool", kind: "tool_result", name, text: summary });
     }
   }
-  return lines.join("\n");
+  return serializeSourceTurn(messages);
 }
 
 /**

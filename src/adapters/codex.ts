@@ -36,6 +36,7 @@ import type { ParsedEvent } from "../agentd/types.js";
 import { codexNativeSessionId, createCodexParser } from "../agentd/parsers/codex.js";
 import type { ContextBundle } from "../assets/protocol.js";
 import { buildExtractionInvocation, parseExtractionOutput } from "./claude-code.js";
+import { serializeSourceTurn, type TurnMessage } from "./source-turn.js";
 import type {
   AdapterDeps,
   ExtractionRequest,
@@ -248,21 +249,21 @@ export function renderCodexTurn(jsonl: string, refs: readonly string[]): string 
   for (const record of records) events.push(...parser.push(record));
   events.push(...parser.flush());
 
-  const lines: string[] = [];
+  const messages: TurnMessage[] = [];
   for (const event of events) {
     if (event.role === "user" || event.role === "assistant") {
       if (typeof event.text === "string" && event.text.trim() !== "") {
-        lines.push(`${event.role === "user" ? "User" : "Assistant"}: ${event.text}`);
+        messages.push({ source: event.role, kind: "text", text: event.text });
       }
     } else if (event.role === "tool") {
       const name = event.tool?.name ?? "tool";
       const summary = [event.tool?.input_summary, event.tool?.output_summary]
         .filter((part) => typeof part === "string" && part.trim() !== "")
         .join(" => ");
-      lines.push(summary ? `[tool:${name} ${summary}]` : `[tool:${name}]`);
+      messages.push({ source: "tool", kind: "tool_result", name, text: summary });
     }
   }
-  return lines.join("\n");
+  return serializeSourceTurn(messages);
 }
 
 /**

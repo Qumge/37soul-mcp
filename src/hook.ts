@@ -28,7 +28,7 @@ import { openStore, StoreError } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
-import { extractTranscriptPath, readSourceTail } from "./agentd/source-index.js";
+import { extractTranscriptPath, readSourceTailWindow } from "./agentd/source-index.js";
 import { latestCompletedTurnSourceRefs } from "./adapters/claude-code.js";
 import { latestCodexCompletedTurnRefs } from "./adapters/codex.js";
 import { latestOpenCodeCompletedTurnRefs } from "./adapters/opencode.js";
@@ -232,19 +232,28 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     // read the snapshot before that binding commits (first-session race).
     const sourcePath = extractTranscriptPath(payload);
     let sourceTurnRefs: string[] | undefined;
+    let sourceEndOffset: number | undefined;
     if (deps.event === "Stop" && sourcePath) {
       try {
-        const transcript = await readSourceTail(sourcePath);
-        if (deps.agentKind === "claude-code") sourceTurnRefs = latestCompletedTurnSourceRefs(transcript);
-        else if (deps.agentKind === "codex") sourceTurnRefs = latestCodexCompletedTurnRefs(transcript).refs;
-        else if (deps.agentKind === "opencode") sourceTurnRefs = latestOpenCodeCompletedTurnRefs(transcript).refs;
-        else if (deps.agentKind === "hermes") sourceTurnRefs = latestHermesCompletedTurnRefs(transcript).refs;
-        if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
+        const window = await readSourceTailWindow(sourcePath);
+        if (window !== null) {
+          const transcript = window.text;
+          if (deps.agentKind === "claude-code") sourceTurnRefs = latestCompletedTurnSourceRefs(transcript);
+          else if (deps.agentKind === "codex") sourceTurnRefs = latestCodexCompletedTurnRefs(transcript).refs;
+          else if (deps.agentKind === "opencode") sourceTurnRefs = latestOpenCodeCompletedTurnRefs(transcript).refs;
+          else if (deps.agentKind === "hermes") sourceTurnRefs = latestHermesCompletedTurnRefs(transcript).refs;
+          if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
+          // Freeze the endpoint this Stop actually read: the drain may run much
+          // later, after the transcript has grown past the 4MiB tail window.
+          sourceEndOffset = window.end;
+        }
       } catch {
         // A missing/unreadable transcript leaves the old event-ref range intact.
       }
     }
-    const runtimeEvent = emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs).catch(() => {});
+    const runtimeEvent = emitRuntimeEvent(
+      root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs, sourceEndOffset,
+    ).catch(() => {});
     // SessionStart needs the binding before injecting. Stop is the completed-turn
     // event whose source pointer must reach the writer before the host exits.
     if (deps.event === "SessionStart" || deps.event === "Stop") await runtimeEvent;
@@ -332,6 +341,7 @@ async function emitRuntimeEvent(
   sessionId: string,
   sourcePath: string | null,
   sourceTurnRefs?: string[],
+  sourceEndOffset?: number,
 ): Promise<void> {
   if (sessionId === "unknown" || !RUNTIME_KINDS.has(agentKind)) return;
   const kind = RUNTIME_EVENT_KINDS[hookEvent];
@@ -358,7 +368,11 @@ async function emitRuntimeEvent(
     // source_path is the host's own transcript location, verbatim and unvalidated
     // here — the writer validates (absolute, existing regular file) before it is
     // ever persisted as a path pointer. Never synthesized for runtimes that omit it.
-    payload: { event, ...(sourcePath !== null ? { source_path: sourcePath } : {}) },
+    payload: {
+      event,
+      ...(sourcePath !== null ? { source_path: sourcePath } : {}),
+      ...(sourceEndOffset !== undefined ? { source_end_offset: sourceEndOffset } : {}),
+    },
   });
 }
 

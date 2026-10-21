@@ -8,8 +8,9 @@
  * adapter layer read at most one bounded prefix through `readSourceRefs`.
  *
  * Privacy invariants:
- *  - A pointer record is `{runtime_kind, native_session_id, path, captured_at}` —
- *    a file location, never conversation text, tool output, cwd guesses or tokens.
+ *  - A pointer record is `{runtime_kind, native_session_id, path, captured_at}` plus
+ *    an optional local `end_offset` (the frozen read boundary) — a file location and
+ *    byte count, never conversation text, tool output, cwd guesses or tokens.
  *  - The path is accepted only when it is an absolute, existing, regular file.
  *    `extractTranscriptPath` picks it out of the hook payload verbatim; nothing is
  *    ever synthesized for a runtime that does not hand one over.
@@ -50,6 +51,16 @@ export interface SourcePointerRecord {
   /** Absolute path to the host's own transcript file. A location only, never text. */
   path: string;
   captured_at: string;
+  /**
+   * Exclusive byte boundary frozen when the completed-turn event was captured.
+   * Later appends cannot push the frozen turn out of the bounded window. This is
+   * local-only: it is never copied into a watermark, outbox envelope or log.
+   */
+  end_offset?: number;
+}
+
+function isByteOffset(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 export function sourcesDir(root: string): string {
@@ -125,7 +136,21 @@ export async function captureSourcePointer(
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const target = pointerPath(root, profileId, eventRef);
   const temp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  await writeFile(temp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  // Freeze the read boundary at capture time unless the caller (the hook) already
+  // read the file and handed over the exact endpoint it observed.
+  let end = isByteOffset(record.end_offset) ? record.end_offset : undefined;
+  if (end === undefined) {
+    try {
+      const info = await stat(record.path);
+      if (info.isFile() && isByteOffset(info.size)) end = info.size;
+    } catch {
+      // A vanished file keeps the pointer path-only; the reader reports honestly.
+    }
+  }
+  const persisted: SourcePointerRecord = { ...record };
+  if (end !== undefined) persisted.end_offset = end;
+  else delete persisted.end_offset;
+  await writeFile(temp, `${JSON.stringify(persisted)}\n`, { mode: 0o600 });
   await rename(temp, target);
   await pruneSourcePointers(root, profileId, record.native_session_id);
 }
@@ -174,8 +199,9 @@ export async function pruneSourcePointers(root: string, profileId: string, sessi
 
 /**
  * Resolve event refs in order through the pointer index and return the bounded
- * prefix of the first resolvable transcript. Returns "" when no pointer (or no
- * underlying file) exists. No network, no copy, no write.
+ * window of the first resolvable transcript, honoring a frozen endpoint when the
+ * pointer has one. Returns "" when no pointer (or no underlying file) exists. No
+ * network, no copy, no write.
  */
 export async function readSourceRefs(root: string, refs: readonly string[], turnRefs?: readonly string[]): Promise<string> {
   for (const ref of refs) {
@@ -209,32 +235,53 @@ async function readSourceRef(root: string, eventRef: string, turnRefs?: readonly
     } catch {
       continue;
     }
-    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs);
+    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs, record.end_offset);
   }
   return null;
 }
 
-/** Read a bounded tail of a host transcript (no whole-file read). */
-export async function readSourceTail(file: string, maxBytes = MAX_SOURCE_BYTES): Promise<string> {
+/**
+ * Read a bounded tail of a host transcript (no whole-file read) together with the
+ * exact byte boundary that was observed. The hook freezes that boundary for the
+ * completed turn so later appends cannot evict it from a future tail window.
+ */
+export interface SourceTailWindow {
+  text: string;
+  /** Inclusive byte offset the window starts at. */
+  start: number;
+  /** Exclusive byte offset the window ends at (the file size observed). */
+  end: number;
+}
+
+export async function readSourceTailWindow(
+  file: string,
+  maxBytes = MAX_SOURCE_BYTES,
+): Promise<SourceTailWindow | null> {
   let handle: FileHandle | null = null;
   try {
     handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await handle.stat();
-    if (!info.isFile()) return "";
-    const start = Math.max(0, info.size - maxBytes);
-    const buffer = Buffer.alloc(Math.min(maxBytes, info.size));
+    if (!info.isFile()) return null;
+    const end = info.size;
+    const start = Math.max(0, end - maxBytes);
+    const buffer = Buffer.alloc(Math.min(maxBytes, end));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
     let text = buffer.toString("utf8", 0, bytesRead);
     if (start > 0) {
       const newline = text.indexOf("\n");
       text = newline >= 0 ? text.slice(newline + 1) : "";
     }
-    return text;
+    return { text, start, end };
   } catch {
-    return "";
+    return null;
   } finally {
     if (handle) await handle.close().catch(() => {});
   }
+}
+
+export async function readSourceTail(file: string, maxBytes = MAX_SOURCE_BYTES): Promise<string> {
+  const window = await readSourceTailWindow(file, maxBytes);
+  return window?.text ?? "";
 }
 
 /** Does a complete JSONL window contain every requested host turn ref? */
@@ -269,7 +316,12 @@ function windowContainsTurnRefs(text: string, turnRefs: readonly string[]): bool
  * The file location never leaves the machine; only this bounded text reaches the
  * local adapter.
  */
-async function readSourceWindow(file: string, maxBytes: number, turnRefs?: readonly string[]): Promise<string | null> {
+async function readSourceWindow(
+  file: string,
+  maxBytes: number,
+  turnRefs?: readonly string[],
+  endOffset?: number,
+): Promise<string | null> {
   // Legacy callers without frozen turn refs get the bounded tail (short files are
   // whole). Production extraction passes turnRefs and still verifies every ref.
   if (!turnRefs || turnRefs.length === 0) return readSourceTail(file, maxBytes);
@@ -278,10 +330,17 @@ async function readSourceWindow(file: string, maxBytes: number, turnRefs?: reado
     handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await handle.stat();
     if (!info.isFile()) return null;
-    const size = info.size;
-    const start = Math.max(0, size - maxBytes);
-    const buffer = Buffer.alloc(Math.min(maxBytes, size));
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    // A frozen boundary is authoritative: read exactly the prefix the completed
+    // turn was captured against. If the file shrank below it, the frozen bytes no
+    // longer exist — fail honestly instead of silently reading a different tail.
+    const frozen = isByteOffset(endOffset);
+    if (frozen && info.size < endOffset) return "";
+    const end = frozen ? endOffset : info.size;
+    const start = Math.max(0, end - maxBytes);
+    const length = Math.min(maxBytes, end - start);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    if (bytesRead !== length) return ""; // concurrent truncation: no stable window
     let text = buffer.toString("utf8", 0, bytesRead);
     if (start > 0) {
       const newline = text.indexOf("\n");
