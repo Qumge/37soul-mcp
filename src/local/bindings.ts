@@ -431,6 +431,7 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
     state: "active",
     origin: "local",
     local_identity: { ...identity },
+    local_identity_revision: 1,
   };
   const store = await openStore(root, request.profile_id);
   try {
@@ -557,6 +558,10 @@ registerWriterCommand("edit_local_identity", async ({ root, request }) => {
       const s = draft.souls[soulUid];
       s.identity = identity;
       s.identity_revision += 1;
+      // An unregistered local Soul has no cloud identity to preserve: the edited
+      // identity IS the local original used by injection/export.
+      s.local_identity = { ...identity };
+      s.local_identity_revision = (s.local_identity_revision ?? 1) + 1;
     });
     return (await store.read()).souls[soulUid];
   } finally {

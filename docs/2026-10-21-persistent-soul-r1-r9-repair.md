@@ -2,8 +2,8 @@
 
 日期：2026-10-21
 分支：`fix/persistent-soul-r1-r9`
-提交：`c5a8350`（源码/测试/文档）；运行包版本 `0.11.1`
-Skill：`feat/persistent-soul` @ `036075a`（6.11.1）
+提交：`c5a8350`（R1–R9）+ 补修 `F1–F3`；运行包版本 `0.11.2`
+Skill：`feat/persistent-soul` @ 6.11.2
 主仓库：`feat/persistent-soul-a` @ `e1a479f9`（未修改本轮 B 代码；用户原有文档保持未跟踪/未提交）
 
 ## 结论
@@ -11,7 +11,7 @@ Skill：`feat/persistent-soul` @ `036075a`（6.11.1）
 R1–R9 代码修复、离线测试、Node 18/24 完整测试、实际 Rails 本地往返和重新打包已完成。
 四工具真实宿主探针、20 方向迁移矩阵、Node 20、发布和生产部署未执行。
 
-## R1–R9
+## R1–R9 + F1–F3
 
 | 项 | 修复 | 主要测试 |
 | --- | --- | --- |
@@ -24,18 +24,21 @@ R1–R9 代码修复、离线测试、Node 18/24 完整测试、实际 Rails 本
 | R7 同版本解绑被跳过 | Binding 分开 `cloud_revision` 与未确认本地修改；同版本云端 detach 生效，本地提案保留 quarantine | `sync.test.mjs` R7 直接 Pull + 409→Pull |
 | R8 解绑被自动复活 | `resolveBinding` 对 detached 记录返回 null，只有显式 `selectSoul` 才同记录递增恢复 | `profiles-bindings.test.mjs` R8 |
 | R9 冲突屏蔽确认副本 | `ownerContextInput` 只排除未确认本地提议；已 `synced` 且 `cloud_revision` 的当前对象可注入 | `sync.test.mjs` R9 |
+| F1 未授权 Soul 阻塞同步 | push binding/asset 前检查 identity Consent；未授权操作保留本地 outbox、不出站，Pull 继续 | `sync.test.mjs` F1、`cli.test.mjs` F1、实际 Rails F1 |
+| F2 较早 bind ACK 覆盖 detach | Binding ACK 只推进 `cloud_revision`；较新的本地 detach/改选保持当前状态，恢复网络后继续发送 | `sync.test.mjs` F2（真实 select/detach） |
+| F3 本地编辑不生效 | `edit_local_identity` 同时更新 `identity`/`local_identity` 与两者 revision；Hook/export 使用最新本地身份 | `cli.test.mjs` F3、`hook.test.mjs` local edit |
 
 ## 验证
 
 ```sh
 # Node 24.18.0
 SOUL37_HOME="$(mktemp -d)" npm test
-# 294 tests, 294 pass, 0 fail, 0 skipped; smoke all checks passed
+# 299 tests, 299 pass, 0 fail, 0 skipped; smoke all checks passed
 
 # Node 18.20.4
 PATH=/tmp/37soul-node18/node-v18.20.4-darwin-arm64/bin:$PATH \
   SOUL37_HOME="$(mktemp -d)" npm test
-# 294 tests, 294 pass, 0 fail, 0 skipped; smoke all checks passed
+# 299 tests, 299 pass, 0 fail, 0 skipped; smoke all checks passed
 
 node scripts/probe-runtime.mjs --offline --runtime all
 # exit 0; four runtimes remain 0.0.0-unverified / supported_version null
@@ -58,14 +61,17 @@ node scripts/probe-runtime.mjs --offline --runtime all
   R3 红（Codex binding 收到 `Bearer token-claude-code`）。
 - R5：在收到响应头时 `clearTimeout` → R5 localhost stalled-body 测试红
   （`test-timeout`，writer 未在承诺时限内返回）。
+- F1：恢复“所有 binding 直接发送” → 真实 CLI F1 回归红（A 的 binding 出站）。
+- F2：ACK 恢复整对象覆盖 → 真实 select/detach F2 回归红（detach 被改回 bound）。
+- F3：只更新 `identity`、保留旧 `local_identity` → 真实 CLI F3/Hook 回归红（渲染旧人格）。
 
 ## 运行包
 
 ```text
 release/37soul-runtime.tgz
-version: 0.11.1
-sha256: 4f25b9d0f686209b0828ef54caaee89131f4335d7f1fdbc2dbf8e85304b00d4d
-release/VERSION: 0.11.1
+version: 0.11.2
+sha256: f5f0480599edd710960c8063f030a27e3b1c3755be13f3fc781c32021355d63a
+release/VERSION: 0.11.2
 release/release-manifest.json version/hash 一致
 ```
 

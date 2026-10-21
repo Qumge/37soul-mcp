@@ -297,6 +297,11 @@ async function pushOutbox(
   const assetOps = orderOutboxOps(Object.values(snap.outbox)).filter((op) => op.operation_kind === "asset");
   const groups = new Map<string | null, OutboxOperation[]>();
   for (const op of assetOps) {
+    // F1: an asset for a Soul the user has not explicitly authorized stays in
+    // the outbox (local-only) and must not block Pull for an authorized Soul.
+    const assetKind = opKind(snap, op);
+    const assetSoul = String(op.request.soul_uid ?? "");
+    if (assetKind === null || !authorizedCategories(snap, assetSoul).has(assetKind)) continue;
     const runtime = assetRuntime(snap, op);
     const list = groups.get(runtime) ?? [];
     list.push(op);
@@ -340,6 +345,13 @@ async function pushOne(
   op: OutboxOperation,
   snap: StoreSnapshot,
 ): Promise<string | null> {
+  if (op.operation_kind === "binding") {
+    // F1: never send a binding for a Soul without an enabled identity Consent.
+    // The local binding/outbox entry is retained; explicit authorization will
+    // make it sendable on a later run, after register/consent replay.
+    const soulUid = String(op.request.soul_uid ?? "");
+    if (!authorizedCategories(snap, soulUid).has("identity")) return null;
+  }
   let token = auth.defaultToken;
   if (op.operation_kind === "binding") {
     const runtimeKind = String(op.request.runtime_kind ?? "");
@@ -423,7 +435,11 @@ async function handleRegisterSoul(
           // A locally created Soul keeps its local original identity even after the
           // server confirms/updates it.
           ...(previous?.origin === "local"
-            ? { origin: "local" as const, local_identity: previous.local_identity ?? previous.identity }
+            ? {
+            origin: "local" as const,
+            local_identity: previous.local_identity ?? previous.identity,
+            local_identity_revision: previous.local_identity_revision ?? previous.identity_revision,
+          }
             : { origin: "cloud" as const }),
         };
       }
@@ -516,7 +532,7 @@ async function handleBinding(
     const body = res.body as { binding?: Binding } | null;
     await store.transact((draft) => {
       delete draft.outbox[op.operation_id];
-      if (body?.binding) applyBindingRecord(draft, body.binding);
+      if (body?.binding) applyBindingRecord(draft, body.binding, "ack");
       return undefined;
     });
     report.accepted += 1;
@@ -1000,7 +1016,7 @@ function revokeConsentLocal(draft: StoreSnapshot, consent: Consent, removed: str
       if (isLocalSoul(soul)) {
         // Local original survives; its cloud identity is no longer injected.
         soul.identity = { ...(soul.local_identity ?? soul.identity) };
-        soul.identity_revision = 1;
+        soul.identity_revision = soul.local_identity_revision ?? soul.identity_revision;
       } else {
         delete draft.souls[soulUid];
       }
@@ -1037,18 +1053,32 @@ function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
     identity: { ...soul.identity },
     state: "active",
     origin: local ? "local" : "cloud",
-    ...(local ? { local_identity: previous?.local_identity ?? previous?.identity } : {}),
+    ...(local
+      ? {
+          local_identity: previous?.local_identity ?? previous?.identity,
+          local_identity_revision: previous?.local_identity_revision ?? previous?.identity_revision,
+        }
+      : {}),
   };
 }
 
-function applyBindingRecord(draft: StoreSnapshot, binding: Binding): void {
+function applyBindingRecord(draft: StoreSnapshot, binding: Binding, mode: "cloud" | "ack" = "cloud"): void {
   if (!binding?.binding_uid) return;
   for (const key of Object.keys(draft.bindings)) {
     const existing = draft.bindings[key];
     if (existing.binding_uid !== binding.binding_uid) continue;
-    // Compare against the last server-confirmed revision, not the local optimistic
-    // revision. A local rev2 unconfirmed switch and a cloud rev2 detach are equal
-    // revisions but the cloud record must win (the local edit stays in quarantine).
+
+    if (mode === "ack" && existing.unconfirmed === true && existing.revision > binding.revision) {
+      // An earlier ACK (e.g. bound/rev1) must not overwrite a newer local intent
+      // (detach/switch/rev2) that is still queued. Advance only the confirmed
+      // watermark; keep the current local record usable for "is it detached?".
+      draft.bindings[key] = {
+        ...existing,
+        cloud_revision: Math.max(existing.cloud_revision ?? 0, binding.revision),
+      };
+      return;
+    }
+
     if (existing.cloud_revision == null && existing.unconfirmed == null) {
       // Legacy snapshot: no confirmed/local split is recorded. Refuse a downgrade,
       // but let an equal/higher cloud record win so a server-side detach is honored.
@@ -1056,7 +1086,10 @@ function applyBindingRecord(draft: StoreSnapshot, binding: Binding): void {
     } else {
       const confirmedRevision = existing.cloud_revision ?? existing.revision;
       if (binding.revision < confirmedRevision) return;
-      if (binding.revision === confirmedRevision && existing.unconfirmed !== true) return;
+      // Pull/control events may confirm a same-revision cloud state; they must win
+      // over an unconfirmed local mutation (R7). An ACK at the same revision simply
+      // confirms the current local state.
+      if (binding.revision === confirmedRevision && existing.unconfirmed !== true && mode === "cloud") return;
     }
     draft.bindings[key] = {
       ...existing,
@@ -1149,7 +1182,7 @@ export function clearCloudCache(draft: StoreSnapshot, options: { revokeDevice?: 
   for (const [uid, soul] of Object.entries(draft.souls)) {
     if (isLocalSoul(soul)) {
       soul.identity = { ...(soul.local_identity ?? soul.identity) };
-      soul.identity_revision = 1;
+      soul.identity_revision = soul.local_identity_revision ?? soul.identity_revision;
     } else {
       delete draft.souls[uid];
     }
@@ -1403,7 +1436,7 @@ export function ownerContextInput(
     contextSoul = {
       ...soul,
       identity: { ...(soul.local_identity ?? soul.identity) },
-      identity_revision: soul.local_identity ? 1 : soul.identity_revision,
+      identity_revision: soul.local_identity ? (soul.local_identity_revision ?? soul.identity_revision) : soul.identity_revision,
     };
   } else {
     throw new StoreError("identity_not_authorized", `identity consent is not active for ${soulUid}`);

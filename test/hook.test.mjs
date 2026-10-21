@@ -510,3 +510,64 @@ test('hook command: revoked identity never injects the downloaded cloud canary',
   assert.ok(!io.err.join('').includes('OWNER_PRIVATE_IDENTITY_CANARY'), 'the canary never reaches stderr either');
   cleanup();
 });
+
+test('hook command: anonymous local edit is what the next SessionStart injects', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = claudePayloads.session_start.session_id;
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(
+    path.join(root, 'profiles', profileId, 'device.json'),
+    `${JSON.stringify({ device_id: deviceId })}\n`,
+    { mode: 0o600 },
+  );
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = null;
+    d.cloud_device_uid = null;
+    d.souls['s1'] = {
+      soul_uid: 's1', legacy_host_id: null, identity_revision: 2,
+      identity: { name: 'Growth', description: '', character: 'UPDATED_LOCAL_CANARY', greeting: '' },
+      state: 'active', origin: 'local',
+      local_identity: { name: 'Growth', description: '', character: 'UPDATED_LOCAL_CANARY', greeting: '' },
+      local_identity_revision: 2,
+    };
+    d.bindings[`${profileId}\u0000${deviceId}\u0000claude-code\u0000${sessionId}`] = {
+      binding_uid: 'b1', session_ref: '30000000-0000-4000-8000-000000000001', runtime_kind: 'claude-code',
+      soul_uid: 's1', revision: 1, state: 'bound', profile_id: profileId, device_id: deviceId, native_session_id: sessionId,
+    };
+    d.assets['a1'] = {
+      asset_uid: 'a1', soul_uid: 's1', kind: 'relationship', trait: 'preference',
+      content: '本地偏好', applicability: '', tags: [], evidence: 'explicit_user_statement',
+      verification: 'unverified', sensitivity: 'normal', state: 'active', revision: 1,
+      supersedes_uid: null, pinned: false,
+      source: { runtime_kind: 'claude-code', session_ref: '30000000-0000-4000-8000-000000000001', event_ref: 'e1', occurred_at: '2026-10-20T04:00:00Z' },
+      sync_state: 'local_only', cloud_revision: null,
+    };
+  });
+  await store.close();
+  writeFileSync(
+    path.join(root, 'accounts.json'),
+    `${JSON.stringify({ anonymous: { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    { mode: 0o600 },
+  );
+  const writer = await startWriter(root);
+  const io = capture();
+  try {
+    await runHookCommand({
+      home, agentKind: 'claude-code', event: 'SessionStart',
+      fetch: async () => { throw new Error('no repo brief'); },
+      stdin: JSON.stringify({ ...claudePayloads.session_start, source: 'resume' }),
+      stdout: io.stdout, stderr: io.stderr,
+      getGitState: async () => { throw new Error('no git state'); },
+    });
+  } finally {
+    await writer.close();
+  }
+  const wrapped = io.out.join('');
+  assert.match(wrapped, /UPDATED_LOCAL_CANARY/, 'the hook renders the edited local identity');
+  assert.doesNotMatch(wrapped, /ORIGINAL_LOCAL_CANARY/, 'the old local identity is gone');
+  cleanup();
+});

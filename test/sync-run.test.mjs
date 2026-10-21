@@ -413,6 +413,14 @@ test("R3: bindings use the token of their own runtime", async () => {
   const root = tempDir();
   const runtimes = ["claude-code", "codex", "opencode", "hermes"];
   await seedOwnedStore(root, "p1", "dev-1", "owner-1", "cdu-1", (d) => {
+    d.souls["soul-1"] = {
+      soul_uid: "soul-1", legacy_host_id: 1, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents["cdu-1:soul-1"] = {
+      cloud_device_uid: "cdu-1", soul_uid: "soul-1", revision: 1,
+      categories: ["identity", "relationship", "experience"], enabled: true,
+    };
     runtimes.forEach((runtime, index) => {
       const key = ["p1", "dev-1", runtime, `ns-${index}`].join("\u0000");
       d.bindings[key] = {
@@ -515,6 +523,14 @@ test("R3: bindings use the token of their own runtime", async () => {
 test("R5: headers-then-stalled-body is bounded and the writer recovers", async () => {
   const root = tempDir();
   await seedOwnedStore(root, "p1", "dev-1", "owner-1", "cdu-1", (d) => {
+    d.souls["soul-1"] = {
+      soul_uid: "soul-1", legacy_host_id: 1, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents["cdu-1:soul-1"] = {
+      cloud_device_uid: "cdu-1", soul_uid: "soul-1", revision: 1,
+      categories: ["identity", "relationship"], enabled: true,
+    };
     d.bindings[["p1", "dev-1", "claude-code", "ns-1"].join("\u0000")] = {
       binding_uid: "binding-1", session_ref: "session-1", runtime_kind: "claude-code",
       soul_uid: "soul-1", revision: 1, state: "bound", profile_id: "p1",

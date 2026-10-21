@@ -12,6 +12,8 @@ import path from "node:path";
 
 import { main, agentdExtractAdapters } from "../dist/cli.js";
 import { openStore } from "../dist/local/store.js";
+import { ownerContextInput } from "../dist/sync/client.js";
+import { selectContext } from "../dist/assets/context.js";
 
 function tempDir() {
   return mkdtempSync(path.join(tmpdir(), "cli-"));
@@ -188,6 +190,126 @@ test("R2: soul create stays local and soul authorize enqueues explicit consent",
     assert.deepEqual(op.request.consent_categories.sort(), ["identity", "relationship"]);
     assert.deepEqual(snap.souls[uid].local_identity, { name: "Growth", description: "", character: "", greeting: "" });
   } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+// F3: an explicit local edit must change what injection actually renders, with a
+// consistent revision (not a local_identity fallback stuck on the original).
+test("F3: local soul create -> edit -> injection uses the edited identity", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1");
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const created = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Growth", "--character", "ORIGINAL_CANARY"], created.io), 0);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    assert.ok(uid);
+    const edited = makeIo();
+    assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--character", "UPDATED_CANARY"], edited.io), 0);
+    const bound = makeIo();
+    assert.equal(await main(["bind", "--profile", "p1", "--soul", uid, "--session", "ns-1"], bound.io), 0);
+
+    const store = await openStore(root, "p1");
+    const snap = await store.read();
+    await store.close();
+    const soul = snap.souls[uid];
+    assert.equal(soul.identity.character, "UPDATED_CANARY");
+    assert.equal(soul.local_identity.character, "UPDATED_CANARY", "the local original is updated too");
+    assert.equal(soul.identity_revision, 2);
+    assert.equal(soul.local_identity_revision, 2, "the version is not reset to 1");
+    const binding = Object.values(snap.bindings)[0];
+    const bundle = selectContext(ownerContextInput(snap, uid, binding, "task", 4096));
+    assert.match(bundle.rendered_text, /UPDATED_CANARY/);
+    assert.doesNotMatch(bundle.rendered_text, /ORIGINAL_CANARY/);
+
+    const exported = makeIo();
+    assert.equal(await main(["soul", "export", "--profile", "p1"], exported.io), 0);
+    const exportBody = JSON.parse(exported.out.stdout);
+    assert.equal(exportBody.souls[uid].identity.character, "UPDATED_CANARY");
+    assert.equal(exportBody.souls[uid].identity_revision, 2);
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// F1: the real create/bind entry must not send an unauthorized Soul's binding,
+// and must still sync an explicitly authorized second Soul.
+test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the authorized one", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+  });
+  writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
+    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+  })}\n`, { mode: 0o600 });
+  writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
+    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+  })}\n`, { mode: 0o600 });
+
+  const previousHome = process.env.SOUL37_HOME;
+  const previousFetch = globalThis.fetch;
+  process.env.SOUL37_HOME = home;
+  const bindingBodies = [];
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    calls.push(`${init.method ?? "GET"} ${pathname}`);
+    if (init.method === "POST" && pathname.endsWith("/souls")) {
+      const body = JSON.parse(String(init.body));
+      return {
+        status: 201, ok: true, headers: { get: () => null }, json: async () => ({
+          protocol: "soul-assets/v1",
+          soul: { soul_uid: body.soul_uid, legacy_host_id: 77, identity_revision: 1, identity: body.identity, state: "active" },
+          consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
+        }),
+      };
+    }
+    if (init.method === "PUT" && pathname.includes("/bindings/")) {
+      const body = JSON.parse(String(init.body));
+      bindingBodies.push(body);
+      return {
+        status: 200, ok: true, headers: { get: () => null }, json: async () => ({
+          protocol: "soul-assets/v1",
+          binding: { ...body, binding_uid: pathname.split("/").pop(), revision: 1 },
+        }),
+      };
+    }
+    return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ protocol: "soul-assets/v1", events: [], next_cursor: null, has_more: false }) };
+  };
+
+  try {
+    const a = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A"], a.io), 0);
+    const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
+    assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-A", "--agent", "hermes"], makeIo().io), 0);
+    const b = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B"], b.io), 0);
+    const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
+    assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
+    assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-B", "--agent", "hermes"], makeIo().io), 0);
+
+    const sync = makeIo();
+    assert.equal(await main(["sync", "--profile", "p1"], sync.io), 0, sync.out.stderr);
+    assert.ok(bindingBodies.some((body) => body.soul_uid === bUid), "the authorized binding was sent");
+    assert.ok(!bindingBodies.some((body) => body.soul_uid === aUid), "the unauthorized binding never left the machine");
+    assert.ok(calls.some((call) => call.startsWith("GET")), "Pull still ran");
+
+    const snap = await readSnap(root, "p1");
+    assert.ok(Object.values(snap.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === aUid), "A's binding history stays local");
+    assert.ok(!Object.values(snap.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === bUid), "B's binding was accepted");
+  } finally {
+    globalThis.fetch = previousFetch;
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
     else process.env.SOUL37_HOME = previousHome;
     rmSync(home, { recursive: true, force: true });

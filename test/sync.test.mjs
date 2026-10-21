@@ -24,6 +24,7 @@ import {
   syncOnce,
 } from "../dist/sync/client.js";
 import { loadContractFixture } from "./helpers/contract-fixture.mjs";
+import { assertBindingCurrent, detachBinding, resolveBinding, selectSoul } from "../dist/local/bindings.js";
 
 const { fixture } = loadContractFixture();
 const WIRE = fixture.wire_responses;
@@ -1762,4 +1763,94 @@ test("R2: registration carries explicit categories; an old empty registration is
   assert.equal(oldSnap.outbox["old-register"], undefined);
   assert.equal(oldSnap.quarantine["old-register"].reason, "authorization_required");
   rmSync(oldRoot, { recursive: true, force: true });
+});
+
+test("F1: an unauthorized local Soul binding never blocks an authorized Soul", async () => {
+  const root = tempDir();
+  const unauthorizedSoul = "soul-local-only";
+  const authorizedSoul = IDS.soul;
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.souls[unauthorizedSoul] = {
+      soul_uid: unauthorizedSoul, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "Local", description: "", character: "", greeting: "" },
+      state: "active", origin: "local",
+      local_identity: { name: "Local", description: "", character: "", greeting: "" },
+    };
+    d.outbox["local-binding"] = {
+      operation_id: "local-binding", operation_kind: "binding",
+      request: { base_revision: 0, session_ref: "local-session", runtime_kind: "hermes", soul_uid: unauthorizedSoul, state: "bound" },
+      predecessor_operation_ids: [],
+    };
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, "authorized fact");
+    d.outbox[IDS.assetA] = proposeOp(IDS.assetA, "authorized fact");
+  });
+  const calls = [];
+  const http = fakeHttp((req) => {
+    calls.push(`${req.method} ${pathnameOf(req.url)}`);
+    if (req.method === "POST" && pathnameOf(req.url).endsWith("/push")) {
+      return {
+        status: 200,
+        body: {
+          protocol: "soul-assets/v1",
+          results: req.body.changes.map((change) => acceptedResult(change.change_id, activeAsset(change.asset_uid, "authorized fact"))),
+        },
+      };
+    }
+    return { status: 200, body: emptyPull("cursor-after") };
+  });
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, undefined);
+  assert.ok(calls.some((call) => call.includes("/push")), "authorized asset was pushed");
+  assert.ok(calls.some((call) => call.startsWith("GET")), "Pull ran for the authorized Soul");
+  assert.ok(!calls.some((call) => call.includes("local-binding")), "the unauthorized binding never left the machine");
+  const snap = await readSnap(root);
+  assert.ok(snap.outbox["local-binding"], "the local binding history is retained");
+  assert.ok(snap.bindings[["p1", "dev-1", "hermes", "ns-1"].join("\u0000")], "the authorized binding still works");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("F2: an earlier bind ACK cannot overwrite a newer queued detach", async () => {
+  const root = tempDir();
+  const key = bindingKeyOf();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    delete d.bindings[key];
+  });
+  const nativeKey = { profile_id: "p1", device_id: "dev-1", runtime_kind: "hermes", native_session_id: "ns-1" };
+  await selectSoul(nativeKey, IDS.soul, { root });
+  await detachBinding(nativeKey, { root });
+  const actualBinding = Object.values((await readSnap(root)).bindings)[0];
+  let calls = 0;
+  const http = async (url, init = {}) => {
+    calls += 1;
+    const p = pathnameOf(String(url));
+    if (init.method === "PUT" && p.includes("/bindings/")) {
+      const body = JSON.parse(String(init.body));
+      if (body.state === "bound") {
+        return makeResponse({
+          status: 200,
+          body: { protocol: "soul-assets/v1", binding: { binding_uid: actualBinding.binding_uid, session_ref: actualBinding.session_ref, runtime_kind: "hermes", soul_uid: IDS.soul, revision: 1, state: "bound" } },
+        });
+      }
+      throw new Error("network down before detach ACK");
+    }
+    return makeResponse({ status: 200, body: emptyPull() });
+  };
+  const report = await syncOnce("p1", http, { ...syncOpts(root), backoff: { sleep: async () => {}, maxRetries: 0 } });
+  assert.equal(report.error, "sync_failed");
+  const snap = await readSnap(root);
+  const binding = Object.values(snap.bindings).find((candidate) => candidate.soul_uid === IDS.soul);
+  assert.equal(binding.state, "detached", "the queued detach remains the current intent");
+  assert.equal(binding.revision, 2);
+  assert.equal(binding.cloud_revision, 1, "the earlier ACK advances only the confirmed watermark");
+  assert.equal(binding.unconfirmed, true);
+  assert.ok(Object.values(snap.outbox).some((op) => op.operation_kind === "binding" && op.request.state === "detached"), "the detach stays queued for retry");
+  assert.equal(await resolveBinding(nativeKey, undefined, { root }), null, "ordinary resolution stays detached");
+  await assert.rejects(
+    () => assertBindingCurrent(nativeKey, actualBinding.binding_uid, 1, { root }),
+    (error) => error?.code === "stale_binding",
+    "an old rev1 extraction cannot pass the current-revision check",
+  );
+  rmSync(root, { recursive: true, force: true });
 });

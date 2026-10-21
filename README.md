@@ -112,9 +112,13 @@ only.
 
 The sync itself is **consent-gated per device and per Soul**: only an account entry whose
 `soul_sync_mode` is `assets_only` syncs, and only the Souls bound to that profile. A legacy
-transcript-mode device never syncs. Local creation is not authorization: after login run
+transcript-mode device never syncs. An unauthorized local Soul stays local: its Binding
+is retained but never sent, so it cannot block Pull for an authorized Soul. Local
+creation is not authorization: after login run
 `37soul soul authorize <uid> --categories identity,relationship,experience` to explicitly
-register that Soul and open its Consent. Tokens are stored with the exact profile/owner/
+register that Soul and open its Consent. Local identity edits update the identity used
+for injection/export; an offline bind → detach sequence keeps the detach as the latest
+intent even if an earlier bind ACK arrives during an interrupted sync. Tokens are stored with the exact profile/owner/
 cloud-device/runtime they were issued for; a global legacy token is never reused for
 another profile (upgrading from an older build requires one fresh `37soul login`).
 It is triggered three ways, all through the single writer (never a
@@ -149,7 +153,7 @@ builds and verifies only** — there is no upload-to-Release job; publishing the
 `.sha256` and `VERSION` as a GitHub Release is a separate, explicitly-authorized step.
 
 ```bash
-git tag v0.11.1 && git push origin v0.11.1
+git tag v0.11.2 && git push origin v0.11.2
 ```
 
 The tarball root is `37soul/` and carries `package.json` (`{"type":"module"}`, so the ESM

@@ -95,6 +95,8 @@ export interface Soul {
   origin?: "local" | "cloud";
   /** Local-only original identity, preserved when a cloud identity is revoked. */
   local_identity?: Identity;
+  /** Local-only revision of the original identity (never reset to 1 on restore). */
+  local_identity_revision?: number;
 }
 
 export interface Binding {
