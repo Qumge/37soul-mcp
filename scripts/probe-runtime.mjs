@@ -16,7 +16,7 @@
 import { probeRuntime } from "../dist/adapters/probe.js";
 import { createNativeInvoker } from "../dist/agentd/native-invoker.js";
 import { createClaudeCodeAdapter } from "../dist/adapters/claude-code.js";
-import { createCodexAdapter, writeCodexHookConfig } from "../dist/adapters/codex.js";
+import { createCodexAdapter } from "../dist/adapters/codex.js";
 import { codexNativeSessionId } from "../dist/agentd/parsers/codex.js";
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -276,25 +276,35 @@ async function liveClaude(args, home, work) {
 
 async function liveCodex(args, home, work) {
   const version = shellVersion("codex");
-  const codexHome = path.join(home, ".codex");
-  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-  if (!ensureAuth(path.join(codexHome, "auth.json"))) {
-    return { runtime_kind: "codex", version, status: "fail", error: "auth_unavailable", codex_home: codexHome };
-  }
+  // Never override Codex's config-dir variable. Use its real auth/profile and the supported inline
+  // `-c hooks=...` override for this one reviewed automation run; persisted
+  // `/hooks` trust remains Codex-owned and is not claimed.
   const launcher = launcherWrapper(home);
-  writeCodexHookConfig(home, { command: launcher });
-  const codexEnv = { ...process.env, CODEX_HOME: codexHome, SOUL37_HOME: home, SOUL37_LAUNCHER: launcher };
-  const turn = run("codex", ["exec", "--json", "--skip-git-repo-check", "-s", "read-only", "--dangerously-bypass-hook-trust", LIVE_PROMPT], {
+  const codexEnv = { ...process.env, SOUL37_HOME: home, SOUL37_LAUNCHER: launcher };
+  const command = `${launcher} hook --agent codex --event`;
+  const inlineHooks = `{SessionStart=[{matcher="startup|resume|clear|compact|fork",hooks=[{type="command",command=${JSON.stringify(command + " SessionStart")},timeout=5}]}],UserPromptSubmit=[{hooks=[{type="command",command=${JSON.stringify(command + " UserPromptSubmit")},timeout=5}]}],Stop=[{hooks=[{type="command",command=${JSON.stringify(command + " Stop")},timeout=5}]}],SessionEnd=[{hooks=[{type="command",command=${JSON.stringify(command + " SessionEnd")},timeout=3}]}]}`;
+  const turn = run("codex", [
+    "exec", "--json", "--skip-git-repo-check", "-s", "read-only",
+    "--dangerously-bypass-hook-trust", "-c", `hooks=${inlineHooks}`, LIVE_PROMPT,
+  ], {
     cwd: work,
     env: codexEnv,
   });
   if (turn.status !== 0) {
     return { runtime_kind: "codex", version, status: "fail", error: "conversation_failed", stderr: (turn.stderr || "").slice(0, 2000) };
   }
-  const transcriptPath = newestFile(path.join(codexHome, "sessions"), ".jsonl");
+  const started = turn.stdout.split("\n").map((line) => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).find((line) => line && line.type === "thread.started");
+  const threadId = started && typeof started.thread_id === "string" ? started.thread_id : null;
+  const transcriptPath = newestFile(
+    path.join(os.homedir(), ".codex", "sessions"),
+    ".jsonl",
+    (file) => (threadId ? path.basename(file).includes(threadId) : true),
+  );
   if (!transcriptPath) return { runtime_kind: "codex", version, status: "fail", error: "transcript_missing" };
   const transcript = readFileSync(transcriptPath, "utf8");
-  const sessionId = codexNativeSessionId(transcript) ?? path.basename(transcriptPath, ".jsonl");
+  const sessionId = codexNativeSessionId(transcript) ?? threadId ?? path.basename(transcriptPath, ".jsonl");
   const adapter = createCodexAdapter({
     home,
     readSource: async () => transcript,
@@ -323,7 +333,7 @@ async function liveCodex(args, home, work) {
     transcript_path: transcriptPath,
     proposals,
     error: proposals && proposals.length > 0 ? null : ("error" in result ? result.error : "no_proposals"),
-    hooks: { installed: true, trust: "one-off bypass; not persisted" },
+    hooks: { installed: true, layer: "inline -c hooks", trust: "one-off bypass; not persisted" },
     probe: {
       runtime_kind: "codex",
       version,
