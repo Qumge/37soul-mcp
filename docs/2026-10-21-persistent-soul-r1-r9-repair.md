@@ -64,7 +64,7 @@ node scripts/probe-runtime.mjs --offline --runtime all
 ```text
 release/37soul-runtime.tgz
 version: 0.11.1
-sha256: 5758d5de2c545054174f1a198218908bacdf971d608e5eb9ab9a22ba2cb9d26e
+sha256: 4f25b9d0f686209b0828ef54caaee89131f4335d7f1fdbc2dbf8e85304b00d4d
 release/VERSION: 0.11.1
 release/release-manifest.json version/hash 一致
 ```
