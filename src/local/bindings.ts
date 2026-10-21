@@ -70,6 +70,8 @@ function createBinding(key: NativeSessionKey, soulUid: string): BindingSnapshot 
     soul_uid: soulUid,
     revision: 1,
     state: "bound",
+    cloud_revision: 0,
+    unconfirmed: true,
     profile_id: key.profile_id,
     device_id: key.device_id,
     native_session_id: key.native_session_id,
@@ -221,6 +223,8 @@ async function rebindExisting(
     soul_uid: soulUid,
     state: "bound",
     revision: existing.revision + 1,
+    cloud_revision: existing.cloud_revision ?? existing.revision,
+    unconfirmed: true,
   };
   const op = bindingOutboxOp(next, "bound", existing.revision, pred ? [pred] : []);
   const written = await store.transact((draft) => {
@@ -281,16 +285,18 @@ export async function resolveBinding(
     // 1. session explicit choice is consulted before the native binding.
     if (explicitSoulUid) {
       if (!snap.souls[explicitSoulUid]) return null; // unknown explicit UID: never guess
-      if (existing && existing.state === "bound") {
-        if (existing.soul_uid === explicitSoulUid) return existing;
-        if (isInjected(snap, existing)) return null; // do not touch an injected session
+      if (existing) {
+        if (existing.state === "bound" && existing.soul_uid === explicitSoulUid) return existing;
+        if (existing.state === "bound" && isInjected(snap, existing)) return null; // do not touch an injected session
+        // Explicit choice is the only path that may restore a detached/re-pointed record.
         return rebindExisting(store, snap, k, existing, explicitSoulUid);
       }
       return bindFresh(store, k, key, explicitSoulUid);
     }
 
-    // 2. native binding
-    if (existing && existing.state === "bound") return existing;
+    // 2. native binding. A detached record is a user intent: ordinary lifecycle
+    // events must never resurrect it through defaults or a unique Soul.
+    if (existing) return existing.state === "bound" ? existing : null;
 
     // 3-6. tool default -> account default -> unique -> refuse
     const soulUid = await pickSoul(root, snap, key);
@@ -348,7 +354,13 @@ export async function detachBinding(key: NativeSessionKey, opts: LocalOptions = 
       throw new StoreError("not_bound", "no bound session to detach");
     }
     const pred = lastBindingOpId(snap, existing.session_ref);
-    const next: BindingSnapshot = { ...existing, state: "detached", revision: existing.revision + 1 };
+    const next: BindingSnapshot = {
+      ...existing,
+      state: "detached",
+      revision: existing.revision + 1,
+      cloud_revision: existing.cloud_revision ?? existing.revision,
+      unconfirmed: true,
+    };
     const op = bindingOutboxOp(next, "detached", existing.revision, pred ? [pred] : []);
     await store.transact((draft) => {
       draft.bindings[k] = next;
@@ -417,12 +429,8 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
     identity_revision: 1,
     identity,
     state: "active",
-  };
-  const op: OutboxOperation = {
-    operation_id: randomUUID(),
-    operation_kind: "register_soul",
-    request: { soul_uid: soulUid, identity, consent_categories: [] },
-    predecessor_operation_ids: [],
+    origin: "local",
+    local_identity: { ...identity },
   };
   const store = await openStore(root, request.profile_id);
   try {
@@ -430,10 +438,104 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
       if (draft.souls[soulUid]) {
         throw new StoreError("already_exists", `soul ${soulUid} already exists in this profile`);
       }
+      // Local creation is NOT cloud authorization (R2): no register_soul op is
+      // enqueued until the user explicitly authorizes this Soul and categories.
       draft.souls[soulUid] = soul;
-      draft.outbox[op.operation_id] = op;
     });
     return soul;
+  } finally {
+    await store.close();
+  }
+});
+
+const CONSENT_CATEGORIES = ["identity", "relationship", "experience"] as const;
+
+registerWriterCommand("authorize_soul", async ({ root, request }) => {
+  const payload = request.payload;
+  const soulUid = String(payload.soul_uid ?? "");
+  const requested = Array.isArray(payload.categories)
+    ? payload.categories.map(String)
+    : String(payload.categories ?? "identity").split(",").map((value) => value.trim()).filter(Boolean);
+  const categories = [...new Set(requested.filter((value) => (CONSENT_CATEGORIES as readonly string[]).includes(value)))]
+    .sort((a, b) => CONSENT_CATEGORIES.indexOf(a as never) - CONSENT_CATEGORIES.indexOf(b as never)) as string[];
+  if (categories.length === 0 || !categories.includes("identity")) {
+    throw new StoreError("invalid_categories", "identity consent is required when enabling sync");
+  }
+
+  const store = await openStore(root, request.profile_id);
+  try {
+    const snap = await store.read();
+    const soul = snap.souls[soulUid];
+    if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid} in this profile`);
+    const cloudDeviceUid = snap.cloud_device_uid;
+
+    if (soul.legacy_host_id === null) {
+      // First registration carries the explicit categories; the server returns the
+      // Consent for the same device, so no separate empty-category op is needed.
+      const previous = Object.values(snap.outbox).find(
+        (op) => op.operation_kind === "register_soul" && op.request.soul_uid === soulUid,
+      );
+      const operationId = randomUUID();
+      const op: OutboxOperation = {
+        operation_id: operationId,
+        operation_kind: "register_soul",
+        request: { soul_uid: soulUid, identity: soul.identity, consent_categories: categories },
+        predecessor_operation_ids: previous ? [previous.operation_id] : [],
+      };
+      await store.transact((draft) => {
+        if (previous) {
+          delete draft.outbox[previous.operation_id];
+          // The old op may already have been sent under its idempotency key; keep it
+          // in quarantine instead of mutating its body under the same key.
+          draft.quarantine[previous.operation_id] = {
+            operation: previous,
+            reason: "authorization_upgraded",
+          };
+        }
+        draft.outbox[operationId] = op;
+      });
+      return { soul_uid: soulUid, operation: "register_soul", categories };
+    }
+
+    if (!cloudDeviceUid) {
+      throw new StoreError("not_logged_in", "log in before changing cloud consent");
+    }
+    const current = Object.values(snap.consents).find(
+      (consent) => consent.cloud_device_uid === cloudDeviceUid && consent.soul_uid === soulUid,
+    );
+    if (
+      current?.enabled === true &&
+      current.categories.length === categories.length &&
+      current.categories.every((category) => categories.includes(category))
+    ) {
+      return { soul_uid: soulUid, operation: "consent", categories, revision: current.revision };
+    }
+    const operationId = randomUUID();
+    const previousConsentOps = Object.values(snap.outbox).filter(
+      (op) => op.operation_kind === "consent" && op.request.soul_uid === soulUid,
+    );
+    const op: OutboxOperation = {
+      operation_id: operationId,
+      operation_kind: "consent",
+      request: {
+        soul_uid: soulUid,
+        base_revision: current?.revision ?? 0,
+        categories,
+        enabled: true,
+      },
+      predecessor_operation_ids: previousConsentOps.map((previous) => previous.operation_id),
+    };
+    await store.transact((draft) => {
+      for (const previous of previousConsentOps) {
+        delete draft.outbox[previous.operation_id];
+        draft.quarantine[previous.operation_id] = {
+          operation: previous,
+          reason: "authorization_upgraded",
+        };
+      }
+      draft.outbox[operationId] = op;
+    });
+    return { soul_uid: soulUid, operation: "consent", categories };
   } finally {
     await store.close();
   }

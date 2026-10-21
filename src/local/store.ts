@@ -43,6 +43,9 @@ export type SyncState = "local_only" | "pending_sync" | "synced" | "conflict";
 export type LocalAsset = Asset & {
   sync_state: SyncState;
   cloud_revision: number | null;
+  /** Local-only frozen extraction provenance (R6); never sent as a top-level field. */
+  binding_uid?: string | null;
+  binding_revision?: number | null;
 };
 
 export type OutboxOperationKind = "register_soul" | "consent" | "binding" | "asset";

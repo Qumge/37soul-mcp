@@ -457,3 +457,56 @@ test('hook command: assets-mode SessionStart injects the Soul context and record
   assert.equal(receipts[0].binding_uid, 'b1');
   cleanup();
 });
+
+test('hook command: revoked identity never injects the downloaded cloud canary', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = claudePayloads.session_start.session_id;
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(
+    path.join(root, 'profiles', profileId, 'device.json'),
+    `${JSON.stringify({ device_id: deviceId })}\n`,
+    { mode: 0o600 },
+  );
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = '123';
+    d.cloud_device_uid = 'cdu';
+    d.souls['s1'] = {
+      soul_uid: 's1', legacy_host_id: 7, identity_revision: 1,
+      identity: { name: 'OWNER_PRIVATE_IDENTITY_CANARY', description: 'private cloud', character: '', greeting: '' },
+      state: 'active', origin: 'cloud',
+    };
+    d.consents['cdu:s1'] = {
+      cloud_device_uid: 'cdu', soul_uid: 's1', revision: 2, categories: [], enabled: false,
+    };
+    d.bindings[`${profileId}\u0000${deviceId}\u0000claude-code\u0000${sessionId}`] = {
+      binding_uid: 'b1', session_ref: '30000000-0000-4000-8000-000000000001', runtime_kind: 'claude-code',
+      soul_uid: 's1', revision: 1, state: 'bound', profile_id: profileId, device_id: deviceId, native_session_id: sessionId,
+    };
+  });
+  await store.close();
+  writeFileSync(
+    path.join(root, 'accounts.json'),
+    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    { mode: 0o600 },
+  );
+  const writer = await startWriter(root);
+  const io = capture();
+  try {
+    await runHookCommand({
+      home, agentKind: 'claude-code', event: 'SessionStart',
+      fetch: async () => { throw new Error('no brief in assets mode'); },
+      stdin: JSON.stringify({ ...claudePayloads.session_start, source: 'resume' }),
+      stdout: io.stdout, stderr: io.stderr,
+      getGitState: async () => { throw new Error('no git state'); },
+    });
+  } finally {
+    await writer.close();
+  }
+  assert.deepEqual(io.out, [], 'nothing is injected after identity revocation');
+  assert.ok(!io.err.join('').includes('OWNER_PRIVATE_IDENTITY_CANARY'), 'the canary never reaches stderr either');
+  cleanup();
+});

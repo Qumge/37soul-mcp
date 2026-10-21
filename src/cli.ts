@@ -16,7 +16,8 @@ import { fileURLToPath } from "node:url";
 import { createDaemon } from "./agentd/daemon.js";
 import { createExtractAdapters, type NativeInvokerLog } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
-import { emptyState, loadConfig, loadState, saveConfig, saveState } from "./agentd/state.js";
+import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
+import { saveLoginCredentials } from "./agentd/credentials.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
 import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
@@ -58,7 +59,7 @@ export function agentdExtractAdapters(
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
-  37soul install [--agents claude-code,codex] [--plan] [--fallback codex]
+  37soul install [--agents claude-code,codex,opencode,hermes] [--plan] [--fallback codex]
                                                 connect the agents on this machine
   37soul doctor                                  check configuration and credentials
   37soul status                                  show machine, tokens, last uploads
@@ -72,6 +73,8 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul soul list [--profile <id>]              list local Souls
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
   37soul soul edit <uid> [--name <n> ...] [--profile <id>]     edit a local (unregistered) Soul
+  37soul soul authorize <uid> [--categories identity,relationship,experience] [--profile <id>]
+                                                explicitly authorize cloud sync for a Soul
   37soul soul export [--profile <id>]            export the owner-private core identity
   37soul soul review <uid> --approve|--reject [--profile <id>]   approve/reject a pending asset (interactive)
   37soul soul delete <uid> [--profile <id>]      delete an asset (interactive)
@@ -440,6 +443,25 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
     return 0;
   }
 
+  if (sub === "authorize") {
+    const soulUid = args[0];
+    if (!soulUid) {
+      io.stderr("usage: 37soul soul authorize <soul_uid> [--categories identity,relationship,experience]\n");
+      return 2;
+    }
+    const categories = flagValue(args, "--categories") ?? flagValue(args, "--consent") ?? "identity";
+    const res = await runWriterCommand(root, profileId, "authorize_soul", { soul_uid: soulUid, categories });
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
+      return 1;
+    }
+    const result = res.result as { operation?: string; categories?: string[] } | null;
+    io.stdout(
+      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})\n`,
+    );
+    return 0;
+  }
+
   if (sub === "export") {
     const res = await runWriterCommand(root, profileId, "export", {});
     if (!res.ok) {
@@ -654,13 +676,21 @@ export async function loginCommand(
     io.stderr(`${res.error.code}: ${res.error.message}\n`);
     return 1;
   }
-  // Persist the device tokens the login just granted (merged, never replacing the
-  // other agents' tokens) so the local soul sync has an authorized device token to
-  // push/pull with. Tokens are written to config.json only — never the snapshot,
-  // outbox, receipt, error, log or CLI output.
-  const existing = await loadConfig(root);
-  if (existing && login.tokens && Object.keys(login.tokens).length > 0) {
-    await saveConfig(root, { ...existing, tokens: { ...(existing.tokens ?? {}), ...login.tokens } });
+  // Persist the device tokens the login just granted with their owner/cloud-device/
+  // profile/runtime scope. Tokens are written to config.json only — never the
+  // snapshot, outbox, receipt, error, log or CLI output.
+  const adoptedResult = res.result as { profile_id?: unknown; owner_id?: unknown } | null;
+  const adoptedProfileForCredentials =
+    adoptedResult && typeof adoptedResult.profile_id === "string" ? adoptedResult.profile_id : profileId;
+  if (login.owner_id && login.cloud_device_uid && Object.keys(login.tokens).length > 0) {
+    await saveLoginCredentials(root, {
+      apiBaseUrl: deps.apiBase,
+      machineId,
+      profileId: adoptedProfileForCredentials,
+      ownerId: login.owner_id,
+      cloudDeviceUid: login.cloud_device_uid,
+      tokens: login.tokens,
+    });
   }
 
   // "login then first sync": best-effort push/pull of every assets-mode profile.

@@ -289,7 +289,7 @@ test("privacy: native ids, raw prompts and rendered text never reach HTTP", asyn
     // "character may sync" half of the assertion is exercised, not vacuous.
     d.outbox["reg"] = {
       operation_id: "reg", operation_kind: "register_soul",
-      request: { soul_uid: "s1", identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" }, consent_categories: [] },
+      request: { soul_uid: "s1", identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" }, consent_categories: ["identity", "relationship", "experience"] },
       predecessor_operation_ids: [],
     };
     d.outbox["op-1"] = {
@@ -315,7 +315,7 @@ test("privacy: native ids, raw prompts and rendered text never reach HTTP", asyn
         status: 201,
         body: {
           soul: { soul_uid: "s1", legacy_host_id: 7, identity_revision: 1, identity: { name: "Growth", description: "", character: CHARACTER, greeting: "" }, state: "active" },
-          consent: { cloud_device_uid: "cdu", soul_uid: "s1", revision: 0, categories: [], enabled: false },
+          consent: { cloud_device_uid: "cdu", soul_uid: "s1", revision: 1, categories: ["identity", "relationship", "experience"], enabled: true },
         },
       };
     }

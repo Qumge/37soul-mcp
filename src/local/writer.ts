@@ -32,6 +32,7 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 
 export const WRITER_COMMANDS = [
   "create_soul",
+  "authorize_soul",
   "edit_local_identity",
   "bind",
   "detach",

@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import path from "node:path";
 
 import { acquireWriterLock, openStore } from "../dist/local/store.js";
@@ -71,14 +72,39 @@ function seedAccounts(root, entries) {
 function seedConfig(root) {
   writeFileSync(
     path.join(root, "config.json"),
-    `${JSON.stringify({ api_base_url: "https://fake.test", machine_id: "m1", tokens: { "claude-code": "test-token" } })}\n`,
+    `${JSON.stringify({
+      api_base_url: "https://fake.test",
+      machine_id: "m1",
+      tokens: { "claude-code": "test-token" },
+      credentials: [
+        {
+          token: "test-token",
+          owner_id: "owner-1",
+          cloud_device_uid: "cdu-1",
+          runtime_kind: "claude-code",
+          profile_id: "p1",
+          obtained_at: "2026-10-21T00:00:00Z",
+        },
+        {
+          token: "test-token-3",
+          owner_id: "owner-3",
+          cloud_device_uid: "cdu-3",
+          runtime_kind: "claude-code",
+          profile_id: "p3",
+          obtained_at: "2026-10-21T00:00:00Z",
+        },
+      ],
+    })}\n`,
     { mode: 0o600 },
   );
 }
 
-async function seedEmptyStore(root, profileId) {
+async function seedEmptyStore(root, profileId, ownerId = "owner-1", cloudDeviceUid = "cdu-1") {
   const store = await openStore(root, profileId);
-  await store.transact(() => {});
+  await store.transact((draft) => {
+    draft.owner_id = ownerId;
+    draft.cloud_device_uid = cloudDeviceUid;
+  });
   await store.close();
 }
 
@@ -217,7 +243,7 @@ test("C1: runSyncProfiles syncs only assets-mode profiles, sequentially", async 
   });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
-  await seedEmptyStore(root, "p3");
+  await seedEmptyStore(root, "p3", "owner-3", "cdu-3");
 
   const http = fakeHttp();
   configureSyncHttp(http);
@@ -303,5 +329,314 @@ test("sync_once bounds a hung transport with the writer-side timeout (payload ti
     await writer.close();
     configureSyncHttp(null);
   }
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// R1/R3: credentials are scoped to profile/owner/device/runtime
+// ---------------------------------------------------------------------------
+
+function seedScopedConfig(root, entries) {
+  writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify({
+      api_base_url: "https://fake.test",
+      machine_id: "m1",
+      tokens: {},
+      credentials: entries,
+    })}\n`,
+    { mode: 0o600 },
+  );
+}
+
+async function seedOwnedStore(root, profileId, deviceId, ownerId, cloudDeviceUid, change) {
+  seedAssetsProfile(root, profileId, deviceId);
+  const store = await openStore(root, profileId);
+  await store.transact((draft) => {
+    draft.owner_id = ownerId;
+    draft.cloud_device_uid = cloudDeviceUid;
+    change?.(draft);
+  });
+  await store.close();
+}
+
+test("R1: syncing all profiles never sends profile A with profile B's token", async () => {
+  const root = tempDir();
+  await seedOwnedStore(root, "pA", "dev-A", "owner-A", "cdu-A", (d) => {
+    d.souls["soul-A"] = {
+      soul_uid: "soul-A", legacy_host_id: 1, identity_revision: 1,
+      identity: { name: "A", description: "", character: "", greeting: "" }, state: "active",
+    };
+  });
+  await seedOwnedStore(root, "pB", "dev-B", "owner-B", "cdu-B");
+  seedAccounts(root, {
+    "owner-A": { profile_id: "pA", default_soul_uid: "soul-A", soul_sync_mode: "assets_only" },
+    "owner-B": { profile_id: "pB", default_soul_uid: null, soul_sync_mode: "assets_only" },
+  });
+  seedScopedConfig(root, [
+    { token: "token-A", owner_id: "owner-A", cloud_device_uid: "cdu-A", runtime_kind: "hermes", profile_id: "pA", obtained_at: "x" },
+    { token: "token-B", owner_id: "owner-B", cloud_device_uid: "cdu-B", runtime_kind: "hermes", profile_id: "pB", obtained_at: "x" },
+  ]);
+
+  const calls = [];
+  const http = async (url, init = {}) => {
+    const auth = String((init.headers ?? {}).authorization ?? "");
+    calls.push({ url: String(url), auth });
+    if (String(url).includes("/pull")) {
+      const body = auth.includes("token-B")
+        ? { protocol: "soul-assets/v1", events: [{ event_uid: "b-soul", object_type: "soul", object: { soul_uid: "soul-B", legacy_host_id: 2, identity_revision: 1, identity: { name: "B", description: "", character: "", greeting: "" }, state: "active" } }], next_cursor: "cb", has_more: false }
+        : { protocol: "soul-assets/v1", events: [], next_cursor: "ca", has_more: false };
+      return makeResponse(200, body);
+    }
+    return makeResponse(200, EMPTY_PULL);
+  };
+
+  configureSyncHttp(http);
+  try {
+    await runSyncProfiles(root);
+  } finally {
+    configureSyncHttp(null);
+  }
+  const tokens = calls.map((call) => call.auth);
+  assert.ok(tokens.includes("Bearer token-A"));
+  assert.ok(tokens.includes("Bearer token-B"));
+  const aCalls = tokens.slice(0, 1);
+  assert.deepEqual(aCalls, ["Bearer token-A"], "profile A used only its own token");
+  const aStore = await openStore(root, "pA");
+  const aSnap = await aStore.read();
+  await aStore.close();
+  assert.equal(aSnap.souls["soul-B"], undefined, "profile A never received profile B's Soul");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("R3: bindings use the token of their own runtime", async () => {
+  const root = tempDir();
+  const runtimes = ["claude-code", "codex", "opencode", "hermes"];
+  await seedOwnedStore(root, "p1", "dev-1", "owner-1", "cdu-1", (d) => {
+    runtimes.forEach((runtime, index) => {
+      const key = ["p1", "dev-1", runtime, `ns-${index}`].join("\u0000");
+      d.bindings[key] = {
+        binding_uid: `binding-${runtime}`, session_ref: `session-${runtime}`, runtime_kind: runtime,
+        soul_uid: "soul-1", revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1",
+        native_session_id: `ns-${index}`,
+      };
+      d.outbox[`op-${runtime}`] = {
+        operation_id: `op-${runtime}`, operation_kind: "binding",
+        request: { base_revision: 0, session_ref: `session-${runtime}`, runtime_kind: runtime, soul_uid: "soul-1", state: "bound" },
+        predecessor_operation_ids: [],
+      };
+      d.assets[`asset-${runtime}`] = {
+        asset_uid: `asset-${runtime}`, soul_uid: "soul-1", kind: "relationship", trait: "preference",
+        content: `fact from ${runtime}`, applicability: "", tags: [], evidence: "explicit_user_statement",
+        verification: "unverified", sensitivity: "normal", state: "active", revision: 1,
+        supersedes_uid: null, pinned: false,
+        source: { runtime_kind: runtime, session_ref: `session-${runtime}`, event_ref: `e-${runtime}`, occurred_at: "2026-10-20T04:00:00Z" },
+        sync_state: "pending_sync", cloud_revision: null,
+      };
+      d.outbox[`asset-op-${runtime}`] = {
+        operation_id: `asset-op-${runtime}`, operation_kind: "asset",
+        request: {
+          change_id: `asset-${runtime}`, operation: "propose", soul_uid: "soul-1",
+          asset_uid: `asset-${runtime}`, base_revision: 0, actor: "model",
+          binding_uid: `binding-${runtime}`, binding_revision: 1,
+          payload: {
+            kind: "relationship", trait: "preference", content: `fact from ${runtime}`,
+            applicability: "", tags: [], evidence: "explicit_user_statement",
+            verification: "unverified", sensitivity: "normal",
+            source: { runtime_kind: runtime, session_ref: `session-${runtime}`, event_ref: `e-${runtime}`, occurred_at: "2026-10-20T04:00:00Z" },
+          },
+        },
+        predecessor_operation_ids: [],
+      };
+    });
+  });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  seedScopedConfig(root, runtimes.map((runtime) => ({
+    token: `token-${runtime}`, owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    runtime_kind: runtime, profile_id: "p1", obtained_at: "x",
+  })));
+
+  const seen = [];
+  const seenAssets = [];
+  const http = async (url, init = {}) => {
+    const p = new URL(String(url)).pathname;
+    if (init.method === "PUT" && p.includes("/bindings/")) {
+      const runtime = JSON.parse(String(init.body)).runtime_kind;
+      seen.push({ runtime, auth: String((init.headers ?? {}).authorization ?? "") });
+      return makeResponse(200, { protocol: "soul-assets/v1", binding: JSON.parse(String(init.body)) });
+    }
+    if (init.method === "POST" && p.endsWith("/push")) {
+      const changes = JSON.parse(String(init.body)).changes;
+      for (const change of changes) {
+        seenAssets.push({ runtime: change.payload.source.runtime_kind, auth: String((init.headers ?? {}).authorization ?? "") });
+      }
+      return makeResponse(200, {
+        protocol: "soul-assets/v1",
+        results: changes.map((change) => ({
+          change_id: change.change_id,
+          status: "accepted",
+          applied_revisions: [{ object_uid: change.asset_uid, revision: 1 }],
+          objects: [{
+            object_type: "asset",
+            object: {
+              asset_uid: change.asset_uid, soul_uid: change.soul_uid, kind: "relationship",
+              trait: "preference", content: change.payload.content, applicability: "", tags: [],
+              evidence: "explicit_user_statement", verification: "unverified", sensitivity: "normal",
+              state: "active", revision: 1, supersedes_uid: null, pinned: false,
+              source: change.payload.source,
+            },
+          }],
+          error: null,
+        })),
+      });
+    }
+    return makeResponse(200, EMPTY_PULL);
+  };
+  configureSyncHttp(http);
+  try {
+    await runSync(root, "p1");
+  } finally {
+    configureSyncHttp(null);
+  }
+  assert.equal(seen.length, 4, "all four binding changes were sent");
+  for (const entry of seen) {
+    assert.equal(entry.auth, `Bearer token-${entry.runtime}`, `${entry.runtime} used its own token`);
+  }
+  assert.equal(seenAssets.length, 4, "all four runtime assets were pushed");
+  for (const entry of seenAssets) {
+    assert.equal(entry.auth, `Bearer token-${entry.runtime}`, `${entry.runtime} asset used its own token`);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+
+// R5: a server that flushes headers and then stalls the body must still hit the
+// writer-side deadline, release the writer, and let the next command run.
+test("R5: headers-then-stalled-body is bounded and the writer recovers", async () => {
+  const root = tempDir();
+  await seedOwnedStore(root, "p1", "dev-1", "owner-1", "cdu-1", (d) => {
+    d.bindings[["p1", "dev-1", "claude-code", "ns-1"].join("\u0000")] = {
+      binding_uid: "binding-1", session_ref: "session-1", runtime_kind: "claude-code",
+      soul_uid: "soul-1", revision: 1, state: "bound", profile_id: "p1",
+      device_id: "dev-1", native_session_id: "ns-1",
+    };
+    d.outbox["binding-op"] = {
+      operation_id: "binding-op",
+      operation_kind: "binding",
+      request: { base_revision: 0, session_ref: "session-1", runtime_kind: "claude-code", soul_uid: "soul-1", state: "bound" },
+      predecessor_operation_ids: [],
+    };
+  });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  seedScopedConfig(root, [{
+    token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    runtime_kind: "claude-code", profile_id: "p1", obtained_at: "x",
+  }]);
+
+  let stalled = false;
+  const server = createServer((req, res) => {
+    if (!req.url?.includes("/pull")) {
+      stalled = true;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"protocol":"soul-assets/v1","results":');
+      // Deliberately never end the body.
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(EMPTY_PULL));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  const previousBase = process.env.SOUL37_BASE_URL;
+  // The writer resolves the base URL from config; rewrite it to the local server.
+  writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify({
+      api_base_url: `http://127.0.0.1:${port}`,
+      machine_id: "m1",
+      tokens: {},
+      credentials: [{
+        token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+        runtime_kind: "claude-code", profile_id: "p1", obtained_at: "x",
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  configureSyncHttp(globalThis.fetch);
+  const writer = await startWriter(root);
+  try {
+    const started = Date.now();
+    let sentinelTimer;
+    const sentinel = new Promise((resolve) => {
+      sentinelTimer = setTimeout(() => resolve("test-timeout"), 10_000);
+    });
+    const res = await Promise.race([
+      sendWriter(root, {
+        request_uid: "r-stall",
+        profile_id: "p1",
+        command: "sync_once",
+        payload: { timeout_ms: 1_000 },
+      }),
+      sentinel,
+    ]);
+    clearTimeout(sentinelTimer);
+    const elapsed = Date.now() - started;
+    assert.notEqual(res, "test-timeout", "sync_once must not hang on a stalled body");
+    assert.equal(res.ok, true, `writer answered: ${JSON.stringify(res)}`);
+    assert.ok(stalled, "the server actually stalled after the headers");
+    assert.ok(elapsed < 6_000, `bounded wall-clock time: ${elapsed}ms`);
+    const next = await sendWriter(root, {
+      request_uid: "r-after-stall",
+      profile_id: "p1",
+      command: "status",
+      payload: {},
+    });
+    assert.equal(next.ok, true, `the writer accepts the next command after the timeout: ${JSON.stringify(next)}`);
+  } finally {
+    // A failed regression (timer cleared at headers) must not hang the suite:
+    // destroy the stalled socket and bound the writer close.
+    server.closeAllConnections?.();
+    await Promise.race([
+      writer.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    configureSyncHttp(null);
+    await new Promise((resolve) => server.close(resolve));
+    if (previousBase === undefined) delete process.env.SOUL37_BASE_URL;
+    else process.env.SOUL37_BASE_URL = previousBase;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R1: a legacy global token is not guessed into a scoped profile", async () => {
+  const root = tempDir();
+  await seedOwnedStore(root, "p1", "dev-1", "owner-1", "cdu-1", (d) => {
+    d.souls["soul-1"] = {
+      soul_uid: "soul-1", legacy_host_id: 1, identity_revision: 1,
+      identity: { name: "A", description: "", character: "", greeting: "" }, state: "active",
+    };
+  });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify({ api_base_url: "https://fake.test", machine_id: "m1", tokens: { "claude-code": "legacy-unbound" } })}\n`,
+    { mode: 0o600 },
+  );
+  let calls = 0;
+  const http = async () => { calls += 1; return makeResponse(200, EMPTY_PULL); };
+  configureSyncHttp(http);
+  try {
+    const report = await runSync(root, "p1");
+    assert.equal(report.error, "no authorized device token");
+    assert.equal(calls, 0, "an unbound legacy token never reaches the network");
+  } finally {
+    configureSyncHttp(null);
+  }
+  const snap = await openStore(root, "p1");
+  const stored = await snap.read();
+  await snap.close();
+  assert.ok(stored.souls["soul-1"], "the local Soul is retained for an explicit re-login");
   rmSync(root, { recursive: true, force: true });
 });

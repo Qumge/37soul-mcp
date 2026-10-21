@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BindingSnapshot, HttpFetch, ProfileId } from "../adapters/types.js";
 import { loadConfig } from "../agentd/state.js";
+import { clearDeviceCredentials, credentialForRuntime, selectCredentials, type StoredCredential } from "../agentd/credentials.js";
 import {
   ASSET_TOMBSTONE_STATES,
   contentDigest,
@@ -27,6 +28,7 @@ import {
   type ContextInput,
   type PullPage,
   type PushResult,
+  RUNTIME_KINDS,
   type Soul,
   type WrappedObject,
 } from "../assets/protocol.js";
@@ -71,7 +73,21 @@ export interface SyncOptions {
 const ROUTES = "/api/v1/me/soul_sync";
 const DEFAULT_BASE_URL = "https://37soul.com";
 
-type SyncAuth = { token: string; baseUrl: string; backoff: Required<SyncBackoff> };
+type SyncAuth = {
+  root: string;
+  baseUrl: string;
+  backoff: Required<SyncBackoff>;
+  credentials: StoredCredential[];
+  defaultToken: string;
+};
+
+function tokenForRuntime(auth: SyncAuth, runtimeKind: string | null | undefined): string | null {
+  const exact = credentialForRuntime(auth.credentials, runtimeKind);
+  if (exact) return exact.token;
+  // Test/compat override: options.token is an explicit wildcard supplied by the
+  // caller, never a guessed global config token.
+  return auth.credentials.find((credential) => credential.runtime_kind === "*")?.token ?? null;
+}
 
 interface JsonResponse {
   status: number;
@@ -151,6 +167,8 @@ async function fetchWithBackoff(
     if (isRetryableStatus(response.status)) {
       attempt += 1;
       if (attempt > auth.backoff.maxRetries) return response;
+      // Release the body (and the wrapper's timeout) before retrying.
+      await response.body?.cancel().catch(() => {});
       await auth.backoff.sleep(backoffDelayMs(attempt, parseRetryAfter(response), auth.backoff));
       continue;
     }
@@ -186,15 +204,36 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
   const root = resolveRoot(options.root);
   const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
   const config = await loadConfig(root).catch(() => null);
-  const token = options.token ?? firstToken(config?.tokens);
   const baseUrl = (options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-  if (!token) {
-    return { accepted: 0, conflicts: 0, pending: 0, error: "no authorized device token" };
-  }
-  const auth: SyncAuth = { token, baseUrl, backoff: { ...defaultBackoff(), ...(options.backoff ?? {}) } };
   const store = await openStore(root, profileId, { fs });
   const report: SyncReport = { accepted: 0, conflicts: 0, pending: 0 };
   try {
+    const snap = await store.read();
+    // Credentials are scoped to this exact profile + owner + cloud device. The
+    // legacy config.tokens map is intentionally not a fallback: it cannot prove
+    // ownership, and using it is how account A used to pull account B's Soul.
+    const credentials: StoredCredential[] = options.token
+      ? [{
+          token: options.token,
+          owner_id: snap.owner_id ?? "",
+          cloud_device_uid: snap.cloud_device_uid ?? "",
+          runtime_kind: "*",
+          profile_id: profileId,
+          obtained_at: "",
+        }]
+      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid);
+    if (credentials.length === 0) {
+      report.pending = pendingCount(snap);
+      report.error = "no authorized device token";
+      return report;
+    }
+    const auth: SyncAuth = {
+      root,
+      baseUrl,
+      backoff: { ...defaultBackoff(), ...(options.backoff ?? {}) },
+      credentials,
+      defaultToken: credentials[0].token,
+    };
     const pushError = await pushOutbox(store, http, auth, options, report);
     if (pushError) {
       report.error = pushError;
@@ -216,14 +255,6 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
   } finally {
     await store.close();
   }
-}
-
-function firstToken(tokens: Record<string, string> | undefined): string | null {
-  if (!tokens) return null;
-  for (const value of Object.values(tokens)) {
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return null;
 }
 
 function pendingCount(snap: StoreSnapshot): number {
@@ -260,14 +291,42 @@ async function pushOutbox(
   }
 
   // Asset changes are batched (§5) after the control operations are drained.
+  // Group by the runtime that produced the asset so a Claude Code token is never
+  // used to replay a Codex/OpenCode/Hermes proposal (Rails checks token runtime).
   snap = await store.read();
   const assetOps = orderOutboxOps(Object.values(snap.outbox)).filter((op) => op.operation_kind === "asset");
-  for (const batch of batchAssetOps(assetOps)) {
-    const current = await store.read();
-    const live = batch.filter((op) => current.outbox[op.operation_id]);
-    if (live.length === 0) continue;
-    const outcome = await pushAssetBatch(store, http, auth, report, live);
-    if (outcome) return outcome;
+  const groups = new Map<string | null, OutboxOperation[]>();
+  for (const op of assetOps) {
+    const runtime = assetRuntime(snap, op);
+    const list = groups.get(runtime) ?? [];
+    list.push(op);
+    groups.set(runtime, list);
+  }
+  for (const [runtime, ops] of groups) {
+    const token = runtime ? tokenForRuntime(auth, runtime) : auth.defaultToken;
+    if (!token) return "credential_unavailable";
+    for (const batch of batchAssetOps(ops)) {
+      const current = await store.read();
+      const live = batch.filter((op) => current.outbox[op.operation_id]);
+      if (live.length === 0) continue;
+      const outcome = await pushAssetBatch(store, http, auth, report, live, token);
+      if (outcome) return outcome;
+    }
+  }
+  return null;
+}
+
+/** The runtime that produced an asset op: source metadata first, binding fallback. */
+function assetRuntime(snap: StoreSnapshot, op: OutboxOperation): string | null {
+  const payload = op.request.payload as { source?: { runtime_kind?: unknown } } | undefined;
+  const sourceRuntime = payload?.source?.runtime_kind;
+  if (typeof sourceRuntime === "string" && (RUNTIME_KINDS as readonly string[]).includes(sourceRuntime)) {
+    return sourceRuntime;
+  }
+  const bindingUid = op.request.binding_uid;
+  if (typeof bindingUid === "string") {
+    const binding = Object.values(snap.bindings).find((candidate) => candidate.binding_uid === bindingUid);
+    if (binding) return binding.runtime_kind;
   }
   return null;
 }
@@ -281,7 +340,14 @@ async function pushOne(
   op: OutboxOperation,
   snap: StoreSnapshot,
 ): Promise<string | null> {
-  const headers = authHeaders(auth.token);
+  let token = auth.defaultToken;
+  if (op.operation_kind === "binding") {
+    const runtimeKind = String(op.request.runtime_kind ?? "");
+    const scoped = tokenForRuntime(auth, runtimeKind);
+    if (!scoped) return "credential_unavailable";
+    token = scoped;
+  }
+  const headers = authHeaders(token);
   switch (op.operation_kind) {
     case "register_soul": {
       const res = await requestJson(http, `${auth.baseUrl}${ROUTES}/souls`, {
@@ -289,7 +355,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(op.request),
       }, auth);
-      return handleRegisterSoul(store, snap, op, res, report);
+      return handleRegisterSoul(store, snap, op, res, report, auth.root);
     }
     case "consent": {
       const soulUid = String(op.request.soul_uid ?? "");
@@ -298,7 +364,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(consentBody(op.request)),
       }, auth);
-      return handleConsent(store, snap, op, res, report);
+      return handleConsent(store, snap, op, res, report, auth.root);
     }
     case "binding": {
       const binding = resolveBindingBySessionRef(snap, String(op.request.session_ref ?? ""));
@@ -314,7 +380,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(op.request),
       }, auth);
-      return handleBinding(store, snap, op, res, report);
+      return handleBinding(store, snap, op, res, report, auth.root);
     }
     case "asset":
       // Collected and batched below; never sent here.
@@ -342,6 +408,7 @@ async function handleRegisterSoul(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
+  root: string,
 ): Promise<string | null> {
   const soulUid = String(op.request.soul_uid ?? "");
   if (res.status === 200 || res.status === 201) {
@@ -349,7 +416,16 @@ async function handleRegisterSoul(
     await store.transact((draft) => {
       delete draft.outbox[op.operation_id];
       if (body?.soul) {
-        draft.souls[soulUid] = { ...draft.souls[soulUid], ...body.soul };
+        const previous = draft.souls[soulUid];
+        draft.souls[soulUid] = {
+          ...previous,
+          ...body.soul,
+          // A locally created Soul keeps its local original identity even after the
+          // server confirms/updates it.
+          ...(previous?.origin === "local"
+            ? { origin: "local" as const, local_identity: previous.local_identity ?? previous.identity }
+            : { origin: "cloud" as const }),
+        };
       }
       if (body?.consent) {
         const key = consentKey(body.consent.cloud_device_uid, body.consent.soul_uid);
@@ -375,7 +451,13 @@ async function handleRegisterSoul(
   if (res.status === 404) {
     return quarantineOp(store, op, "not_found", report, null);
   }
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
+  if (res.status === 422) {
+    // Old snapshots enqueued register_soul with consent_categories:[] before the
+    // explicit authorization entry existed. Park it with a clear reason; the user
+    // can re-run `37soul soul authorize` with a fresh operation/change id.
+    return quarantineOp(store, op, "authorization_required", report, null);
+  }
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
   return fatalFromStatus(res);
 }
 
@@ -385,6 +467,7 @@ async function handleConsent(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
+  root: string,
 ): Promise<string | null> {
   if (res.status === 200 || res.status === 201) {
     const body = res.body as { consent?: Consent; replay_from?: string } | null;
@@ -400,8 +483,8 @@ async function handleConsent(
         if (revisionIncreased || (body.replay_from !== undefined && previous === undefined)) {
           draft.pull_cursor = "0";
         }
-        const narrowed = previous !== undefined && removedCategories(previous, body.consent).length > 0;
-        if (narrowed) revokeConsentLocal(draft, body.consent);
+        const removed = removedCategoriesOrAll(previous, body.consent);
+        if (removed.length > 0) revokeConsentLocal(draft, body.consent, removed);
         // Enqueue only when the consent actually moved state forward; a same-revision
         // replay must not re-enqueue an asset of a now-revoked category.
         if (revisionIncreased || previous === undefined) {
@@ -414,7 +497,10 @@ async function handleConsent(
     return null;
   }
   if (res.status === 409) return quarantineOp(store, op, stopCode(res.body).code, report, null);
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
+  if (res.status === 422) {
+    return quarantineOp(store, op, "authorization_required", report, null);
+  }
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
   return fatalFromStatus(res);
 }
 
@@ -424,6 +510,7 @@ async function handleBinding(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
+  root: string,
 ): Promise<string | null> {
   if (res.status === 200 || res.status === 201) {
     const body = res.body as { binding?: Binding } | null;
@@ -436,18 +523,32 @@ async function handleBinding(
     return null;
   }
   if (res.status === 409) return quarantineOp(store, op, stopCode(res.body).code, report, null);
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
   return fatalFromStatus(res);
 }
 
 /** 401 device_revoked clears downloaded cloud cache; other fatal statuses stop the run. */
-async function handleRevokedOrRejected(store: LocalStore, snap: StoreSnapshot, res: JsonResponse): Promise<string | null> {
+async function handleRevokedOrRejected(
+  store: LocalStore,
+  snap: StoreSnapshot,
+  res: JsonResponse,
+  root: string,
+): Promise<string | null> {
   const { code } = stopCode(res.body);
   if (code === "device_revoked") {
-    await store.transact((draft) => clearCloudCache(draft));
+    await store.transact((draft) => clearCloudCache(draft, { revokeDevice: true }));
+    await clearDeviceCredentials(root, snap.owner_id, snap.cloud_device_uid);
     return "device_revoked";
   }
-  if (code === "token_invalid") return "token_invalid";
+  if (code === "token_invalid") {
+    // A revoked/expired token is not usable for cloud access. Treat it like device
+    // revocation: drop downloaded private cache and the scoped credentials, keep
+    // local originals, and require a fresh login. (Rails currently reports a revoked
+    // device as token_invalid because the PAT lookup happens first.)
+    await store.transact((draft) => clearCloudCache(draft, { revokeDevice: true }));
+    await clearDeviceCredentials(root, snap.owner_id, snap.cloud_device_uid);
+    return "token_invalid";
+  }
   return code;
 }
 
@@ -463,18 +564,19 @@ async function pushAssetBatch(
   auth: SyncAuth,
   report: SyncReport,
   ops: OutboxOperation[],
+  token: string,
 ): Promise<string | null> {
   const changes = ops.map((op) => op.request);
   const res = await requestJson(http, `${auth.baseUrl}${ROUTES}/push`, {
     method: "POST",
-    headers: authHeaders(auth.token),
+    headers: authHeaders(token),
     body: JSON.stringify({ protocol: "soul-assets/v1", changes }),
   }, auth);
 
   if (res.status !== 200) {
     if (res.status === 401) {
       const snap = await store.read();
-      return handleRevokedOrRejected(store, snap, res);
+      return handleRevokedOrRejected(store, snap, res, auth.root);
     }
     if (res.status === 409) {
       // Whole-request idempotency mismatch: park every change in this batch.
@@ -675,7 +777,7 @@ async function pullLoop(
     const cursor = snap.pull_cursor ?? "0";
     const res = await requestJson(http, `${auth.baseUrl}${ROUTES}/pull?cursor=${encodeURIComponent(cursor)}&limit=${limit}`, {
       method: "GET",
-      headers: authHeaders(auth.token),
+      headers: authHeaders(auth.defaultToken),
     }, auth);
 
     if (res.status === 200) {
@@ -695,7 +797,7 @@ async function pullLoop(
       });
       continue;
     }
-    if (res.status === 401) return handleRevokedOrRejected(store, snap, res);
+    if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth.root);
     return fatalFromStatus(res);
   }
   return null;
@@ -715,7 +817,7 @@ export async function applyPullPage(store: LocalStore, page: PullPage): Promise<
         const consent = event.object as unknown as Consent;
         const outcome = applyConsentEvent(draft, consent);
         if (outcome.reset) consentReset = true;
-        if (outcome.revoked) revokeConsentLocal(draft, consent);
+        if (outcome.removed.length > 0) revokeConsentLocal(draft, consent, outcome.removed);
         // Only a consent that actually moved state forward (new revision or first
         // sight) rescues still-valid local_only assets. A stale/no-op replay must
         // not re-enqueue an asset of a now-revoked category.
@@ -733,6 +835,12 @@ export async function applyPullPage(store: LocalStore, page: PullPage): Promise<
   });
 }
 
+/** Old snapshots predate `origin`: an unregistered Soul (no legacy_host_id) is local. */
+function isLocalSoul(soul: Soul | undefined): boolean {
+  if (!soul) return false;
+  return soul.origin === "local" || (soul.origin === undefined && soul.legacy_host_id === null);
+}
+
 function consentKey(cloudDeviceUid: string, soulUid: string): string {
   return `${cloudDeviceUid}:${soulUid}`;
 }
@@ -742,6 +850,12 @@ function removedCategories(previous: Consent, next: Consent): string[] {
   if (!next.enabled) return [...previous.categories];
   const nextSet = new Set(next.categories);
   return previous.categories.filter((category) => !nextSet.has(category));
+}
+
+/** First-sight disabled consent must clear any pre-existing cloud cache too. */
+function removedCategoriesOrAll(previous: Consent | undefined, next: Consent): string[] {
+  if (previous) return removedCategories(previous, next);
+  return next.enabled ? [] : ["identity", "relationship", "experience"];
 }
 
 /** Categories the current device is authorized to sync for a Soul (empty when none). */
@@ -784,70 +898,114 @@ function enqueueAuthorizedLocalAssets(draft: StoreSnapshot, consent: Consent): v
       }
     }
   }
-  for (const [uid, asset] of Object.entries(draft.assets)) {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const asset of Object.values(draft.assets)) {
     if (asset.soul_uid !== consent.soul_uid) continue;
+    // The change_id must be a UUID; legacy non-UUID local ids stay local_only.
+    if (!UUID_RE.test(asset.asset_uid)) continue;
     if (asset.sync_state !== "local_only") continue;
-    if (asset.state !== "active") continue;
+    if (asset.state !== "active" && asset.state !== "candidate") continue;
     if (!authorized.has(asset.kind)) continue;
     const digest = typeof asset.content_digest === "string" && asset.content_digest
       ? asset.content_digest
       : contentDigest(asset.content);
     if (dismissed.has(digest)) continue;
-    const operationId = `${asset.asset_uid}:rev${asset.revision}`;
+
+    // R6: a re-authorized asset keeps the binding it was extracted under. A new
+    // default Soul/binding must never revive an old proposal, and actor=owner is
+    // not an acceptable shortcut around the model-binding check.
+    const binding = asset.binding_uid
+      ? Object.values(draft.bindings).find((candidate) => candidate.binding_uid === asset.binding_uid)
+      : undefined;
+    const validBinding =
+      binding !== undefined &&
+      binding.soul_uid === asset.soul_uid &&
+      binding.state === "bound" &&
+      binding.revision === asset.binding_revision;
+    const op = localAssetProposeOp(asset, validBinding ? binding : null);
+    if (!validBinding) {
+      asset.sync_state = "conflict";
+      draft.quarantine[`local-binding:${asset.asset_uid}`] = {
+        operation: op,
+        reason: "binding_stale",
+      };
+      continue;
+    }
     asset.sync_state = "pending_sync";
-    draft.outbox[operationId] = {
-      operation_id: operationId,
-      operation_kind: "asset",
-      request: {
-        change_id: operationId,
-        operation: "propose",
-        soul_uid: asset.soul_uid,
-        asset_uid: asset.asset_uid,
-        base_revision: 0,
-        actor: "model",
-        binding_uid: null,
-        binding_revision: null,
-        payload: {
-          kind: asset.kind,
-          trait: asset.trait,
-          content: asset.content,
-          applicability: asset.applicability,
-          tags: asset.tags,
-          evidence: asset.evidence,
-          verification: asset.verification,
-          sensitivity: asset.sensitivity,
-          source: asset.source,
-        },
-      },
-      predecessor_operation_ids: [],
-    };
+    draft.outbox[op.operation_id] = op;
   }
+}
+
+/** Build a propose op with a stable UUID change_id and the frozen binding provenance. */
+function localAssetProposeOp(
+  asset: LocalAsset,
+  binding: BindingSnapshot | null,
+): OutboxOperation {
+  return {
+    // The asset UUID is stable across re-authorization, already a UUID, and unique.
+    operation_id: asset.asset_uid,
+    operation_kind: "asset",
+    request: {
+      change_id: asset.asset_uid,
+      operation: "propose",
+      soul_uid: asset.soul_uid,
+      asset_uid: asset.asset_uid,
+      base_revision: 0,
+      actor: "model",
+      binding_uid: binding?.binding_uid ?? asset.binding_uid ?? null,
+      binding_revision: binding?.revision ?? asset.binding_revision ?? null,
+      payload: {
+        kind: asset.kind,
+        trait: asset.trait,
+        content: asset.content,
+        applicability: asset.applicability,
+        tags: asset.tags,
+        evidence: asset.evidence,
+        verification: asset.verification,
+        sensitivity: asset.sensitivity,
+        source: asset.source,
+      },
+    },
+    predecessor_operation_ids: [],
+  };
 }
 
 interface ConsentOutcome {
   reset: boolean;
-  revoked: boolean;
+  removed: string[];
 }
 
 /** Returns reset=true when the revision strictly increased (cursor reset once);
  *  revoked=true when a known Consent narrowed (disabled or a category removed). */
 function applyConsentEvent(draft: StoreSnapshot, consent: Consent): ConsentOutcome {
-  if (!consent?.cloud_device_uid || !consent?.soul_uid) return { reset: false, revoked: false };
+  if (!consent?.cloud_device_uid || !consent?.soul_uid) return { reset: false, removed: [] };
   const key = consentKey(consent.cloud_device_uid, consent.soul_uid);
   const previous = draft.consents[key];
-  if (previous && consent.revision <= previous.revision) return { reset: false, revoked: false };
+  if (previous && consent.revision <= previous.revision) return { reset: false, removed: [] };
   draft.consents[key] = consent;
   const reset = (previous?.revision ?? 0) < consent.revision;
-  const revoked = previous !== undefined && removedCategories(previous, consent).length > 0;
-  return { reset, revoked };
+  const removed = removedCategoriesOrAll(previous, consent);
+  return { reset, removed };
 }
 
 /** Consent narrowed: drop the Soul's cloud-confirmed cache of the removed categories,
  *  keep local originals, and park only the pending asset sends whose category is no
  *  longer authorized (§2.4 / consent_control_event). */
-function revokeConsentLocal(draft: StoreSnapshot, consent: Consent): void {
+function revokeConsentLocal(draft: StoreSnapshot, consent: Consent, removed: string[]): void {
   const soulUid = consent.soul_uid;
   const authorized = consent.enabled ? new Set(consent.categories) : new Set<string>();
+  if (removed.includes("identity")) {
+    const soul = draft.souls[soulUid];
+    if (soul) {
+      if (isLocalSoul(soul)) {
+        // Local original survives; its cloud identity is no longer injected.
+        soul.identity = { ...(soul.local_identity ?? soul.identity) };
+        soul.identity_revision = 1;
+      } else {
+        delete draft.souls[soulUid];
+      }
+    }
+  }
   for (const [uid, asset] of Object.entries(draft.assets)) {
     if (asset.soul_uid !== soulUid) continue;
     if (asset.sync_state === "synced" && !authorized.has(asset.kind)) delete draft.assets[uid];
@@ -871,12 +1029,15 @@ function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
   if (!soul?.soul_uid) return;
   const previous = draft.souls[soul.soul_uid];
   if (previous && previous.identity_revision >= soul.identity_revision) return;
+  const local = isLocalSoul(previous);
   draft.souls[soul.soul_uid] = {
     soul_uid: soul.soul_uid,
     legacy_host_id: soul.legacy_host_id ?? null,
     identity_revision: soul.identity_revision,
     identity: { ...soul.identity },
     state: "active",
+    origin: local ? "local" : "cloud",
+    ...(local ? { local_identity: previous?.local_identity ?? previous?.identity } : {}),
   };
 }
 
@@ -885,8 +1046,24 @@ function applyBindingRecord(draft: StoreSnapshot, binding: Binding): void {
   for (const key of Object.keys(draft.bindings)) {
     const existing = draft.bindings[key];
     if (existing.binding_uid !== binding.binding_uid) continue;
-    if (existing.revision >= binding.revision) return;
-    draft.bindings[key] = { ...existing, ...binding };
+    // Compare against the last server-confirmed revision, not the local optimistic
+    // revision. A local rev2 unconfirmed switch and a cloud rev2 detach are equal
+    // revisions but the cloud record must win (the local edit stays in quarantine).
+    if (existing.cloud_revision == null && existing.unconfirmed == null) {
+      // Legacy snapshot: no confirmed/local split is recorded. Refuse a downgrade,
+      // but let an equal/higher cloud record win so a server-side detach is honored.
+      if (binding.revision < existing.revision) return;
+    } else {
+      const confirmedRevision = existing.cloud_revision ?? existing.revision;
+      if (binding.revision < confirmedRevision) return;
+      if (binding.revision === confirmedRevision && existing.unconfirmed !== true) return;
+    }
+    draft.bindings[key] = {
+      ...existing,
+      ...binding,
+      cloud_revision: binding.revision,
+      unconfirmed: false,
+    };
     return;
   }
   // A binding this device does not hold locally: control events are device-scoped,
@@ -957,12 +1134,50 @@ function upsertTombstone(draft: StoreSnapshot, soulUid: string, tombstone: Asset
   draft.digest_tombstones[soulUid] = list;
 }
 
-/** Remove only the cloud-confirmed cache: synced assets + digest tombstones (§9). */
-export function clearCloudCache(draft: StoreSnapshot): void {
+/**
+ * Remove only the cloud-confirmed cache (§9): synced assets, tombstones, cloud-origin
+ * Souls, device Consents and bindings. Local originals and local_only assets stay.
+ * Pending outbound operations for this revoked device are parked in quarantine so a
+ * background retry can never reuse the revoked credentials.
+ */
+export function clearCloudCache(draft: StoreSnapshot, options: { revokeDevice?: boolean } = {}): void {
   for (const [uid, asset] of Object.entries(draft.assets)) {
     if (asset.sync_state === "synced") delete draft.assets[uid];
   }
   draft.digest_tombstones = {};
+  if (options.revokeDevice !== true) return;
+  for (const [uid, soul] of Object.entries(draft.souls)) {
+    if (isLocalSoul(soul)) {
+      soul.identity = { ...(soul.local_identity ?? soul.identity) };
+      soul.identity_revision = 1;
+    } else {
+      delete draft.souls[uid];
+    }
+  }
+  for (const [key, consent] of Object.entries(draft.consents)) {
+    if (consent.cloud_device_uid === draft.cloud_device_uid) {
+      draft.consents[key] = { ...consent, enabled: false, categories: [] };
+    }
+  }
+  for (const [key, binding] of Object.entries(draft.bindings)) {
+    if (binding.device_id !== draft.device_id) continue;
+    if (binding.state === "bound") {
+      draft.bindings[key] = {
+        ...binding,
+        state: "detached",
+        revision: binding.revision + 1,
+        cloud_revision: binding.cloud_revision ?? binding.revision,
+        unconfirmed: false,
+      };
+    }
+  }
+  for (const [opId, op] of Object.entries(draft.outbox)) {
+    if (op.operation_kind === "asset" || op.operation_kind === "consent" || op.operation_kind === "binding") {
+      delete draft.outbox[opId];
+      draft.quarantine[opId] = { operation: op, reason: "device_revoked" };
+    }
+  }
+  draft.pull_cursor = null;
 }
 
 // --- receipts ----------------------------------------------------------------------
@@ -1176,27 +1391,57 @@ export function ownerContextInput(
   budgetBytes?: number,
 ): ContextInput {
   const soul = snap.souls[soulUid];
-  // Inject only the Soul's assets whose category the current device is still
-  // authorized to sync — narrowed consent must never resurface removed-category
-  // assets in the injected context.
   const authorized = authorizedCategories(snap, soulUid);
+  const identityAuthorized = authorized.has("identity");
+  const hasConsentRecord = Object.values(snap.consents).some((consent) => consent.soul_uid === soulUid);
+  let contextSoul: Soul;
+  if (identityAuthorized) {
+    if (!soul) throw new StoreError("identity_not_authorized", `no authorized soul ${soulUid}`);
+    contextSoul = soul;
+  } else if (isLocalSoul(soul) && soul) {
+    // Anonymous/local original still works offline; a downloaded cloud identity does not.
+    contextSoul = {
+      ...soul,
+      identity: { ...(soul.local_identity ?? soul.identity) },
+      identity_revision: soul.local_identity ? 1 : soul.identity_revision,
+    };
+  } else {
+    throw new StoreError("identity_not_authorized", `identity consent is not active for ${soulUid}`);
+  }
+
+  const localFallback = !hasConsentRecord || isLocalSoul(contextSoul);
+  const mayUse = (kind: string, syncState?: string): boolean => {
+    if (authorized.has(kind)) return true;
+    return localFallback && (syncState === "local_only" || syncState === "conflict");
+  };
+
   const assets: (Asset | AssetTombstone)[] = [];
   for (const asset of Object.values(snap.assets)) {
-    if (asset.soul_uid === soulUid && authorized.has(asset.kind)) assets.push(asset);
+    if (asset.soul_uid !== soulUid) continue;
+    if (!mayUse(asset.kind, asset.sync_state)) continue;
+    assets.push(asset);
   }
   for (const list of Object.values(snap.digest_tombstones)) {
     for (const tombstone of list) {
-      if (tombstone.soul_uid === soulUid && authorized.has(tombstone.kind)) assets.push(tombstone);
+      if (tombstone.soul_uid !== soulUid) continue;
+      if (!authorized.has(tombstone.kind)) continue;
+      assets.push(tombstone);
     }
   }
+
   const quarantined: string[] = [];
   for (const entry of Object.values(snap.quarantine)) {
     if (entry.operation.operation_kind !== "asset") continue;
     const assetUid = entry.operation.request.asset_uid;
-    if (typeof assetUid === "string") quarantined.push(assetUid);
+    if (typeof assetUid !== "string") continue;
+    // Only an unconfirmed local proposal may be excluded. A conflict entry for a UID
+    // whose current object is a confirmed cloud copy must not hide that copy (R9).
+    const current = snap.assets[assetUid];
+    const confirmed = current && current.sync_state === "synced" && current.cloud_revision !== null;
+    if (!confirmed) quarantined.push(assetUid);
   }
   return {
-    soul,
+    soul: contextSoul,
     assets,
     taskHint,
     ...(budgetBytes !== undefined ? { budgetBytes } : {}),
@@ -1245,21 +1490,55 @@ export const SYNC_TIMEOUT_MIN_MS = 1_000;
 export const SYNC_TIMEOUT_MAX_MS = 60_000;
 
 /**
- * One bounded request: a fresh AbortController per call, timer cleared in `finally`.
- * The bound lives here — in the process that executes the writer command — so a
- * resident daemon (agentd) that runs `sync_once` on its own fetch is protected too,
- * not just the caller that dispatched the command.
+ * One bounded request: a fresh AbortController per call. The timer stays armed
+ * until the response body is fully consumed (not merely until headers arrive), then
+ * is cleared by the wrapped body/json/text methods. The bound lives here — in the
+ * process that executes the writer command — so a resident daemon (agentd) that runs
+ * `sync_once` on its own fetch is protected too, not just the caller that dispatched
+ * the command.
  */
 export function withTimeout(http: HttpFetch, timeoutMs: number): HttpFetch {
   return async (input, init = {}) => {
     const controller = new AbortController();
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+    };
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await http(input, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
+      const response = (await http(input, { ...init, signal: controller.signal })) as unknown as FetchResponseLike;
+      // Keep the timer alive until the complete body is consumed. A server that
+      // flushes headers and then stalls must still hit the deadline (R5).
+      return boundedResponse(response, finish) as unknown as Response;
+    } catch (error) {
+      finish();
+      throw error;
     }
   };
+}
+
+function boundedResponse(response: FetchResponseLike, finish: () => void): FetchResponseLike {
+  const consume = <T>(fn: (() => Promise<T>) | undefined): (() => Promise<T>) => async () => {
+    try {
+      if (!fn) throw new Error("response body is not readable");
+      return await fn();
+    } finally {
+      finish();
+    }
+  };
+  const wrapped: FetchResponseLike = {
+    status: response.status,
+    headers: response.headers,
+    json: consume(response.json.bind(response)),
+    body: response.body ? { cancel: consume(response.body.cancel.bind(response.body)) } : null,
+  };
+  const text = (response as unknown as { text?: () => Promise<string> }).text;
+  if (typeof text === "function") {
+    (wrapped as unknown as { text: () => Promise<string> }).text = consume(text.bind(response));
+  }
+  return wrapped;
 }
 
 /**

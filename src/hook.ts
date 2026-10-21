@@ -24,7 +24,7 @@ import type { RuntimeEvent, RuntimeEventKind } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { sendWriter } from "./local/writer.js";
 import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
-import { openStore } from "./local/store.js";
+import { openStore, StoreError } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
@@ -360,7 +360,15 @@ async function injectSoulContext(
     const binding = snap.bindings[key];
     if (!binding || binding.state !== "bound") return;
 
-    const input = ownerContextInput(snap, binding.soul_uid, binding, "session");
+    let input;
+    try {
+      input = ownerContextInput(snap, binding.soul_uid, binding, "session");
+    } catch (error) {
+      // Revoked identity/device: never inject a cached private identity. Local
+      // originals are handled inside ownerContextInput and remain available.
+      if (error instanceof StoreError && error.code === "identity_not_authorized") return;
+      throw error;
+    }
     const bundle = selectContext(input);
     if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return;
 

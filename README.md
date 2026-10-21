@@ -112,8 +112,13 @@ only.
 
 The sync itself is **consent-gated per device and per Soul**: only an account entry whose
 `soul_sync_mode` is `assets_only` syncs, and only the Souls bound to that profile. A legacy
-transcript-mode device never syncs. It is triggered three ways, all through the single
-writer (never a lockless store write, never `globalThis.fetch`):
+transcript-mode device never syncs. Local creation is not authorization: after login run
+`37soul soul authorize <uid> --categories identity,relationship,experience` to explicitly
+register that Soul and open its Consent. Tokens are stored with the exact profile/owner/
+cloud-device/runtime they were issued for; a global legacy token is never reused for
+another profile (upgrading from an older build requires one fresh `37soul login`).
+It is triggered three ways, all through the single writer (never a
+lockless store write, never `globalThis.fetch`):
 
 - **`37soul sync [--profile <id>]`** — push/pull on demand (all assets-mode profiles, or one);
 - **automatically after `37soul login`** — best-effort, so a sync failure never fails the login;
@@ -126,6 +131,7 @@ launcher) and is linked as `~/.local/bin/37soul`:
 ```bash
 37soul doctor           # config + token + hook activity + spool backlog + last upload
 37soul status
+37soul soul authorize <uid> --categories identity,relationship,experience
 37soul pause [--repo <path>]   # pause everything, or one repo
 37soul resume
 37soul uninstall        # removes only what it wrote (install-manifest.json), including the link
@@ -143,7 +149,7 @@ builds and verifies only** — there is no upload-to-Release job; publishing the
 `.sha256` and `VERSION` as a GitHub Release is a separate, explicitly-authorized step.
 
 ```bash
-git tag v0.11.0 && git push origin v0.11.0
+git tag v0.11.1 && git push origin v0.11.1
 ```
 
 The tarball root is `37soul/` and carries `package.json` (`{"type":"module"}`, so the ESM

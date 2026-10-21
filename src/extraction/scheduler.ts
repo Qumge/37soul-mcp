@@ -428,6 +428,8 @@ function toLocalAsset(
     source: pinnedSource(proposal, binding),
     sync_state: authorized ? "pending_sync" : "local_only",
     cloud_revision: null,
+    binding_uid: binding.binding_uid,
+    binding_revision: binding.revision,
   };
 }
 

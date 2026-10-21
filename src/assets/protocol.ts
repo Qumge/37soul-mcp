@@ -91,6 +91,10 @@ export interface Soul {
   identity: Identity;
   /** The contract only pins "active" today; widened by later tasks if a new state is added. */
   state: "active";
+  /** Local-only provenance: never sent over the wire. */
+  origin?: "local" | "cloud";
+  /** Local-only original identity, preserved when a cloud identity is revoked. */
+  local_identity?: Identity;
 }
 
 export interface Binding {
@@ -100,6 +104,10 @@ export interface Binding {
   soul_uid: string;
   revision: number;
   state: BindingState;
+  /** Local-only: last server-confirmed revision (never sent over the wire). */
+  cloud_revision?: number | null;
+  /** Local-only: this binding has an unconfirmed local mutation. */
+  unconfirmed?: boolean;
 }
 
 export interface Consent {

@@ -9,7 +9,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -832,7 +832,9 @@ test("sync: revoked device clears only downloaded private cache", async () => {
   assert.equal(snap.assets["synced-1"], undefined, "downloaded private cache is cleared");
   assert.ok(snap.assets["local-only"], "local-only survives");
   assert.ok(snap.assets["pending-1"], "unsynced local edits survive");
-  assert.ok(snap.outbox["pending-1"], "the unsent outbox survives");
+  assert.equal(snap.outbox["pending-1"], undefined, "revoked pending operations leave the sendable outbox");
+  assert.equal(snap.quarantine["pending-1"].reason, "device_revoked", "they are parked for explicit recovery");
+  assert.equal(snap.bindings[bindingKeyOf()].state, "detached", "the revoked device binding is no longer usable");
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -974,7 +976,7 @@ test("sync: same-length consent category swap revokes the removed category immed
 // 20 ───────────────────────────────────────────────────────────────────────────────
 test("sync: enabling consent enqueues still-valid local_only assets exactly once", async () => {
   const root = tempDir();
-  const assetUid = "local-only-rel";
+  const assetUid = "40000000-0000-4000-8000-000000000099";
   const consentRev2 = { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true };
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
@@ -990,8 +992,13 @@ test("sync: enabling consent enqueues still-valid local_only assets exactly once
       binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
       revision: 1, state: "bound", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
     };
-    // Extracted while "relationship" was not authorized.
-    d.assets[assetUid] = localAsset(assetUid, "local relationship fact", "active", "local_only", null, 1);
+    // Extracted while "relationship" was not authorized; the frozen extraction
+    // provenance must survive until the category is re-enabled (R6).
+    d.assets[assetUid] = {
+      ...localAsset(assetUid, "local relationship fact", "active", "local_only", null, 1),
+      binding_uid: IDS.binding,
+      binding_revision: 1,
+    };
     d.outbox["consent-op"] = {
       operation_id: "consent-op",
       operation_kind: "consent",
@@ -1017,7 +1024,9 @@ test("sync: enabling consent enqueues still-valid local_only assets exactly once
   await syncOnce("p1", http, syncOpts(root));
   assert.equal(pushed.length, 1, "exactly one asset batch leaves the machine");
   assert.equal(pushed[0].length, 1, "exactly one propose is enqueued for the rescued local_only asset");
-  assert.equal(pushed[0][0].change_id, `${assetUid}:rev1`, "the operation_id is deterministic (asset_uid + revision)");
+  assert.equal(pushed[0][0].change_id, assetUid, "the change_id is the stable UUID asset_uid");
+  assert.equal(pushed[0][0].binding_uid, IDS.binding, "the frozen binding UID is preserved");
+  assert.equal(pushed[0][0].binding_revision, 1, "the frozen binding revision is preserved");
   assert.equal(pushed[0][0].operation, "propose", "the rescued asset is proposed, not a control op");
 
   const snap1 = await readSnap(root);
@@ -1231,7 +1240,7 @@ test("sync: 404, 413 and 422 surface their server error code", async () => {
 // 28 ───────────────────────────────────────────────────────────────────────────────
 test("sync: stale consent replay never re-enqueues a revoked category asset", async () => {
   const root = tempDir();
-  const assetUid = "local-only-rel";
+  const assetUid = "40000000-0000-4000-8000-000000000099";
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
     d.cloud_device_uid = IDS.cloudDevice;
@@ -1415,4 +1424,342 @@ test("sync: an internal store failure surfaces a code, never an absolute path", 
   assert.ok(!JSON.stringify(report).includes("/"), "no path segment (no '/') leaks into the report");
 
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// R4/R9: revocation and quarantine semantics
+// ---------------------------------------------------------------------------
+
+test("R4: revoking identity stops injecting a downloaded cloud identity", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "CLOUD_IDENTITY_CANARY", description: "private cloud", character: "", greeting: "" },
+      state: "active", origin: "cloud",
+    };
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, "cloud relationship", "active", "synced", 1, 1);
+  });
+  const store = await openStore(root, "p1");
+  try {
+    const before = await store.read();
+    const bundle = selectContext(ownerContextInput(before, IDS.soul, before.bindings[bindingKeyOf()], "task", 4096));
+    assert.match(bundle.rendered_text, /CLOUD_IDENTITY_CANARY/);
+
+    await applyPullPage(store, {
+      protocol: "soul-assets/v1",
+      events: [{
+        event_uid: "revoke-identity",
+        object_type: "consent",
+        object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: [], enabled: false },
+      }],
+      next_cursor: "c-revoked",
+      has_more: false,
+    });
+    const after = await store.read();
+    assert.equal(after.souls[IDS.soul], undefined, "downloaded cloud identity is removed");
+    assert.throws(
+      () => ownerContextInput(after, IDS.soul, after.bindings[bindingKeyOf()], "task", 4096),
+      (error) => error?.code === "identity_not_authorized",
+      "a revoked identity is never injected again",
+    );
+    assert.equal(after.assets[IDS.assetA], undefined, "removed identity/relationship cache is gone");
+  } finally {
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R4: a local original Soul survives identity revocation and remains injectable", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "LOCAL_ORIGINAL", description: "local", character: "", greeting: "" },
+      state: "active", origin: "local",
+      local_identity: { name: "LOCAL_ORIGINAL", description: "local", character: "", greeting: "" },
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: [], enabled: false,
+    };
+    d.assets["local-only"] = localAsset("local-only", "local fact", "active", "local_only", null, 1);
+  });
+  const store = await openStore(root, "p1");
+  try {
+    const snap = await store.read();
+    const input = ownerContextInput(snap, IDS.soul, snap.bindings[bindingKeyOf()], "task", 4096);
+    assert.equal(input.soul.identity.name, "LOCAL_ORIGINAL");
+    assert.ok(input.assets.some((asset) => asset.asset_uid === "local-only"), "local original asset survives offline");
+  } finally {
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R4: device_revoked removes scoped credentials and parks pending work", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets["pending"] = localAsset("pending", "pending", "active", "pending_sync", null, 1);
+    d.outbox["pending"] = proposeOp("pending", "pending");
+  });
+  writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify({
+      api_base_url: "https://fake.test",
+      machine_id: "m1",
+      tokens: {},
+      credentials: [{
+        token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
+        runtime_kind: "hermes", profile_id: "p1", obtained_at: "x",
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const http = fakeHttp(() => ({ status: 401, body: { error: { code: "device_revoked", message: "revoked" } } }));
+  const report = await syncOnce("p1", http, { root, baseUrl: "https://fake.test", backoff: { sleep: async () => {}, maxRetries: 0 } });
+  assert.equal(report.error, "device_revoked");
+  const config = JSON.parse(readFileSync(path.join(root, "config.json"), "utf8"));
+  assert.deepEqual(config.credentials, [], "revoked device credentials cannot be reused");
+  const snap = await readSnap(root);
+  assert.equal(snap.outbox["pending"], undefined);
+  assert.equal(snap.quarantine["pending"].reason, "device_revoked");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("R7: a same-revision cloud detach beats an unconfirmed local rev2", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    const key = bindingKeyOf();
+    d.bindings[key] = {
+      ...d.bindings[key],
+      revision: 2,
+      cloud_revision: 1,
+      unconfirmed: true,
+    };
+  });
+  const store = await openStore(root, "p1");
+  try {
+    await applyPullPage(store, {
+      protocol: "soul-assets/v1",
+      events: [{
+        event_uid: "cloud-detach",
+        object_type: "binding",
+        object: {
+          binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes",
+          soul_uid: IDS.soul, revision: 2, state: "detached",
+        },
+      }],
+      next_cursor: "c-detached",
+      has_more: false,
+    });
+    const snap = await store.read();
+    const binding = snap.bindings[bindingKeyOf()];
+    assert.equal(binding.state, "detached", "the confirmed cloud detach is respected");
+    assert.equal(binding.cloud_revision, 2);
+    assert.equal(binding.unconfirmed, false);
+    assert.equal(snap.pull_cursor, "c-detached");
+  } finally {
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R9: a quarantined old edit does not hide the confirmed cloud copy", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, "cloud current", "active", "synced", 2, 2);
+    d.quarantine["old-edit"] = {
+      operation: {
+        operation_id: "old-edit", operation_kind: "asset",
+        request: { change_id: "old-edit", operation: "review", soul_uid: IDS.soul, asset_uid: IDS.assetA, payload: { action: "edit" } },
+        predecessor_operation_ids: [],
+      },
+      reason: "revision_conflict",
+    };
+  });
+  const store = await openStore(root, "p1");
+  try {
+    const snap = await store.read();
+    const input = ownerContextInput(snap, IDS.soul, snap.bindings[bindingKeyOf()], "task", 4096);
+    assert.ok(input.assets.some((asset) => asset.asset_uid === IDS.assetA), "the confirmed cloud copy is eligible");
+    assert.ok(!input.quarantinedAssetUids?.includes(IDS.assetA), "the old conflict does not exclude it");
+  } finally {
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R7: 409 push followed by Pull respects the cloud detach and keeps local conflict", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    const key = bindingKeyOf();
+    d.bindings[key] = { ...d.bindings[key], revision: 2, cloud_revision: 1, unconfirmed: true };
+    d.outbox["local-bind"] = {
+      operation_id: "local-bind", operation_kind: "binding",
+      request: { base_revision: 1, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul, state: "detached" },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "PUT" && p.includes("/bindings/")) {
+      return { status: 409, body: { error: { code: "revision_conflict", message: "conflict", retryable: false, current_revision: 2 } } };
+    }
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") {
+      return {
+        status: 200,
+        body: {
+          protocol: "soul-assets/v1",
+          events: [{
+            event_uid: "cloud-detach", object_type: "binding",
+            object: {
+              binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes",
+              soul_uid: IDS.soul, revision: 2, state: "detached",
+            },
+          }],
+          next_cursor: "c-after-conflict",
+          has_more: false,
+        },
+      };
+    }
+    return { status: 500, body: {} };
+  });
+
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, undefined);
+  const snap = await readSnap(root);
+  assert.equal(snap.bindings[bindingKeyOf()].state, "detached", "the confirmed cloud detach wins");
+  assert.equal(snap.bindings[bindingKeyOf()].cloud_revision, 2);
+  assert.equal(snap.bindings[bindingKeyOf()].unconfirmed, false);
+  assert.ok(snap.quarantine["local-bind"], "the local proposal stays available as a conflict");
+  assert.equal(snap.pull_cursor, "c-after-conflict");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("R6: re-authorization never sends an asset whose frozen binding is gone", async () => {
+  const root = tempDir();
+  const assetUid = "40000000-0000-4000-8000-000000000098";
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active", origin: "local",
+      local_identity: { name: "Growth", description: "", character: "", greeting: "" },
+    };
+    d.consents[`${IDS.cloudDevice}:${IDS.soul}`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: ["identity"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      binding_uid: IDS.binding, session_ref: IDS.session, runtime_kind: "hermes", soul_uid: IDS.soul,
+      revision: 1, state: "detached", profile_id: "p1", device_id: "dev-1", native_session_id: "ns-1",
+    };
+    d.assets[assetUid] = {
+      ...localAsset(assetUid, "orphan relationship", "active", "local_only", null, 1),
+      binding_uid: IDS.binding,
+      binding_revision: 1,
+    };
+  });
+  const store = await openStore(root, "p1");
+  try {
+    await applyPullPage(store, {
+      protocol: "soul-assets/v1",
+      events: [{
+        event_uid: "enable-relationship", object_type: "consent",
+        object: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true },
+      }],
+      next_cursor: "c-enabled",
+      has_more: false,
+    });
+    const snap = await store.read();
+    assert.equal(snap.outbox[assetUid], undefined, "a stale frozen binding is not sent");
+    assert.equal(snap.quarantine[`local-binding:${assetUid}`].reason, "binding_stale");
+    assert.equal(snap.assets[assetUid].sync_state, "conflict");
+  } finally {
+    await store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R2: registration carries explicit categories; an old empty registration is parked", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" },
+      state: "active", origin: "local",
+      local_identity: { name: "Growth", description: "", character: "", greeting: "" },
+    };
+    d.outbox["register"] = {
+      operation_id: "register", operation_kind: "register_soul",
+      request: {
+        soul_uid: IDS.soul,
+        identity: { name: "Growth", description: "", character: "", greeting: "" },
+        consent_categories: ["identity", "relationship"],
+      },
+      predecessor_operation_ids: [],
+    };
+  });
+  let registered = null;
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "POST" && p.endsWith("/souls")) {
+      registered = req.body;
+      if (!req.body.consent_categories?.includes("identity")) {
+        return { status: 422, body: { error: { code: "invalid_payload", message: "identity consent is required" } } };
+      }
+      return {
+        status: 201,
+        body: {
+          protocol: "soul-assets/v1",
+          soul: { soul_uid: IDS.soul, legacy_host_id: 42, identity_revision: 1, identity: req.body.identity, state: "active" },
+          consent: { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 1, categories: req.body.consent_categories, enabled: true },
+        },
+      };
+    }
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 200, body: emptyPull() };
+    return { status: 500, body: {} };
+  });
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, undefined);
+  assert.deepEqual(registered.consent_categories, ["identity", "relationship"]);
+  const snap = await readSnap(root);
+  assert.equal(snap.souls[IDS.soul].legacy_host_id, 42);
+  assert.equal(snap.consents[`${IDS.cloudDevice}:${IDS.soul}`].categories.length, 2);
+  rmSync(root, { recursive: true, force: true });
+
+  const oldRoot = tempDir();
+  await seedProfile(oldRoot, "p1", "dev-1", (d) => {
+    d.owner_id = IDS.owner;
+    d.cloud_device_uid = IDS.cloudDevice;
+    d.souls[IDS.soul] = {
+      soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "", greeting: "" }, state: "active", origin: "local",
+    };
+    d.outbox["old-register"] = {
+      operation_id: "old-register", operation_kind: "register_soul",
+      request: { soul_uid: IDS.soul, identity: { name: "Growth", description: "", character: "", greeting: "" }, consent_categories: [] },
+      predecessor_operation_ids: [],
+    };
+  });
+  const oldHttp = fakeHttp((req) => {
+    if (req.method === "POST" && pathnameOf(req.url).endsWith("/souls")) {
+      return { status: 422, body: { error: { code: "invalid_payload", message: "identity consent is required" } } };
+    }
+    return { status: 200, body: emptyPull() };
+  });
+  await syncOnce("p1", oldHttp, syncOpts(oldRoot));
+  const oldSnap = await readSnap(oldRoot);
+  assert.equal(oldSnap.outbox["old-register"], undefined);
+  assert.equal(oldSnap.quarantine["old-register"].reason, "authorization_required");
+  rmSync(oldRoot, { recursive: true, force: true });
 });

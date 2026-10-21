@@ -157,3 +157,39 @@ test("cli: agentdExtractAdapters gates the four runtime adapters on assets mode"
   const legacy = agentdExtractAdapters("/home/x", false, logger, root);
   assert.equal(legacy, undefined, "legacy mode keeps its transcript-upload path and gets no extraction adapters");
 });
+
+// R2: local creation is not cloud authorization; the real CLI entry must produce
+// a legal register operation only after an explicit Soul/category choice.
+test("R2: soul create stays local and soul authorize enqueues explicit consent", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1");
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const created = makeIo();
+    const code = await main(["soul", "create", "--profile", "p1", "--name", "Growth"], created.io);
+    assert.equal(code, 0, created.out.stderr);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    assert.ok(uid, "the CLI printed the local Soul uid");
+
+    let snap = await readSnap(root, "p1");
+    assert.equal(Object.keys(snap.outbox).length, 0, "local creation enqueues no cloud registration");
+
+    const authorized = makeIo();
+    const code2 = await main(
+      ["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"],
+      authorized.io,
+    );
+    assert.equal(code2, 0, authorized.out.stderr);
+    snap = await readSnap(root, "p1");
+    const op = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
+    assert.ok(op, "authorization enqueued a register operation");
+    assert.deepEqual(op.request.consent_categories.sort(), ["identity", "relationship"]);
+    assert.deepEqual(snap.souls[uid].local_identity, { name: "Growth", description: "", character: "", greeting: "" });
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});

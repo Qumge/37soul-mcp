@@ -1085,3 +1085,25 @@ test("login: --use-profile leaves resolution untouched when the default is absen
   }
   rmSync(root2, { recursive: true, force: true });
 });
+
+// R8: detach is an explicit user intent; ordinary lifecycle resolution must not
+// silently recreate a binding through defaults or the unique-Soul path.
+test("R8: detach survives ordinary resolution and only explicit selection rebinds", async () => {
+  const root = tempDir();
+  const profileId = "p1";
+  const key = keyOf(profileId, "dev-1", "hermes", "ns-1");
+  await seedProfile(root, profileId, "dev-1", (d) => {
+    d.souls["s1"] = makeSoul("s1");
+  });
+  const first = await resolveBinding(key, undefined, { root });
+  assert.ok(first, "the unique Soul creates the first binding");
+  const detached = await detachBinding(key, { root });
+  assert.equal(detached.state, "detached");
+
+  assert.equal(await resolveBinding(key, undefined, { root }), null, "ordinary resolution respects detach");
+  const explicit = await selectSoul(key, "s1", { root });
+  assert.equal(explicit.binding_uid, detached.binding_uid, "explicit selection reuses the same record");
+  assert.equal(explicit.state, "bound");
+  assert.equal(explicit.revision, detached.revision + 1);
+  rmSync(root, { recursive: true, force: true });
+});

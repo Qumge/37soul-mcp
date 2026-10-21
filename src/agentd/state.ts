@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 import type { FileCursor } from "./types.js";
+import type { StoredCredential } from "./credentials.js";
 
 export const STATE_VERSION = 1;
 
@@ -47,8 +48,14 @@ export function configPath(root: string): string {
 export interface AgentConfig {
   api_base_url: string;
   machine_id: string;
-  /** agent_kind → bearer token（ingest_enabled 的 PAT）。 */
+  /** agent_kind → bearer token（ingest_enabled 的 PAT）。旧兼容字段。 */
   tokens: Record<string, string>;
+  /**
+   * Scoped credentials for soul-assets/v1. A token is only used for the exact
+   * profile/owner/cloud-device/runtime recorded here; the legacy `tokens` map is
+   * never a fallback for assets-mode sync.
+   */
+  credentials?: StoredCredential[];
   installed_at?: string;
   mcp?: Record<string, boolean>;
   /** v2 §6.2：会话记录兜底解析的 Agent 列表（hook 是主路径；默认只给 Codex）。 */
@@ -64,6 +71,7 @@ export async function loadConfig(root: string): Promise<AgentConfig | null> {
     const parsed = JSON.parse(await readFile(configPath(root), "utf8")) as AgentConfig;
     if (!parsed || typeof parsed.api_base_url !== "string" || typeof parsed.machine_id !== "string") return null;
     if (!parsed.tokens || typeof parsed.tokens !== "object") parsed.tokens = {};
+    if (!Array.isArray(parsed.credentials)) parsed.credentials = [];
     if (!Array.isArray(parsed.transcript_fallback)) parsed.transcript_fallback = [];
     return parsed;
   } catch {
