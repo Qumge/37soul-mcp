@@ -35,6 +35,7 @@ export const WRITER_COMMANDS = [
   "authorize_soul",
   "edit_local_identity",
   "set_soul_avatar",
+  "upload_avatar",
   "bind",
   "detach",
   "review_asset",

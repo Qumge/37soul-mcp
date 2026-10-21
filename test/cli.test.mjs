@@ -6,13 +6,14 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { main, agentdExtractAdapters } from "../dist/cli.js";
 import { openStore } from "../dist/local/store.js";
-import { ownerContextInput } from "../dist/sync/client.js";
+import { startWriter } from "../dist/local/writer.js";
+import { configureSyncHttp, ownerContextInput } from "../dist/sync/client.js";
 import { resolveBinding } from "../dist/local/bindings.js";
 import { selectContext } from "../dist/assets/context.js";
 
@@ -306,6 +307,31 @@ test("profile: an already queued legacy register body is never mutated", async (
   }
 });
 
+test("profile: --avatar relative paths are frozen absolute at command time", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const work = path.join(home, "work");
+  mkdirSync(work, { recursive: true });
+  writeFileSync(path.join(work, "avatar.png"), Buffer.from("relative-bytes"));
+  const previousHome = process.env.SOUL37_HOME;
+  const previousCwd = process.cwd();
+  process.env.SOUL37_HOME = home;
+  process.chdir(work);
+  try {
+    const created = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Relative", "--sex", "female", "--age", "24", "--character", "这是相对路径头像入口的完整人设，包含稳定的性格、表达方式、兴趣背景和长期边界，长度明确超过五十个字符的要求。", "--avatar", "./avatar.png"], created.io), 0, created.out.stderr);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    process.chdir(previousCwd);
+    const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
+    assert.equal(snap.souls[uid].local_avatar_path, path.join(realpathSync(work), "avatar.png"));
+  } finally {
+    process.chdir(previousCwd);
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("profile: avatar upload sends bytes only after login and keeps a retryable local copy", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
@@ -421,7 +447,7 @@ test("profile: create --avatar uploads after explicit registration on the sync p
   };
   try {
     const created = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Avatar Sync", "--sex", "female", "--age", "24", "--character", "这是创建时选择头像并写入同步主链的完整人设，包含性格、表达方式、兴趣背景和长期边界，长度超过五十个字符。", "--avatar", avatar], created.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Avatar Sync", "--sex", "female", "--age", "24", "--character", "这是创建时选择头像并写入同步主链的完整人设，包含性格、表达方式、兴趣背景和长期边界，长度明确超过五十个字符的要求。", "--avatar", avatar], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid);
     assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
@@ -440,6 +466,67 @@ test("profile: create --avatar uploads after explicit registration on the sync p
   }
 });
 
+test("profile: a slow manual avatar ACK cannot overwrite a concurrent CLI create", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const oldUid = "10000000-0000-4000-8000-0000000000af";
+  const file = path.join(home, "old-avatar.png");
+  writeFileSync(file, Buffer.from("OLD-BYTES"));
+  await seed(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls[oldUid] = {
+      soul_uid: oldUid, legacy_host_id: 77, identity_revision: 1, public: true,
+      identity: { name: "Old", description: "", character: "旧 Soul 的完整人设，包含性格、表达方式和长期边界，长度超过五十个字符。", greeting: "", sex: "female", age: 30 },
+      state: "active", origin: "local", local_avatar_path: file, avatar_uploaded: false,
+    };
+    d.consents[`cdu-1:${oldUid}`] = { cloud_device_uid: "cdu-1", soul_uid: oldUid, revision: 1, categories: ["identity"], enabled: true };
+  });
+  writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
+    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+  })}\n`, { mode: 0o600 });
+  const previousHome = process.env.SOUL37_HOME;
+  const previousFetch = globalThis.fetch;
+  process.env.SOUL37_HOME = home;
+  let releaseUpload;
+  const uploadGate = new Promise((resolve) => { releaseUpload = resolve; });
+  let enteredUpload;
+  const entered = new Promise((resolve) => { enteredUpload = resolve; });
+  const fake = async (url, init = {}) => {
+    if (init.method === "PUT" && String(url).endsWith("/avatar")) {
+      enteredUpload();
+      await uploadGate;
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ protocol: "soul-assets/v1", avatar_url: "https://cdn.example/old.webp" }) };
+    }
+    return { ok: false, status: 500, headers: { get: () => null }, json: async () => ({}) };
+  };
+  globalThis.fetch = fake;
+  configureSyncHttp(fake);
+  const writer = await startWriter(root);
+  try {
+    const avatarRun = main(["soul", "avatar", oldUid, "--profile", "p1", "--file", file], makeIo().io);
+    await entered;
+    const create = makeIo();
+    const createRun = main(["soul", "create", "--profile", "p1", "--name", "Concurrent", "--sex", "male", "--age", "25", "--character", "并发创建的新 Soul，包含稳定的性格、表达方式、兴趣背景、说话习惯和长期边界，长度明确超过五十个字符。"], create.io);
+    releaseUpload();
+    assert.equal(await avatarRun, 0);
+    assert.equal(await createRun, 0, create.out.stderr);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(create.out.stdout)?.[1];
+    const snap = await readSnap(root);
+    assert.ok(snap.souls[oldUid], "the old Soul remains");
+    assert.ok(uid && snap.souls[uid], "the concurrently created Soul must survive the old avatar ACK");
+    assert.equal(snap.souls[oldUid].avatar_uploaded, true);
+  } finally {
+    await writer.close().catch(() => {});
+    globalThis.fetch = previousFetch;
+    configureSyncHttp(previousFetch);
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("profile: registered does not imply public when the cloud says private", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
@@ -447,7 +534,7 @@ test("profile: registered does not imply public when the cloud says private", as
   await seed(root, "p1", "dev-1", (d) => {
     d.souls[uid] = {
       soul_uid: uid, legacy_host_id: 88, identity_revision: 2, public: false,
-      identity: { name: "Private registered", description: "", character: "完整人设，包含性格、表达方式、兴趣背景和长期边界，长度超过五十个字符。", greeting: "", sex: "female", age: 30 },
+      identity: { name: "Private registered", description: "", character: "完整人设，包含性格、表达方式、兴趣背景和长期边界，长度明确超过五十个字符的要求。", greeting: "", sex: "female", age: 30 },
       state: "active",
     };
   });

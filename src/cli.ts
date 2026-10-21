@@ -32,7 +32,7 @@ import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
-import { configureSyncHttp, isAssetsModeSync, uploadPendingAvatar } from "./sync/client.js";
+import { configureSyncHttp, isAssetsModeSync } from "./sync/client.js";
 import { runSync, runSyncProfiles } from "./sync/run.js";
 
 export interface CliIO {
@@ -337,6 +337,10 @@ function soulVisibilityLabel(
   return `registered; public state unknown: ${link}`;
 }
 
+function avatarPathFromArgs(value: string | undefined): string | undefined {
+  return value === undefined || value === "" ? undefined : path.resolve(value);
+}
+
 function profileIdFromArgs(rest: string[]): string {
   return flagValue(rest, "--profile") ?? "default";
 }
@@ -401,7 +405,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       io.stderr('usage: 37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <at least 50 chars> [--avatar <path>]\n');
       return 2;
     }
-    const avatarPath = flagValue(args, "--avatar");
+    const avatarPath = avatarPathFromArgs(flagValue(args, "--avatar"));
     if (avatarPath) {
       try {
         if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
@@ -493,7 +497,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       return 2;
     }
     const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity, validate_public_profile: true });
-    const avatarPath = flagValue(args, "--avatar");
+    const avatarPath = avatarPathFromArgs(flagValue(args, "--avatar"));
     if (res.ok && avatarPath) {
       try {
         if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
@@ -513,7 +517,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
 
   if (sub === "avatar") {
     const soulUid = args[0];
-    const file = flagValue(args, "--file") ?? flagValue(args, "--avatar");
+    const file = avatarPathFromArgs(flagValue(args, "--file") ?? flagValue(args, "--avatar"));
     if (!soulUid || !file) {
       io.stderr("usage: 37soul soul avatar <soul_uid> --file <image> [--profile <id>]\n");
       return 2;
@@ -524,32 +528,35 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       io.stderr(`avatar file not found: ${file}\n`);
       return 2;
     }
-    const saved = await runWriterCommand(root, profileId, "set_soul_avatar", {
+    // One writer request performs both the local selection write and the upload.
+    // The writer's injected transport and its serialization protect concurrent
+    // create/sync commands from an old avatar ACK overwriting a newer snapshot.
+    const res = await runWriterCommand(root, profileId, "upload_avatar", {
       soul_uid: soulUid,
       local_avatar_path: file,
     });
-    if (!saved.ok) {
-      io.stderr(`${saved.error.code}: ${saved.error.message}\n`);
+    if (!res.ok) {
+      io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
     }
-    const result = await uploadPendingAvatar(profileId, deps.fetch, { root, soulUid });
-    if (result.status === "uploaded") {
+    const result = res.result as { status: string; soul_uid?: string; avatar_url?: string; error?: string } | null;
+    if (result?.status === "uploaded") {
       io.stdout(`avatar uploaded for ${soulUid}${result.avatar_url ? `: ${result.avatar_url}` : ""}\n`);
       return 0;
     }
-    if (result.status === "not_logged_in") {
+    if (result?.status === "not_logged_in") {
       io.stderr("avatar saved locally; run 37soul login before uploading\n");
       return 0;
     }
-    if (result.status === "not_registered") {
+    if (result?.status === "not_registered") {
       io.stderr("avatar saved locally; authorize and sync this Soul before uploading\n");
       return 0;
     }
-    if (result.status === "not_authorized") {
+    if (result?.status === "not_authorized") {
       io.stderr("avatar saved locally; identity sync is not authorized for this Soul\n");
       return 0;
     }
-    io.stderr(`avatar upload failed${result.error ? ` (${result.error})` : ""}; image kept locally for retry\n`);
+    io.stderr(`avatar upload failed${result?.error ? ` (${result.error})` : ""}; image kept locally for retry\n`);
     return 1;
   }
 
@@ -560,27 +567,31 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       return 2;
     }
     const categories = flagValue(args, "--categories") ?? flagValue(args, "--consent") ?? "identity";
+    const store = await openStore(root, profileId);
+    let before: { legacy_host_id: number | null; public?: boolean } | undefined;
+    try { before = (await store.read()).souls[soulUid]; } finally { await store.close(); }
+    if (!before) {
+      io.stderr(`unknown_soul: no local soul ${soulUid} in this profile\n`);
+      return 1;
+    }
+    if (before.legacy_host_id === null) {
+      io.stdout("This will queue public registration: the profile you entered will be public; private chats and personal memories will not be public.\n");
+    } else if (before.public === true) {
+      io.stdout("This Soul is already public; this command only updates sync consent. Private chats and personal memories are not public.\n");
+    } else if (before.public === false) {
+      io.stdout("This Soul is registered as private; this command only updates sync consent and does not publish it.\n");
+    } else {
+      io.stdout("This Soul is registered but its public state is unknown; this command only updates sync consent and does not change visibility.\n");
+    }
     const res = await runWriterCommand(root, profileId, "authorize_soul", { soul_uid: soulUid, categories, publish_profile: true });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
     }
     const result = res.result as { operation?: string; categories?: string[] } | null;
-    const store = await openStore(root, profileId);
-    let soul: { legacy_host_id: number | null; public?: boolean } | undefined;
-    try { soul = (await store.read()).souls[soulUid]; } finally { await store.close(); }
-    let state = "";
-    if (soul?.legacy_host_id !== null && soul?.legacy_host_id !== undefined) {
-      if (soul.public === true) state = " — this Soul is already public";
-      else if (soul.public === false) state = " — this Soul remains private on the website";
-      else state = " — public state unknown";
-    } else {
-      state = " — queued; run 37soul sync to register it as a public Host";
-    }
     io.stdout(
-      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})${state}\n`,
+      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})\n`,
     );
-    io.stdout("The profile you entered is public; private chats and personal memories are not public.\n");
     return 0;
   }
 

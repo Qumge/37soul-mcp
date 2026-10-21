@@ -663,7 +663,7 @@ async function flushPendingAvatars(
 }
 
 /** Manual/automatic entry point used by both `37soul sync` and `37soul soul avatar`. */
-export async function uploadPendingAvatar(
+async function uploadPendingAvatar(
   profileId: ProfileId,
   http: HttpFetch,
   options: SyncOptions & { soulUid?: string } = {},
@@ -1294,6 +1294,11 @@ function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
     identity: { ...soul.identity },
     state: "active",
     origin: local ? "local" : "cloud",
+    ...(typeof soul.public === "boolean"
+      ? { public: soul.public }
+      : previous?.public !== undefined
+        ? { public: previous.public }
+        : {}),
     ...((soul.publish_profile ?? previous?.publish_profile) !== undefined
       ? { publish_profile: soul.publish_profile ?? previous?.publish_profile }
       : {}),
@@ -1855,6 +1860,32 @@ registerWriterCommand("sync_once", async ({ root, request }) => {
     throw new StoreError("http_not_configured", "no HTTP transport was configured for the writer");
   }
   return syncOnce(request.profile_id, withTimeout(syncHttp, clampSyncTimeoutMs(request.payload?.timeout_ms)), { root });
+});
+
+registerWriterCommand("upload_avatar", async ({ root, request }) => {
+  if (!syncHttp) {
+    throw new StoreError("http_not_configured", "no HTTP transport was configured for the writer");
+  }
+  const soulUid = typeof request.payload?.soul_uid === "string" ? request.payload.soul_uid : undefined;
+  const localPath = typeof request.payload?.local_avatar_path === "string" ? request.payload.local_avatar_path : undefined;
+  if (localPath) {
+    const store = await openStore(root, request.profile_id);
+    try {
+      await store.transact((draft) => {
+        const soul = soulUid ? draft.souls[soulUid] : undefined;
+        if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid ?? ""}`);
+        soul.local_avatar_path = localPath;
+        soul.avatar_uploaded = false;
+        delete soul.avatar_upload_error;
+      });
+    } finally {
+      await store.close();
+    }
+  }
+  return uploadPendingAvatar(request.profile_id, withTimeout(syncHttp, clampSyncTimeoutMs(request.payload?.timeout_ms)), {
+    root,
+    ...(soulUid ? { soulUid } : {}),
+  });
 });
 
 registerWriterCommand("record_receipt", async ({ root, request }) => {

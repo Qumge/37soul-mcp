@@ -756,6 +756,17 @@ test("sync: a same-revision avatar event updates the cloud URL but not a pending
   });
   await store.close();
   assert.equal((await readSnap(root)).souls[IDS.soul].public, false, "public state changes even when identity revision is unchanged");
+
+  store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{ event_uid: "p2", object_type: "soul", object: { ...cloudSoul, identity_revision: 2, public: true, avatar_url: "https://cdn.example/v2.webp" } }],
+    next_cursor: "s4", has_more: false,
+  });
+  await store.close();
+  const replaced = (await readSnap(root)).souls[IDS.soul];
+  assert.equal(replaced.public, true, "a replacement/higher revision keeps the server public state");
+  assert.equal(replaced.identity_revision, 2);
   rmSync(root, { recursive: true, force: true });
 });
 
