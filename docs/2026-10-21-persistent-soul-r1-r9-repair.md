@@ -50,6 +50,15 @@ node scripts/probe-runtime.mjs --offline --runtime all
 - 真实 Rails 重新授权 relationship：本地 local_only 资产携带冻结 Binding 补传成功为 synced。
 - HTTP 请求/日志未出现 token、native session id、原文/路径或渲染文本。
 
+## 关键反向验证（临时变异后已恢复）
+
+- R2：把 `authorize_soul` 的 `consent_categories` 改回 `[]` → `cli.test.mjs` R2 红
+  （actual `[]`，expected `["identity","relationship"]`）。
+- R3：把 binding 的 runtime token 选择改成 `auth.defaultToken` → `sync-run.test.mjs`
+  R3 红（Codex binding 收到 `Bearer token-claude-code`）。
+- R5：在收到响应头时 `clearTimeout` → R5 localhost stalled-body 测试红
+  （`test-timeout`，writer 未在承诺时限内返回）。
+
 ## 运行包
 
 ```text
