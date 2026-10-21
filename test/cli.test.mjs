@@ -519,7 +519,7 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
     assert.equal(bindingRequests.length, 0, "the invalid B CAS was never sent");
 
     const key = { profile_id: "p1", device_id: "dev-1", runtime_kind: "hermes", native_session_id: "ns-shared" };
-    assert.equal(await resolveBinding(key, "B", { root }), null, "explicit resolve cannot inject parked B");
+    assert.equal(await resolveBinding(key, bUid, { root }), null, "explicit resolve cannot inject parked B");
     assert.equal(await resolveBinding(key, undefined, { root }), null, "implicit resolve cannot inject parked B");
     const refused = makeIo();
     assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-shared", "--agent", "hermes"], refused.io), 1);
