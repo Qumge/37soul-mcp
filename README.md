@@ -25,10 +25,11 @@ Install is anonymous-first: it makes **zero HTTP requests**, writes hooks for th
 it detects, starts the local runtime, and creates a local `assets_only` profile. Nothing
 is uploaded yet.
 
-Create a local Soul and use it in your agent:
+Create a local Soul with name, sex, age (16–65) and a character of at least 50 characters, then use it in your agent:
 
 ```bash
-37soul soul create --name "Nyx" --character "direct, curious, remembers what matters"
+37soul soul create --name "Nyx" --sex female --age 24 \
+  --character "至少 50 字的完整人设，包含性格、表达方式和长期边界。" [--avatar ./avatar.png]
 37soul soul select <soul_uid>
 37soul status
 ```

@@ -17,7 +17,7 @@ import { createDaemon } from "./agentd/daemon.js";
 import { createExtractAdapters, type NativeInvokerLog } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
-import { saveLoginCredentials } from "./agentd/credentials.js";
+import { saveLoginCredentials, selectCredentials } from "./agentd/credentials.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
 import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
@@ -25,7 +25,7 @@ import { runDoctor } from "./doctor.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { openStore, profilesDir, snapshotPath } from "./local/store.js";
-import { setAccountDefaultSoul, setToolDefault } from "./local/bindings.js";
+import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./local/bindings.js";
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
@@ -69,12 +69,13 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
   37soul login [--profile <id>]                  device login; merge the local anonymous profile
   37soul sync [--profile <id>]                   push/pull the local soul (all assets-mode profiles, or one)
-  37soul soul create --name <n> [--description <d>] [--character <c>] [--greeting <g>] [--profile <id>]
+  37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <50+ chars> [--avatar <path>] [--profile <id>]
   37soul soul list [--profile <id>]              list local Souls
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
-  37soul soul edit <uid> [--name <n> ...] [--profile <id>]     edit a local (unregistered) Soul
+  37soul soul edit <uid> [--name <n> ...] [--avatar <path>] [--profile <id>]   edit a local (unregistered) Soul
   37soul soul authorize <uid> [--categories identity,relationship,experience] [--profile <id>]
                                                 explicitly authorize cloud sync for a Soul
+  37soul soul avatar <uid> --file <image> [--profile <id>]   upload a chosen avatar after login
   37soul soul export [--profile <id>]            export the owner-private core identity
   37soul soul review <uid> --approve|--reject [--profile <id>]   approve/reject a pending asset (interactive)
   37soul soul delete <uid> [--profile <id>]      delete an asset (interactive)
@@ -186,7 +187,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     case "agentd":
       return startAgentd(io, home);
     case "soul":
-      return soulCommand(root, rest, io);
+      return soulCommand(root, rest, io, deps);
     case "bind":
       return bindCommand(root, rest, io, false);
     case "detach":
@@ -205,6 +206,19 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
             `${report.error ? ` — ${report.error}` : ""}\n`,
         );
         if (report.error) failed = true;
+        try {
+          const store = await openStore(root, profile_id);
+          try {
+            const snap = await store.read();
+            for (const soul of Object.values(snap.souls)) {
+              const label = soul.legacy_host_id
+                ? `registered public: ${deps.apiBase}/hosts/${soul.legacy_host_id}`
+                : "local only (not public until login + explicit authorization + sync)";
+              const avatar = soul.local_avatar_path && !soul.avatar_uploaded ? " — chosen avatar pending upload (retry: 37soul soul avatar)" : "";
+              io.stdout(`  ${soul.soul_uid} ${soul.identity.name}: ${label}${avatar}\n`);
+            }
+          } finally { await store.close(); }
+        } catch { /* status output must not turn a completed sync into a failure */ }
       }
       return failed ? 1 : 0;
     }
@@ -355,30 +369,49 @@ async function readProfileDeviceId(root: string, profileId: ProfileId): Promise<
   }
 }
 
-async function soulCommand(root: string, rest: string[], io: CliIO): Promise<number> {
+async function soulCommand(root: string, rest: string[], io: CliIO, deps: InstallDeps): Promise<number> {
   const [sub, ...args] = rest;
   const profileId = profileIdFromArgs(args);
 
   if (sub === "create") {
+    const ageValue = flagValue(args, "--age");
     const identity = {
-      name: flagValue(args, "--name") ?? "Soul",
+      name: flagValue(args, "--name") ?? "",
       description: flagValue(args, "--description") ?? "",
       character: flagValue(args, "--character") ?? "",
       greeting: flagValue(args, "--greeting") ?? "",
+      sex: flagValue(args, "--sex") as "male" | "female" | "other" | undefined,
+      age: ageValue !== undefined ? Number(ageValue) : undefined,
     };
-    const res = await runWriterCommand(root, profileId, "create_soul", { identity });
+    const missing = validatePublicProfile(identity);
+    if (missing.length > 0) {
+      io.stderr(`missing or invalid Soul profile fields: ${missing.join(", ")}
+`);
+      io.stderr('usage: 37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <at least 50 chars> [--avatar <path>]\n');
+      return 2;
+    }
+    const avatarPath = flagValue(args, "--avatar");
+    if (avatarPath) {
+      try {
+        if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
+      } catch {
+        io.stderr(`avatar file not found: ${avatarPath}\n`);
+        return 2;
+      }
+    }
+    const res = await runWriterCommand(root, profileId, "create_soul", { identity, ...(avatarPath ? { avatar_path: avatarPath } : {}) });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
     }
     const soul = res.result as { soul_uid: string };
-    io.stdout(`created soul ${soul.soul_uid}\n`);
+    io.stdout(`created soul ${soul.soul_uid} (local only; public after login, explicit authorization and sync)\n`);
     return 0;
   }
 
   if (sub === "list") {
     const store = await openStore(root, profileId);
-    let souls: Array<{ soul_uid: string; legacy_host_id: number | null; identity: { name: string } }> = [];
+    let souls: Array<{ soul_uid: string; legacy_host_id: number | null; identity: { name: string }; local_avatar_path?: string; avatar_uploaded?: boolean }> = [];
     try {
       souls = Object.values((await store.read()).souls);
     } finally {
@@ -386,8 +419,11 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
     }
     if (souls.length === 0) io.stdout("no local souls\n");
     for (const soul of souls) {
-      const registered = soul.legacy_host_id !== null ? `  (registered host #${soul.legacy_host_id})` : "  (local)";
-      io.stdout(`- ${soul.soul_uid}  ${soul.identity.name}${registered}\n`);
+      const registered = soul.legacy_host_id !== null
+        ? `  (public: ${deps.apiBase}/hosts/${soul.legacy_host_id})`
+        : "  (local only; authorize + sync to publish)";
+      const avatar = soul.local_avatar_path && !soul.avatar_uploaded ? "  [chosen avatar pending upload]" : "";
+      io.stdout(`- ${soul.soul_uid}  ${soul.identity.name}${registered}${avatar}\n`);
     }
     return 0;
   }
@@ -416,7 +452,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
       return 2;
     }
     const store = await openStore(root, profileId);
-    let current: { identity: { name: string; description: string; character: string; greeting: string } } | undefined;
+    let current: { legacy_host_id: number | null; identity: { name: string; description: string; character: string; greeting: string; sex?: "male" | "female" | "other"; age?: number } } | undefined;
     try {
       current = (await store.read()).souls[soulUid];
     } finally {
@@ -428,18 +464,99 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
     }
     const pick = (flag: string, key: "name" | "description" | "character" | "greeting"): string =>
       flagValue(args, flag) ?? current!.identity[key] ?? "";
+    if (current.legacy_host_id !== null) {
+      io.stderr("edit_on_website: this Soul is registered — edit its identity on 37soul.com\n");
+      return 1;
+    }
+    const currentIdentity = current.identity;
+    const ageValue = flagValue(args, "--age");
     const identity = {
       name: pick("--name", "name"),
       description: pick("--description", "description"),
       character: pick("--character", "character"),
       greeting: pick("--greeting", "greeting"),
+      sex: (flagValue(args, "--sex") ?? currentIdentity.sex) as "male" | "female" | "other" | undefined,
+      age: ageValue !== undefined ? Number(ageValue) : currentIdentity.age,
     };
-    const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity });
+    const missing = validatePublicProfile(identity);
+    if (missing.length > 0) {
+      io.stderr(`missing or invalid Soul profile fields: ${missing.join(", ")}; complete name, sex, age and at least 50-character character\n`);
+      return 2;
+    }
+    const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity, validate_public_profile: true });
+    const avatarPath = flagValue(args, "--avatar");
+    if (res.ok && avatarPath) {
+      try {
+        if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
+        await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: avatarPath });
+      } catch {
+        io.stderr(`avatar file not found: ${avatarPath}\n`);
+        return 2;
+      }
+    }
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
     }
     io.stdout(`updated soul ${soulUid}\n`);
+    return 0;
+  }
+
+  if (sub === "avatar") {
+    const soulUid = args[0];
+    const file = flagValue(args, "--file") ?? flagValue(args, "--avatar");
+    if (!soulUid || !file) {
+      io.stderr("usage: 37soul soul avatar <soul_uid> --file <image> [--profile <id>]\n");
+      return 2;
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(file);
+    } catch {
+      io.stderr(`avatar file not found: ${file}\n`);
+      return 2;
+    }
+    const config = await loadConfig(root);
+    const store = await openStore(root, profileId);
+    let soul;
+    let ownerId: string | null = null;
+    let cloudDeviceUid: string | null = null;
+    try {
+      const snap = await store.read();
+      soul = snap.souls[soulUid];
+      ownerId = snap.owner_id;
+      cloudDeviceUid = snap.cloud_device_uid;
+    } finally { await store.close(); }
+    if (!soul) { io.stderr(`no local soul ${soulUid}\n`); return 1; }
+    const credentials = selectCredentials(config, profileId, ownerId, cloudDeviceUid);
+    const credential = credentials[0];
+    if (!credential) {
+      await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: file });
+      io.stderr("avatar saved locally; run 37soul login before uploading\n");
+      return 0;
+    }
+    const extension = path.extname(file).toLowerCase();
+    const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : "image/jpeg";
+    const form = new FormData();
+    form.append("file", new Blob([bytes as unknown as ArrayBuffer], { type: mime }), path.basename(file));
+    const response = await deps.fetch(`${deps.apiBase}/api/v1/me/soul_sync/souls/${encodeURIComponent(soulUid)}/avatar`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${credential.token}` },
+      body: form,
+    }).catch(() => null);
+    if (!response || !response.ok) {
+      await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: file });
+      io.stderr(`avatar upload failed${response ? ` (HTTP ${response.status})` : ""}; image kept locally for retry\n`);
+      return 1;
+    }
+    const body = (await response.json().catch(() => ({}))) as { avatar_url?: unknown };
+    const avatarUrl = typeof body.avatar_url === "string" ? body.avatar_url : undefined;
+    await runWriterCommand(root, profileId, "set_soul_avatar", {
+      soul_uid: soulUid,
+      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+      local_avatar_path: file,
+    });
+    io.stdout(`avatar uploaded for ${soulUid}${avatarUrl ? `: ${avatarUrl}` : ""}\n`);
     return 0;
   }
 
@@ -450,14 +567,14 @@ async function soulCommand(root: string, rest: string[], io: CliIO): Promise<num
       return 2;
     }
     const categories = flagValue(args, "--categories") ?? flagValue(args, "--consent") ?? "identity";
-    const res = await runWriterCommand(root, profileId, "authorize_soul", { soul_uid: soulUid, categories });
+    const res = await runWriterCommand(root, profileId, "authorize_soul", { soul_uid: soulUid, categories, publish_profile: true });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
     }
     const result = res.result as { operation?: string; categories?: string[] } | null;
     io.stdout(
-      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})\n`,
+      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"}) queued; run 37soul sync to publish\n`,
     );
     return 0;
   }

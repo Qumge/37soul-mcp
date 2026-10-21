@@ -82,6 +82,9 @@ export interface Identity {
   description: string;
   character: string;
   greeting: string;
+  /** Optional for legacy snapshots; required by the new create/registration flow. */
+  sex?: "male" | "female" | "other";
+  age?: number;
 }
 
 export interface Soul {
@@ -97,6 +100,14 @@ export interface Soul {
   local_identity?: Identity;
   /** Local-only revision of the original identity (never reset to 1 on restore). */
   local_identity_revision?: number;
+  /** New-client public intent; absent means a legacy/private local Soul. */
+  publish_profile?: boolean;
+  /** Canonical server/default avatar URL when known. Never a local path. */
+  avatar_url?: string;
+  /** User-selected local image path; local-only until an authorized upload. */
+  local_avatar_path?: string;
+  /** True only after the cloud accepted the chosen image. */
+  avatar_uploaded?: boolean;
 }
 
 export interface Binding {

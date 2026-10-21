@@ -715,6 +715,41 @@ test("sync: consent cursor reset happens once", async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+// 12b ──────────────────────────────────────────────────────────────────────────────
+test("sync: a same-revision avatar event updates the cloud URL but not a pending local choice", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.souls[IDS.soul].avatar_url = "https://cdn.example/old.webp";
+  });
+
+  const cloudSoul = {
+    soul_uid: IDS.soul,
+    legacy_host_id: 7,
+    identity_revision: 1,
+    identity: { name: "Growth", description: "", character: "", greeting: "" },
+    avatar_url: "https://cdn.example/new.webp",
+    state: "active",
+  };
+  let store = await openStore(root, "p1");
+  await applyPullPage(store, { protocol: "soul-assets/v1", events: [{ event_uid: "a1", object_type: "soul", object: cloudSoul }], next_cursor: "s1", has_more: false });
+  await store.close();
+  assert.equal((await readSnap(root)).souls[IDS.soul].avatar_url, "https://cdn.example/new.webp");
+
+  store = await openStore(root, "p1");
+  await store.transact((d) => {
+    d.souls[IDS.soul].local_avatar_path = "/tmp/chosen.jpg";
+    d.souls[IDS.soul].avatar_uploaded = false;
+    d.souls[IDS.soul].avatar_url = "https://cdn.example/old.webp";
+  });
+  await applyPullPage(store, { protocol: "soul-assets/v1", events: [{ event_uid: "a2", object_type: "soul", object: { ...cloudSoul, avatar_url: "https://cdn.example/default.webp" } }], next_cursor: "s2", has_more: false });
+  await store.close();
+  const soul = (await readSnap(root)).souls[IDS.soul];
+  assert.equal(soul.avatar_url, "https://cdn.example/old.webp", "pending local image is not overwritten by the cloud default");
+  assert.equal(soul.local_avatar_path, "/tmp/chosen.jpg");
+  rmSync(root, { recursive: true, force: true });
+});
+
 // 13 ───────────────────────────────────────────────────────────────────────────────
 test("sync: bootstrap preserves binding history dependencies", async () => {
   const root = tempDir();
@@ -1224,6 +1259,42 @@ test("sync: 409 quarantine honors the server's real error code per endpoint", as
   assert.equal(snap.quarantine["consent-op"]?.reason, "revision_conflict", "consent 409 quarantines under the server code");
   assert.equal(snap.quarantine["bind-op"]?.reason, "binding_conflict", "binding 409 quarantines under the server code");
 
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 21b ──────────────────────────────────────────────────────────────────────────────
+test("sync: a public registration stops when the server lacks soul_profile_public_v1", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.outbox["public-reg"] = {
+      operation_id: "public-reg",
+      operation_kind: "register_soul",
+      request: {
+        soul_uid: IDS.soul,
+        identity: { name: "Growth", description: "", character: "complete", greeting: "", sex: "female", age: 28 },
+        consent_categories: ["identity"],
+        publish_profile: true,
+      },
+      predecessor_operation_ids: [],
+    };
+  });
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/capabilities") {
+      return { status: 200, body: { protocol: "soul-assets/v1", capabilities: ["memory_only_sync"] } };
+    }
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/souls") {
+      return { status: 201, body: { soul: { soul_uid: IDS.soul, identity_revision: 1, identity: {} } } };
+    }
+    return { status: 200, body: emptyPull() };
+  });
+
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(report.error, "server_upgrade_required");
+  assert.equal(http.requests.some((request) => request.method === "POST" && pathnameOf(request.url).endsWith("/souls")), false);
+  const snap = await readSnap(root);
+  assert.ok(snap.outbox["public-reg"], "the public intent stays queued for a newer server");
   rmSync(root, { recursive: true, force: true });
 });
 

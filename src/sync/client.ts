@@ -234,6 +234,29 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
       credentials,
       defaultToken: credentials[0].token,
     };
+    // A new-client public registration must not be silently downgraded by an old
+    // server that ignores publish_profile. Check the advertised capability first.
+    const needsPublicCapability = Object.values(snap.outbox).some(
+      (op) => op.operation_kind === "register_soul" && op.request.publish_profile === true,
+    );
+    if (needsPublicCapability) {
+      try {
+        const capabilities = await requestJson(http, `${baseUrl}${ROUTES}/capabilities`, {
+          method: "GET",
+          headers: authHeaders(auth.defaultToken),
+        }, auth);
+        const listed = (capabilities.body as { capabilities?: unknown } | null)?.capabilities;
+        if (capabilities.status !== 200 || !Array.isArray(listed) || !listed.includes("soul_profile_public_v1")) {
+          report.error = "server_upgrade_required";
+          report.pending = pendingCount(snap);
+          return report;
+        }
+      } catch {
+        report.error = "server_upgrade_required";
+        report.pending = pendingCount(snap);
+        return report;
+      }
+    }
     const pushError = await pushOutbox(store, http, auth, options, report);
     if (pushError) {
       report.error = pushError;
@@ -1051,7 +1074,17 @@ function revokeConsentLocal(draft: StoreSnapshot, consent: Consent, removed: str
 function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
   if (!soul?.soul_uid) return;
   const previous = draft.souls[soul.soul_uid];
-  if (previous && previous.identity_revision >= soul.identity_revision) return;
+  if (previous && previous.identity_revision >= soul.identity_revision) {
+    // Avatar URL is not part of the identity text revision. The avatar endpoint
+    // emits a soul event without changing identity_revision, so apply that one
+    // field even when the text snapshot is already current.
+    if (previous.local_avatar_path && !previous.avatar_uploaded) return;
+    if (soul.avatar_url && soul.avatar_url !== previous.avatar_url) {
+      previous.avatar_url = soul.avatar_url;
+      previous.avatar_uploaded = true;
+    }
+    return;
+  }
   const local = isLocalSoul(previous);
   draft.souls[soul.soul_uid] = {
     soul_uid: soul.soul_uid,
@@ -1060,10 +1093,16 @@ function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
     identity: { ...soul.identity },
     state: "active",
     origin: local ? "local" : "cloud",
+    ...((soul.publish_profile ?? previous?.publish_profile) !== undefined
+      ? { publish_profile: soul.publish_profile ?? previous?.publish_profile }
+      : {}),
+    ...(soul.avatar_url || previous?.avatar_url ? { avatar_url: soul.avatar_url ?? previous?.avatar_url } : {}),
     ...(local
       ? {
           local_identity: previous?.local_identity ?? previous?.identity,
           local_identity_revision: previous?.local_identity_revision ?? previous?.identity_revision,
+          ...(previous?.local_avatar_path ? { local_avatar_path: previous.local_avatar_path } : {}),
+          ...(previous?.avatar_uploaded !== undefined ? { avatar_uploaded: previous.avatar_uploaded } : {}),
         }
       : {}),
   };

@@ -58,6 +58,7 @@ async function readSnap(root, profileId = "p1") {
 }
 
 const SOUL = "10000000-0000-4000-8000-000000000001";
+const PROFILE_ARGS = ["--sex", "female", "--age", "24", "--character", "这是一个完整的人设描述，包含性格、表达方式和长期相处边界，用于通过至少五十个字符的创建质量门槛，并保留完整细节。"];
 
 function asset(uid, state) {
   return {
@@ -163,6 +164,201 @@ test("cli: agentdExtractAdapters gates the four runtime adapters on assets mode"
 
 // R2: local creation is not cloud authorization; the real CLI entry must produce
 // a legal register operation only after an explicit Soul/category choice.
+test("profile: local create requires name/sex/age and a 50-character character", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1");
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const missing = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1"], missing.io), 2);
+    assert.match(missing.out.stderr, /name.*sex.*age.*character/);
+    const young = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "15", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证年龄两端。"] , young.io), 2);
+    assert.match(young.out.stderr, /age/);
+    const short = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "short"], short.io), 2);
+    assert.match(short.out.stderr, /character/);
+    const repetitive = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "啊".repeat(60)], repetitive.io), 2);
+    assert.match(repetitive.out.stderr, /character/);
+
+    const created = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], created.io), 0);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    let store = await openStore(root, "p1");
+    let soul = (await store.read()).souls[uid];
+    await store.close();
+    assert.match(soul.avatar_url, new RegExp(`seed=soul-${uid}`));
+    assert.equal(soul.publish_profile, true);
+    const avatarBefore = soul.avatar_url;
+    assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--name", "Renamed"], makeIo().io), 0);
+    store = await openStore(root, "p1"); soul = (await store.read()).souls[uid]; await store.close();
+    assert.equal(soul.avatar_url, avatarBefore, "default avatar seed follows soul UID, not nickname");
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: --avatar stays local and authorize carries the public intent", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1");
+  const avatar = path.join(home, "avatar.png");
+  writeFileSync(avatar, Buffer.from("not-a-real-png"));
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const created = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS, "--avatar", avatar], created.io), 0);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    let store = await openStore(root, "p1"); let snap = await store.read(); await store.close();
+    assert.equal(snap.souls[uid].local_avatar_path, avatar);
+    assert.equal(Object.keys(snap.outbox).length, 0, "anonymous create performs no upload");
+    assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
+    store = await openStore(root, "p1"); snap = await store.read(); await store.close();
+    const op = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
+    assert.equal(op.request.publish_profile, true);
+    assert.equal(op.request.identity.sex, "female");
+    assert.equal(op.request.identity.age, 24);
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: an old local Soul cannot publish until its missing fields are filled", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const legacyUid = "10000000-0000-4000-8000-0000000000aa";
+  await seed(root, "p1", "dev-1", (d) => {
+    d.souls[legacyUid] = {
+      soul_uid: legacyUid, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "Legacy", description: "", character: "legacy local character", greeting: "" },
+      state: "active", origin: "local",
+      local_identity: { name: "Legacy", description: "", character: "legacy local character", greeting: "" },
+      local_identity_revision: 1,
+    };
+  });
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const refused = makeIo();
+    assert.equal(await main(["soul", "authorize", legacyUid, "--profile", "p1", "--categories", "identity,relationship"], refused.io), 1);
+    assert.match(refused.out.stderr, /invalid_profile.*sex.*age.*character/);
+    let store = await openStore(root, "p1"); let snap = await store.read(); await store.close();
+    assert.equal(Object.keys(snap.outbox).length, 0, "refused authorization must not enqueue a public registration");
+
+    assert.equal(await main(["soul", "edit", legacyUid, "--profile", "p1", "--name", "Legacy", "--sex", "female", "--age", "30", "--character", "补齐后的完整人设，包含稳定的性格、说话方式、兴趣背景和长期相处边界，并沿用原来的本地 UUID，不影响其他 Soul。"], refused.io), 0);
+    assert.equal(await main(["soul", "authorize", legacyUid, "--profile", "p1", "--categories", "identity,relationship"], refused.io), 0);
+    store = await openStore(root, "p1"); snap = await store.read(); await store.close();
+    const op = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
+    assert.equal(op.request.publish_profile, true, "new explicit authorization publishes the completed local profile");
+    assert.equal(op.request.identity.age, 30);
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: an already queued legacy register body is never mutated", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const uid = "10000000-0000-4000-8000-0000000000ab";
+  await seed(root, "p1", "dev-1", (d) => {
+    d.souls[uid] = {
+      soul_uid: uid, legacy_host_id: null, identity_revision: 1,
+      identity: { name: "Old", description: "", character: "补齐后的完整人设，包含稳定的性格、说话方式、兴趣背景和长期相处边界，并沿用原来的本地 UUID，不影响其他 Soul。", greeting: "", sex: "male", age: 31 },
+      state: "active", origin: "local",
+      local_identity: { name: "Old", description: "", character: "补齐后的完整人设，包含稳定的性格、说话方式、兴趣背景和长期相处边界，并沿用原来的本地 UUID，不影响其他 Soul。", greeting: "", sex: "male", age: 31 },
+      local_identity_revision: 1,
+    };
+    d.outbox["legacy-register"] = {
+      operation_id: "legacy-register", operation_kind: "register_soul",
+      request: { soul_uid: uid, identity: d.souls[uid].identity, consent_categories: ["identity"] },
+      predecessor_operation_ids: [],
+    };
+  });
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity"], makeIo().io), 0);
+    const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
+    assert.equal(snap.outbox["legacy-register"], undefined, "the old operation is removed from the active outbox");
+    assert.equal(snap.quarantine["legacy-register"].operation.request.publish_profile, undefined, "its old body is preserved untouched");
+    const current = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
+    assert.equal(current.request.publish_profile, true, "the new operation carries the new intent");
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: avatar upload sends bytes only after login and keeps a retryable local copy", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const uid = "10000000-0000-4000-8000-0000000000ac";
+  const avatar = path.join(home, "chosen.png");
+  writeFileSync(avatar, Buffer.from("PNG-BYTES"));
+  await seed(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls[uid] = {
+      soul_uid: uid, legacy_host_id: 77, identity_revision: 1,
+      identity: { name: "Avatar", description: "", character: "补齐后的完整人设，包含性格、表达方式和长期边界，用于头像上传路径。", greeting: "", sex: "female", age: 28 },
+      state: "active", origin: "local", local_avatar_path: avatar, avatar_uploaded: false,
+    };
+  });
+  writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
+    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+  })}\n`, { mode: 0o600 });
+  const previousHome = process.env.SOUL37_HOME;
+  const previousFetch = globalThis.fetch;
+  process.env.SOUL37_HOME = home;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method, headers: init.headers, body: init.body });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({ protocol: "soul-assets/v1", avatar_url: "https://cdn.example/avatar.webp" }),
+    };
+  };
+  try {
+    const run = makeIo();
+    assert.equal(await main(["soul", "avatar", uid, "--profile", "p1", "--file", avatar], run.io), 0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "PUT");
+    assert.match(calls[0].url, new RegExp(`/souls/${uid}/avatar$`));
+    assert.equal(calls[0].headers.Authorization, "Bearer token-1");
+    assert.equal(typeof calls[0].body.get, "function", "multipart FormData is sent, not a local path string");
+    assert.equal(calls[0].body.get("file").name, "chosen.png");
+    const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
+    assert.equal(snap.souls[uid].avatar_url, "https://cdn.example/avatar.webp");
+    assert.equal(snap.souls[uid].avatar_uploaded, true);
+
+    globalThis.fetch = async () => ({ ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) });
+    const failed = makeIo();
+    assert.equal(await main(["soul", "avatar", uid, "--profile", "p1", "--file", avatar], failed.io), 1);
+    const store2 = await openStore(root, "p1"); const snap2 = await store2.read(); await store2.close();
+    assert.equal(snap2.souls[uid].local_avatar_path, avatar, "failed upload keeps the local image");
+    assert.equal(snap2.souls[uid].avatar_uploaded, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("R2: soul create stays local and soul authorize enqueues explicit consent", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
@@ -171,7 +367,7 @@ test("R2: soul create stays local and soul authorize enqueues explicit consent",
   process.env.SOUL37_HOME = home;
   try {
     const created = makeIo();
-    const code = await main(["soul", "create", "--profile", "p1", "--name", "Growth"], created.io);
+    const code = await main(["soul", "create", "--profile", "p1", "--name", "Growth", ...PROFILE_ARGS], created.io);
     assert.equal(code, 0, created.out.stderr);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid, "the CLI printed the local Soul uid");
@@ -189,7 +385,7 @@ test("R2: soul create stays local and soul authorize enqueues explicit consent",
     const op = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
     assert.ok(op, "authorization enqueued a register operation");
     assert.deepEqual(op.request.consent_categories.sort(), ["identity", "relationship"]);
-    assert.deepEqual(snap.souls[uid].local_identity, { name: "Growth", description: "", character: "", greeting: "" });
+    assert.deepEqual(snap.souls[uid].local_identity, { name: "Growth", description: "", character: "这是一个完整的人设描述，包含性格、表达方式和长期相处边界，用于通过至少五十个字符的创建质量门槛，并保留完整细节。", greeting: "", sex: "female", age: 24 });
   } finally {
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
     else process.env.SOUL37_HOME = previousHome;
@@ -208,11 +404,11 @@ test("F3: local soul create -> edit -> injection uses the edited identity", asyn
   process.env.SOUL37_HOME = home;
   try {
     const created = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Growth", "--character", "ORIGINAL_CANARY"], created.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Growth", "--sex", "female", "--age", "24", "--character", "ORIGINAL_CANARY 这是一个足够长的人设描述，包含性格、表达方式和长期相处边界，用于测试编辑后的注入版本。"], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid);
     const edited = makeIo();
-    assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--character", "UPDATED_CANARY"], edited.io), 0);
+    assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--character", "UPDATED_CANARY 这是一个足够长的人设描述，包含性格、表达方式和长期相处边界，用于测试编辑后的注入版本。"], edited.io), 0);
     const bound = makeIo();
     assert.equal(await main(["bind", "--profile", "p1", "--soul", uid, "--session", "ns-1"], bound.io), 0);
 
@@ -220,8 +416,8 @@ test("F3: local soul create -> edit -> injection uses the edited identity", asyn
     const snap = await store.read();
     await store.close();
     const soul = snap.souls[uid];
-    assert.equal(soul.identity.character, "UPDATED_CANARY");
-    assert.equal(soul.local_identity.character, "UPDATED_CANARY", "the local original is updated too");
+    assert.match(soul.identity.character, /^UPDATED_CANARY/);
+    assert.match(soul.local_identity.character, /^UPDATED_CANARY/, "the local original is updated too");
     assert.equal(soul.identity_revision, 2);
     assert.equal(soul.local_identity_revision, 2, "the version is not reset to 1");
     const binding = Object.values(snap.bindings)[0];
@@ -232,7 +428,7 @@ test("F3: local soul create -> edit -> injection uses the edited identity", asyn
     const exported = makeIo();
     assert.equal(await main(["soul", "export", "--profile", "p1"], exported.io), 0);
     const exportBody = JSON.parse(exported.out.stdout);
-    assert.equal(exportBody.souls[uid].identity.character, "UPDATED_CANARY");
+    assert.match(exportBody.souls[uid].identity.character, /^UPDATED_CANARY/);
     assert.equal(exportBody.souls[uid].identity_revision, 2);
   } finally {
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
@@ -273,6 +469,9 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
   globalThis.fetch = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (init.method === "GET" && pathname.endsWith("/capabilities")) {
+      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+    }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
       return response(201, {
         protocol: "soul-assets/v1",
@@ -304,12 +503,12 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A"], a.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);
 
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B"], b.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity"], makeIo().io), 0);
 
@@ -384,6 +583,9 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
   globalThis.fetch = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     calls.push(`${init.method ?? "GET"} ${pathname}`);
+    if (init.method === "GET" && pathname.endsWith("/capabilities")) {
+      return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] }) };
+    }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
       const body = JSON.parse(String(init.body));
       return {
@@ -409,11 +611,11 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A"], a.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-A", "--agent", "hermes"], makeIo().io), 0);
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B"], b.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
     assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-B", "--agent", "hermes"], makeIo().io), 0);
@@ -465,6 +667,9 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
   globalThis.fetch = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (init.method === "GET" && pathname.endsWith("/capabilities")) {
+      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+    }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
       return response(201, {
         protocol: "soul-assets/v1",
@@ -494,12 +699,12 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A"], a.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);
 
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B"], b.io), 0);
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     // Both are unauthorized: the local switch is allowed and leaves A(base0)+B(base1).
     assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);

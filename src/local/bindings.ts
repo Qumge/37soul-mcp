@@ -503,18 +503,54 @@ function identityFromPayload(payload: Record<string, unknown>): Soul["identity"]
   const identity = (payload.identity ?? {}) as Record<string, unknown>;
   const field = (key: string, fallback: string): string =>
     typeof identity[key] === "string" ? (identity[key] as string) : fallback;
+  const sex = identity.sex;
+  const age = identity.age;
   return {
     name: field("name", ""),
     description: field("description", ""),
     character: field("character", ""),
     greeting: field("greeting", ""),
+    ...(sex === "male" || sex === "female" || sex === "other" ? { sex } : {}),
+    ...(typeof age === "number" && Number.isInteger(age) ? { age } : {}),
   };
+}
+
+export function defaultAvatarUrl(soulUid: string): string {
+  return `https://api.dicebear.com/9.x/open-peeps/png?seed=soul-${encodeURIComponent(soulUid)}&size=200`;
+}
+
+function isRepetitiveCharacter(text: string): boolean {
+  const compact = text.replace(/\s+/gu, "");
+  if ([...compact].length < 12) return false;
+  const latinWords = text.toLowerCase().match(/\p{Script=Latin}+(?:['’]\p{Script=Latin}+)?/gu) ?? [];
+  if (latinWords.length >= 8) {
+    return new Set(latinWords).size / latinWords.length <= 0.2;
+  }
+  return new Set([...compact]).size / [...compact].length <= 0.15;
+}
+
+export function validatePublicProfile(identity: Soul["identity"]): string[] {
+  const errors: string[] = [];
+  if (identity.name.trim() === "" || [...identity.name.trim()].length > 80) errors.push("name");
+  if (identity.sex !== "male" && identity.sex !== "female" && identity.sex !== "other") errors.push("sex");
+  if (!Number.isInteger(identity.age) || (identity.age as number) < 16 || (identity.age as number) > 65) errors.push("age");
+  const character = identity.character.trim();
+  const characterLength = [...character].length;
+  if (characterLength < 50 || characterLength > 8000 || isRepetitiveCharacter(character)) errors.push("character");
+  if ([...identity.description].length > 1000) errors.push("description");
+  if ([...identity.greeting].length > 1000) errors.push("greeting");
+  return errors;
 }
 
 registerWriterCommand("create_soul", async ({ root, request }) => {
   const payload = request.payload;
   const soulUid = typeof payload.soul_uid === "string" && payload.soul_uid ? payload.soul_uid : randomUUID();
   const identity = identityFromPayload(payload);
+  const missing = validatePublicProfile(identity);
+  if (missing.length > 0) {
+    throw new StoreError("invalid_profile", `complete required Soul profile fields: ${missing.join(", ")}`);
+  }
+  const avatarPath = typeof payload.avatar_path === "string" && payload.avatar_path.trim() !== "" ? payload.avatar_path : undefined;
   const soul: Soul = {
     soul_uid: soulUid,
     legacy_host_id: null,
@@ -524,6 +560,9 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
     origin: "local",
     local_identity: { ...identity },
     local_identity_revision: 1,
+    publish_profile: true,
+    avatar_url: defaultAvatarUrl(soulUid),
+    ...(avatarPath ? { local_avatar_path: avatarPath, avatar_uploaded: false } : {}),
   };
   const store = await openStore(root, request.profile_id);
   try {
@@ -563,6 +602,16 @@ registerWriterCommand("authorize_soul", async ({ root, request }) => {
     const cloudDeviceUid = snap.cloud_device_uid;
 
     if (soul.legacy_host_id === null) {
+      // A new CLI authorization is an explicit public intent, including when the
+      // local Soul predates publish_profile. Missing legacy fields are rejected
+      // here; never invent a sex/age just to make it publishable.
+      const publishProfile = request.payload.publish_profile === true || soul.publish_profile === true;
+      if (publishProfile) {
+        const missing = validatePublicProfile(soul.identity);
+        if (missing.length > 0) {
+          throw new StoreError("invalid_profile", `complete required Soul profile fields before publishing: ${missing.join(", ")}`);
+        }
+      }
       // First registration carries the explicit categories; the server returns the
       // Consent for the same device, so no separate empty-category op is needed.
       const previous = Object.values(snap.outbox).find(
@@ -572,7 +621,7 @@ registerWriterCommand("authorize_soul", async ({ root, request }) => {
       const op: OutboxOperation = {
         operation_id: operationId,
         operation_kind: "register_soul",
-        request: { soul_uid: soulUid, identity: soul.identity, consent_categories: categories },
+        request: { soul_uid: soulUid, identity: soul.identity, consent_categories: categories, publish_profile: publishProfile },
         predecessor_operation_ids: previous ? [previous.operation_id] : [],
       };
       await store.transact((draft) => {
@@ -646,6 +695,10 @@ registerWriterCommand("edit_local_identity", async ({ root, request }) => {
       // A registered Soul is a hosted identity: local edits would fork it.
       throw new StoreError("edit_on_website", `soul ${soulUid} is registered — edit its identity on 37soul.com`);
     }
+    if (request.payload.validate_public_profile === true) {
+      const missing = validatePublicProfile(identity);
+      if (missing.length > 0) throw new StoreError("invalid_profile", `complete required Soul profile fields: ${missing.join(", ")}`);
+    }
     await store.transact((draft) => {
       const s = draft.souls[soulUid];
       s.identity = identity;
@@ -654,6 +707,28 @@ registerWriterCommand("edit_local_identity", async ({ root, request }) => {
       // identity IS the local original used by injection/export.
       s.local_identity = { ...identity };
       s.local_identity_revision = (s.local_identity_revision ?? 1) + 1;
+    });
+    return (await store.read()).souls[soulUid];
+  } finally {
+    await store.close();
+  }
+});
+
+registerWriterCommand("set_soul_avatar", async ({ root, request }) => {
+  const soulUid = String(request.payload.soul_uid ?? "");
+  const store = await openStore(root, request.profile_id);
+  try {
+    await store.transact((draft) => {
+      const soul = draft.souls[soulUid];
+      if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid}`);
+      if (typeof request.payload.avatar_url === "string" && request.payload.avatar_url !== "") {
+        soul.avatar_url = request.payload.avatar_url;
+        soul.avatar_uploaded = true;
+      }
+      if (typeof request.payload.local_avatar_path === "string" && request.payload.local_avatar_path !== "") {
+        soul.local_avatar_path = request.payload.local_avatar_path;
+        if (!request.payload.avatar_url) soul.avatar_uploaded = false;
+      }
     });
     return (await store.read()).souls[soulUid];
   } finally {
