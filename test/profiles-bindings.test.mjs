@@ -1089,6 +1089,91 @@ test("login: --use-profile leaves resolution untouched when the default is absen
 
 // R8: detach is an explicit user intent; ordinary lifecycle resolution must not
 // silently recreate a binding through defaults or the unique-Soul path.
+test("P2-1: an authorized predecessor chain still allows a legal same-session switch", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls["A"] = makeSoul("A");
+    d.souls["B"] = makeSoul("B");
+    d.consents["cdu-1:A"] = {
+      cloud_device_uid: "cdu-1", soul_uid: "A", revision: 1,
+      categories: ["identity"], enabled: true,
+    };
+    d.consents["cdu-1:B"] = {
+      cloud_device_uid: "cdu-1", soul_uid: "B", revision: 1,
+      categories: ["identity"], enabled: true,
+    };
+  });
+  const key = keyOf("p1", "dev-1", "hermes", "ns-authorized");
+  const a = await selectSoul(key, "A", { root });
+  const b = await selectSoul(key, "B", { root });
+  assert.equal(b.soul_uid, "B");
+  assert.equal(b.revision, a.revision + 1, "the authorized predecessor chain permits the switch");
+  const again = await selectSoul(key, "B", { root });
+  assert.equal(again.binding_uid, b.binding_uid);
+  assert.equal(again.revision, b.revision);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("P2-2: same-Soul selection stays idempotent after injection", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls["B"] = makeSoul("B");
+    d.consents["cdu-1:B"] = {
+      cloud_device_uid: "cdu-1", soul_uid: "B", revision: 1,
+      categories: ["identity", "relationship", "experience"], enabled: true,
+    };
+  });
+  const key = keyOf("p1", "dev-1", "hermes", "ns-legal");
+  const first = await selectSoul(key, "B", { root });
+  const store = await openStore(root, "p1");
+  await store.transact((d) => {
+    const binding = d.bindings[bindingKey(key)];
+    binding.cloud_revision = 1;
+    binding.unconfirmed = false;
+    for (const [id, op] of Object.entries(d.outbox)) {
+      if (op.operation_kind === "binding") delete d.outbox[id];
+    }
+    d.receipts["r-injected"] = {
+      binding_uid: binding.binding_uid,
+      binding_revision: binding.revision,
+      stage: "injected",
+      manifest: [],
+      rendered_sha256: "sha",
+    };
+  });
+  await store.close();
+
+  const again = await selectSoul(key, "B", { root });
+  assert.equal(again.binding_uid, first.binding_uid, "same binding UID");
+  assert.equal(again.revision, first.revision, "no revision bump");
+  assert.equal(again.soul_uid, "B");
+  const explicit = await resolveBinding(key, "B", { root });
+  assert.equal(explicit.binding_uid, first.binding_uid, "explicit same-Soul resolve still injects");
+  const implicit = await resolveBinding(key, undefined, { root });
+  assert.equal(implicit.binding_uid, first.binding_uid, "implicit same-Soul resolve still injects");
+
+  const after = await openStore(root, "p1");
+  const snap = await after.read();
+  await after.close();
+  assert.ok(
+    !Object.values(snap.outbox).some((op) => op.operation_kind === "binding"),
+    "idempotent selection creates no new operation",
+  );
+  assert.equal(snap.bindings[bindingKey(key)].revision, first.revision);
+
+  // A different Soul on the injected session remains a new-session error.
+  const other = await openStore(root, "p1");
+  await other.transact((d) => { d.souls["C"] = makeSoul("C"); });
+  await other.close();
+  assert.deepEqual(await selectSoul(key, "C", { root }), { error: "needs_new_session" });
+  assert.equal(await resolveBinding(key, "C", { root }), null);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("P2: an unconfirmed unauthorized switch cannot enqueue the authorized target", async () => {
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {

@@ -141,7 +141,7 @@ only — publishing the tarball, `.sha256` and `VERSION` as a GitHub Release is 
 explicitly-authorized step.
 
 ```bash
-git tag v0.11.3 && git push origin v0.11.3
+git tag v0.11.4 && git push origin v0.11.4
 ```
 
 The tarball root is `37soul/` and carries `package.json`, `dist/bundle/{cli,index}.js`,

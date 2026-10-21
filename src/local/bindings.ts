@@ -227,20 +227,42 @@ function hasCloudIdentityAuthorization(snap: StoreSnapshot, soulUid: string): bo
   });
 }
 
-/** The base_revision of the queued binding operation for this exact record, if any. */
-function pendingBindingBase(snap: StoreSnapshot, binding: BindingSnapshot): number | null {
-  const op = Object.values(snap.outbox).find(
-    (candidate) => candidate.operation_kind === "binding" && candidate.request.session_ref === binding.session_ref,
+/** The queued binding operation for this exact record and Soul, if any. */
+function pendingBindingOp(snap: StoreSnapshot, binding: BindingSnapshot): OutboxOperation | undefined {
+  return Object.values(snap.outbox).find(
+    (candidate) =>
+      candidate.operation_kind === "binding" &&
+      candidate.request.session_ref === binding.session_ref &&
+      candidate.request.soul_uid === binding.soul_uid,
   );
-  return op ? Number(op.request.base_revision ?? 0) : null;
 }
 
 /**
- * A same-native-session switch when the old binding has never been confirmed by the
- * cloud (cloud_revision 0) cannot carry base_revision > 0: the predecessor was either
- * never sent (unauthorized A) or not acknowledged. The cloud would CAS against version
- * 0 and permanently quarantine the new Soul. Refuse the switch with the existing
- * `needs_new_session` contract instead of enqueueing an invalid operation.
+ * Can this queued binding operation legally establish/advance a cloud binding from
+ * revision 0? Every predecessor that is still queued must belong to an authorized
+ * Soul and itself be sendable; an op without a predecessor must start at base 0.
+ * Another Soul's unrelated base-0 op is never treated as this Soul's predecessor.
+ */
+function bindingChainSendable(snap: StoreSnapshot, op: OutboxOperation, seen = new Set<string>()): boolean {
+  if (seen.has(op.operation_id)) return false; // corrupt cycle: never claim it is usable
+  seen.add(op.operation_id);
+  if (!hasCloudIdentityAuthorization(snap, String(op.request.soul_uid ?? ""))) return false;
+  const predecessors = op.predecessor_operation_ids ?? [];
+  if (predecessors.length === 0) return Number(op.request.base_revision ?? 0) === 0;
+  for (const predecessorId of predecessors) {
+    const predecessor = snap.outbox[predecessorId];
+    if (!predecessor || predecessor.operation_kind !== "binding") return false;
+    if (!bindingChainSendable(snap, predecessor, seen)) return false;
+  }
+  return true;
+}
+
+/**
+ * A same-native-session selection when the old binding has never been confirmed by the
+ * cloud (cloud_revision 0) can only be used while the current record has a legal
+ * authorized operation chain. A parked/absent operation, or one whose predecessor is
+ * an unauthorized Soul, must go to a new session instead of claiming success and then
+ * permanently quarantining on a base_revision conflict.
  *
  * Only a Soul with an actual or pending identity authorization is protected; a
  * local-only switch between two unauthorized Souls remains a local operation.
@@ -251,13 +273,8 @@ function switchNeedsNewSession(snap: StoreSnapshot, existing: BindingSnapshot, s
   if (existing.unconfirmed !== true) return false;
   if ((existing.cloud_revision ?? 0) !== 0) return false;
   if (!hasCloudIdentityAuthorization(snap, soulUid)) return false;
-  // A different Soul on an unconfirmed record would be sent with base_revision > 0.
-  if (existing.soul_uid !== soulUid) return true;
-  // The same Soul is safe only while a legal base-0 operation is still pending.
-  // A parked/absent operation, or one that inherited base_revision > 0 from an
-  // unsent predecessor, must not report success for a record the cloud never
-  // accepted; send the user to a new session instead.
-  return pendingBindingBase(snap, existing) !== 0;
+  const operation = pendingBindingOp(snap, existing);
+  return operation === undefined || !bindingChainSendable(snap, operation);
 }
 
 /** Persist a mutation of an existing binding record (switch / re-bind), revision + 1. */
@@ -343,9 +360,14 @@ export async function resolveBinding(
     if (explicitSoulUid) {
       if (!snap.souls[explicitSoulUid]) return null; // unknown explicit UID: never guess
       if (existing) {
+        // Same-Soul selection is idempotent even after injection. The guard still
+        // runs first so a parked/unconfirmed record cannot be mistaken for a legal
+        // binding; a different Soul on an injected session stays refused.
+        if (existing.state === "bound" && existing.soul_uid === explicitSoulUid) {
+          return switchNeedsNewSession(snap, existing, explicitSoulUid) ? null : existing;
+        }
         if (existing.state === "bound" && isInjected(snap, existing)) return null; // do not touch an injected session
         if (switchNeedsNewSession(snap, existing, explicitSoulUid)) return null;
-        if (existing.state === "bound" && existing.soul_uid === explicitSoulUid) return existing;
         // Explicit choice is the only path that may restore a detached/re-pointed record.
         return rebindExisting(store, snap, k, existing, explicitSoulUid);
       }
@@ -388,14 +410,19 @@ export async function selectSoul(
     const existing = snap.bindings[k];
 
     if (existing) {
-      // Switching an already-injected session loses the injected context: refuse.
+      // Same-Soul selection is idempotent even after injection, but only when the
+      // record is legal (the parked/invalid guard is checked first). Switching a
+      // different Soul on an injected session still requires a new session.
+      if (existing.state === "bound" && existing.soul_uid === soulUid) {
+        if (switchNeedsNewSession(snap, existing, soulUid)) return { error: "needs_new_session" };
+        return toBinding(existing);
+      }
       if (existing.state === "bound" && isInjected(snap, existing)) {
         return { error: "needs_new_session" };
       }
       if (switchNeedsNewSession(snap, existing, soulUid)) {
         return { error: "needs_new_session" };
       }
-      if (existing.state === "bound" && existing.soul_uid === soulUid) return toBinding(existing);
       return toBinding(await rebindExisting(store, snap, k, existing, soulUid));
     }
 

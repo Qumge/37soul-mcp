@@ -4,9 +4,9 @@
 
 > **MVP 后续（同日）：** 本文件记录的 0.11.2 是 R1–R9/F1–F3 复审基线。之后补了
 > Task 0 同 Session 改选残留、重复安装保留凭据、首次恢复默认 Soul、状态文案和
-> Node20 本地测试，最终候选为 **0.11.3**，tar hash
-> `fbd2a72a44cc6b78fa3bb7fb28cd4fd402fadfe6ecc6ce36414652bff421b723`。
-> Node18.20.4 / Node20.20.2 / Node24.18.0 均 304/304；四工具实机、GitHub CI、
+> Node20 本地测试，最终候选为 **0.11.4**，tar hash
+> `55ddbd893f101f2f55eaf9217da899dfeedaf96af8c19adf0443e4b3957b55b0`。
+> Node18.20.4 / Node20.20.2 / Node24.18.0 均 307/307；四工具实机、GitHub CI、
 > 发布和生产仍未执行。详细验收以
 > `37soul/docs/superpowers/plans/2026-10-21-persistent-soul-mvp-launch.md` 为准。
 
