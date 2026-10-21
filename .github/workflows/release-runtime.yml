@@ -3,11 +3,12 @@ name: Verify runtime
 # Builds and verifies the self-contained installer runtime only. There is NO
 # upload-to-Release job here: publishing is a separate, explicitly-authorized step
 # (the tarball + .sha256 + VERSION stay local build artifacts). Trigger: push a tag
-# vX.Y.Z that matches package.json.
+# vX.Y.Z that matches package.json, or run it manually from the Actions tab.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read

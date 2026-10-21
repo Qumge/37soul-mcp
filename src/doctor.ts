@@ -13,6 +13,7 @@ import { codexHookConfigPath, inspectCodexTrust } from "./adapters/codex.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
+import { readCredentials } from "./agentd/credentials.js";
 import { isAssetsModeSync } from "./sync/client.js";
 import { openStore } from "./local/store.js";
 
@@ -63,10 +64,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
           await store.close();
         }
       }
+      const credentials = readCredentials(config);
       checks.push({
         name: "soul sync",
         ok: true,
-        detail: `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined`,
+        detail: credentials.length === 0
+          ? "assets_only mode — login required; local assets stay local"
+          : `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined`,
       });
     } catch {
       checks.push({ name: "soul sync", ok: true, detail: "assets_only mode" });
@@ -85,8 +89,18 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
 
   for (const agentKind of agents) {
     const token = config.tokens[agentKind];
-    if (token) {
-      // token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）
+    if (assetsMode && (token || manifestAgents.has(agentKind))) {
+      // Assets mode never calls the legacy /brief writeback. The useful state is
+      // whether this runtime has a scoped credential for this profile/device.
+      const scoped = readCredentials(config).some((credential) => credential.runtime_kind === agentKind);
+      checks.push({
+        name: `${agentKind}: sync credential`,
+        ok: scoped,
+        detail: scoped ? "scoped to this profile, owner, device and runtime" : "not available — run `37soul login`",
+      });
+    }
+    if (token && !assetsMode) {
+      // Legacy transcript mode only: token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）
       const response = await deps.fetch(`${config.api_base_url}/api/v1/me/brief?agent_kind=${encodeURIComponent(agentKind)}`, {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(5000),
@@ -115,7 +129,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       });
       const instructions = await readTextSafe(claudeInstructionsPath(deps.home));
       checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: claudeInstructionsPath(deps.home) });
-      checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered — resume/checkpoint over MCP unavailable" });
+      if (!assetsMode) {
+        checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered — resume/checkpoint over MCP unavailable" });
+      }
 
       const projects = path.join(deps.home, ".claude", "projects");
       checks.push(await dirCheck(`${agentKind}: session records`, projects));
@@ -159,7 +175,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       .filter(Boolean)
       .sort()
       .at(-1);
-    checks.push({ name: `${agentKind}: last upload`, ok: Boolean(lastUpload), detail: lastUpload ?? "never (nothing captured yet)" });
+    if (!assetsMode) {
+      checks.push({ name: `${agentKind}: last upload`, ok: Boolean(lastUpload), detail: lastUpload ?? "never (nothing captured yet)" });
+    }
   }
 
   // 审查修复 1：hook 和后台服务都指向固定 runtime 的启动器 —— 这两条路径必须还在。
@@ -218,7 +236,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       ok: recent,
       detail: stats?.lastModifiedMs ? `last event ${new Date(stats.lastModifiedMs).toISOString()}` : "no hook events yet",
     });
-    if (!recent && !(config.transcript_fallback ?? []).includes(agentKind)) {
+    if (!assetsMode && !recent && !(config.transcript_fallback ?? []).includes(agentKind)) {
       checks.push({
         name: `${agentKind}: transcript fallback`,
         ok: true,

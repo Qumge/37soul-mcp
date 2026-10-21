@@ -24,7 +24,8 @@ import {
 } from "../dist/install.js";
 import { plistPath, renderPlist, systemdPath } from "../dist/service.js";
 import { installRuntime, runtimeDir, runtimeLauncher, binLinkPath, linkBin } from "../dist/install.js";
-import { loadConfig } from "../dist/agentd/state.js";
+import { loadConfig, saveConfig } from "../dist/agentd/state.js";
+import { openStore } from "../dist/local/store.js";
 import { runDoctor } from "../dist/doctor.js";
 import { codexHookConfigPath } from "../dist/adapters/codex.js";
 import {
@@ -991,5 +992,61 @@ test("doctor: Hermes gateway-only reports explicitly, never as CLI", async () =>
     "Hermes config declares a gateway-only surface — this is not a CLI model capability, so structured extraction stays off",
   );
 
+  h.cleanup();
+});
+
+test("install: repeat install preserves scoped credentials, profile, Soul UUID and assets", async () => {
+  const h = harness();
+  const root = dataRoot(h.home);
+  const profileId = "default";
+  mkdirSync(path.join(root, "profiles", profileId), { recursive: true });
+  writeFileSync(path.join(root, "profiles", profileId, "device.json"), `${JSON.stringify({ device_id: "dev-1" })}\n`, { mode: 0o600 });
+  const store = await openStore(root, profileId);
+  const soulUid = "10000000-0000-4000-8000-000000000001";
+  const assetUid = "40000000-0000-4000-8000-000000000001";
+  await store.transact((d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls[soulUid] = {
+      soul_uid: soulUid, legacy_host_id: 42, identity_revision: 1,
+      identity: { name: "Growth", description: "", character: "evidence first", greeting: "" },
+      state: "active", origin: "local",
+      local_identity: { name: "Growth", description: "", character: "evidence first", greeting: "" },
+      local_identity_revision: 1,
+    };
+    d.assets[assetUid] = {
+      asset_uid: assetUid, soul_uid: soulUid, kind: "relationship", trait: "preference",
+      content: "keep me", applicability: "", tags: [], evidence: "explicit_user_statement",
+      verification: "unverified", sensitivity: "normal", state: "active", revision: 1,
+      supersedes_uid: null, pinned: false,
+      source: { runtime_kind: "hermes", session_ref: "s", event_ref: "e", occurred_at: "2026-10-20T00:00:00Z" },
+      sync_state: "synced", cloud_revision: 1,
+    };
+  });
+  await store.close();
+  const credentials = [{
+    token: "scoped-token", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    runtime_kind: "hermes", profile_id: profileId, obtained_at: "2026-10-20T00:00:00Z",
+  }];
+  await saveConfig(root, {
+    api_base_url: "https://app.test",
+    machine_id: "machine-1",
+    tokens: { hermes: "scoped-token" },
+    credentials,
+  });
+
+  const networkBefore = h.deps.fetch.calls.length;
+  await install(h.deps, { agents: ["claude-code"] });
+  assert.equal(h.deps.fetch.calls.length, networkBefore, "repeat install makes no cloud request");
+  const config = await loadConfig(root);
+  assert.deepEqual(config.credentials, credentials, "scoped credentials survive repeat install");
+  assert.equal(config.machine_id, "machine-1");
+
+  const afterStore = await openStore(root, profileId);
+  const snap = await afterStore.read();
+  await afterStore.close();
+  assert.equal(snap.souls[soulUid].legacy_host_id, 42);
+  assert.equal(snap.souls[soulUid].identity.character, "evidence first");
+  assert.equal(snap.assets[assetUid].content, "keep me");
   h.cleanup();
 });

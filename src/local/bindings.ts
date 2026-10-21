@@ -209,6 +209,57 @@ async function pickSoul(
 
 type LocalStore = Awaited<ReturnType<typeof openStore>>;
 
+/** Does this Soul have an actual or still-pending identity authorization? */
+function hasCloudIdentityAuthorization(snap: StoreSnapshot, soulUid: string): boolean {
+  const consent = snap.cloud_device_uid
+    ? snap.consents[`${snap.cloud_device_uid}:${soulUid}`]
+    : undefined;
+  if (consent?.enabled && consent.categories.includes("identity")) return true;
+  return Object.values(snap.outbox).some((op) => {
+    if (op.request.soul_uid !== soulUid) return false;
+    if (op.operation_kind === "register_soul") {
+      return Array.isArray(op.request.consent_categories) && op.request.consent_categories.includes("identity");
+    }
+    return op.operation_kind === "consent" &&
+      op.request.enabled !== false &&
+      Array.isArray(op.request.categories) &&
+      op.request.categories.includes("identity");
+  });
+}
+
+/** The base_revision of the queued binding operation for this exact record, if any. */
+function pendingBindingBase(snap: StoreSnapshot, binding: BindingSnapshot): number | null {
+  const op = Object.values(snap.outbox).find(
+    (candidate) => candidate.operation_kind === "binding" && candidate.request.session_ref === binding.session_ref,
+  );
+  return op ? Number(op.request.base_revision ?? 0) : null;
+}
+
+/**
+ * A same-native-session switch when the old binding has never been confirmed by the
+ * cloud (cloud_revision 0) cannot carry base_revision > 0: the predecessor was either
+ * never sent (unauthorized A) or not acknowledged. The cloud would CAS against version
+ * 0 and permanently quarantine the new Soul. Refuse the switch with the existing
+ * `needs_new_session` contract instead of enqueueing an invalid operation.
+ *
+ * Only a Soul with an actual or pending identity authorization is protected; a
+ * local-only switch between two unauthorized Souls remains a local operation.
+ */
+function switchNeedsNewSession(snap: StoreSnapshot, existing: BindingSnapshot, soulUid: string): boolean {
+  // Legacy/confirmed records predate the local/confirmed split; never reinterpret
+  // them as an unconfirmed local mutation.
+  if (existing.unconfirmed !== true) return false;
+  if ((existing.cloud_revision ?? 0) !== 0) return false;
+  if (!hasCloudIdentityAuthorization(snap, soulUid)) return false;
+  // A different Soul on an unconfirmed record would be sent with base_revision > 0.
+  if (existing.soul_uid !== soulUid) return true;
+  // The same Soul is safe only while a legal base-0 operation is still pending.
+  // A parked/absent operation, or one that inherited base_revision > 0 from an
+  // unsent predecessor, must not report success for a record the cloud never
+  // accepted; send the user to a new session instead.
+  return pendingBindingBase(snap, existing) !== 0;
+}
+
 /** Persist a mutation of an existing binding record (switch / re-bind), revision + 1. */
 async function rebindExisting(
   store: LocalStore,
@@ -217,6 +268,12 @@ async function rebindExisting(
   existing: BindingSnapshot,
   soulUid: string,
 ): Promise<BindingSnapshot> {
+  if (switchNeedsNewSession(snap, existing, soulUid)) {
+    throw new StoreError(
+      "needs_new_session",
+      "this session's previous Soul has not reached the cloud; start a new session and bind the new Soul there",
+    );
+  }
   const pred = lastBindingOpId(snap, existing.session_ref);
   const next: BindingSnapshot = {
     ...existing,
@@ -286,8 +343,9 @@ export async function resolveBinding(
     if (explicitSoulUid) {
       if (!snap.souls[explicitSoulUid]) return null; // unknown explicit UID: never guess
       if (existing) {
-        if (existing.state === "bound" && existing.soul_uid === explicitSoulUid) return existing;
         if (existing.state === "bound" && isInjected(snap, existing)) return null; // do not touch an injected session
+        if (switchNeedsNewSession(snap, existing, explicitSoulUid)) return null;
+        if (existing.state === "bound" && existing.soul_uid === explicitSoulUid) return existing;
         // Explicit choice is the only path that may restore a detached/re-pointed record.
         return rebindExisting(store, snap, k, existing, explicitSoulUid);
       }
@@ -295,8 +353,12 @@ export async function resolveBinding(
     }
 
     // 2. native binding. A detached record is a user intent: ordinary lifecycle
-    // events must never resurrect it through defaults or a unique Soul.
-    if (existing) return existing.state === "bound" ? existing : null;
+    // events must never resurrect it through defaults or a unique Soul. An
+    // unconfirmed record whose operation was parked must wait for a new session.
+    if (existing) {
+      if (switchNeedsNewSession(snap, existing, existing.soul_uid)) return null;
+      return existing.state === "bound" ? existing : null;
+    }
 
     // 3-6. tool default -> account default -> unique -> refuse
     const soulUid = await pickSoul(root, snap, key);
@@ -326,11 +388,14 @@ export async function selectSoul(
     const existing = snap.bindings[k];
 
     if (existing) {
-      if (existing.state === "bound" && existing.soul_uid === soulUid) return toBinding(existing);
       // Switching an already-injected session loses the injected context: refuse.
       if (existing.state === "bound" && isInjected(snap, existing)) {
         return { error: "needs_new_session" };
       }
+      if (switchNeedsNewSession(snap, existing, soulUid)) {
+        return { error: "needs_new_session" };
+      }
+      if (existing.state === "bound" && existing.soul_uid === soulUid) return toBinding(existing);
       return toBinding(await rebindExisting(store, snap, k, existing, soulUid));
     }
 

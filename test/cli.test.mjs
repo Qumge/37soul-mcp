@@ -242,6 +242,124 @@ test("F3: local soul create -> edit -> injection uses the edited identity", asyn
 
 // F1: the real create/bind entry must not send an unauthorized Soul's binding,
 // and must still sync an explicitly authorized second Soul.
+test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from a new session", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+  });
+  writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
+    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+  })}\n`, { mode: 0o600 });
+  writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
+    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+  })}\n`, { mode: 0o600 });
+
+  const previousHome = process.env.SOUL37_HOME;
+  const previousFetch = globalThis.fetch;
+  process.env.SOUL37_HOME = home;
+  const bindings = new Map();
+  const bindingRequests = [];
+  const response = (status, body) => ({
+    status, ok: status >= 200 && status < 300,
+    headers: { get: () => null },
+    body: { cancel: async () => {} },
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
+    if (init.method === "POST" && pathname.endsWith("/souls")) {
+      return response(201, {
+        protocol: "soul-assets/v1",
+        soul: { soul_uid: body.soul_uid, legacy_host_id: 88, identity_revision: 1, identity: body.identity, state: "active" },
+        consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
+      });
+    }
+    if (init.method === "PUT" && pathname.includes("/bindings/")) {
+      const bindingUid = pathname.split("/").pop();
+      const existing = bindings.get(bindingUid);
+      bindingRequests.push({ bindingUid, body: { ...body } });
+      if (!existing) {
+        if (body.base_revision !== 0) {
+          return response(409, { error: { code: "revision_conflict", current_revision: 0 } });
+        }
+        const created = { ...body, binding_uid: bindingUid, revision: 1 };
+        bindings.set(bindingUid, created);
+        return response(200, { protocol: "soul-assets/v1", binding: created });
+      }
+      if (existing.revision !== body.base_revision) {
+        return response(409, { error: { code: "revision_conflict", current_revision: existing.revision } });
+      }
+      const updated = { ...existing, ...body, revision: existing.revision + 1 };
+      bindings.set(bindingUid, updated);
+      return response(200, { protocol: "soul-assets/v1", binding: updated });
+    }
+    return response(200, { protocol: "soul-assets/v1", events: [], next_cursor: null, has_more: false });
+  };
+
+  try {
+    const a = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A"], a.io), 0);
+    const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
+    assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);
+
+    const b = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B"], b.io), 0);
+    const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
+    assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity"], makeIo().io), 0);
+
+    const refused = makeIo();
+    assert.equal(
+      await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-shared", "--agent", "hermes"], refused.io),
+      1,
+    );
+    assert.match(refused.out.stderr, /start a new session/);
+
+    const beforeSync = await readSnap(root, "p1");
+    assert.equal(Object.values(beforeSync.bindings)[0].soul_uid, aUid, "A stays the local binding");
+    assert.ok(
+      !Object.values(beforeSync.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === bUid),
+      "B is not queued with an invalid base revision",
+    );
+
+    // Follow the prompt: a new native session binds B at cloud base 0.
+    assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-new", "--agent", "hermes"], makeIo().io), 0);
+    const sync = makeIo();
+    assert.equal(await main(["sync", "--profile", "p1"], sync.io), 0, sync.out.stderr);
+    assert.equal(bindings.size, 1);
+    assert.ok(bindingRequests.some((request) => request.body.base_revision === 0 && request.body.soul_uid === bUid));
+
+    const afterSync = await readSnap(root, "p1");
+    assert.ok(afterSync.souls[aUid], "A remains local");
+    assert.ok(
+      Object.values(afterSync.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === aUid),
+      "A's unsent binding is retained locally",
+    );
+    assert.ok(
+      !Object.values(afterSync.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === bUid),
+      "B's binding was accepted",
+    );
+    assert.ok(
+      !Object.values(afterSync.quarantine).some((entry) => entry.reason === "revision_conflict"),
+      "B is not permanently quarantined",
+    );
+
+    const second = makeIo();
+    assert.equal(await main(["sync", "--profile", "p1"], second.io), 0, second.out.stderr);
+    const final = await readSnap(root, "p1");
+    assert.ok(!Object.values(final.quarantine).some((entry) => entry.operation.request.soul_uid === bUid));
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the authorized one", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");

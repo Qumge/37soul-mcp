@@ -387,6 +387,13 @@ async function pushOne(
         });
         return null;
       }
+      // A rebind that inherited a local revision from a predecessor that never
+      // reached the cloud (e.g. it was an unauthorized Soul) would CAS against 0
+      // and be permanently quarantined as revision_conflict. Park it with the
+      // actionable same contract instead of sending an invalid request.
+      if ((binding.cloud_revision ?? 0) === 0 && Number(op.request.base_revision ?? 0) > 0) {
+        return quarantineOp(store, op, "needs_new_session", report, null);
+      }
       const res = await requestJson(http, `${auth.baseUrl}${ROUTES}/bindings/${encodeURIComponent(binding.binding_uid)}`, {
         method: "PUT",
         headers: { ...headers, "idempotency-key": op.operation_id },

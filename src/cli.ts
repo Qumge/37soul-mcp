@@ -62,10 +62,10 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul install [--agents claude-code,codex,opencode,hermes] [--plan] [--fallback codex]
                                                 connect the agents on this machine
   37soul doctor                                  check configuration and credentials
-  37soul status                                  show machine, tokens, last uploads
+  37soul status                                  show machine, credentials and Soul sync state
   37soul pause [--repo <path|repo-key>]          pause capture (all, or one repo)
   37soul resume                                  resume capture
-  37soul uninstall                               remove hooks, instructions, service, data
+  37soul uninstall                               remove managed hooks/service; keep profiles and raw archives
 
   37soul login [--profile <id>]                  device login; merge the local anonymous profile
   37soul sync [--profile <id>]                   push/pull the local soul (all assets-mode profiles, or one)
@@ -126,7 +126,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       for (const check of doctor.checks) {
         io.stdout(`${check.ok ? "✓" : "✗"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}\n`);
       }
-      io.stdout("\nCapture keeps running in the background; nothing else to do.\n");
+      io.stdout("\nLocal use is ready. Raw conversation stays local. To sync long-term Soul assets to 37Soul, run `37soul login`.\n");
       return doctor.ok ? 0 : 1;
     }
     case "doctor": {
@@ -540,7 +540,7 @@ export async function bindCommand(root: string, rest: string[], io: CliIO, detac
   // whose payload is `{ error: "needs_new_session" }` — surface it, don't print it.
   const result = res.result as { error?: unknown } | null;
   if (result !== null && typeof result === "object" && result.error === "needs_new_session") {
-    io.stderr("this session already has a different soul injected; start a new session to switch\n");
+    io.stderr("this session cannot switch Souls in place; start a new session and bind the new Soul there\n");
     return 1;
   }
   // Never print the native session id; report the cloud-facing binding identity only.
@@ -702,6 +702,32 @@ export async function loginCommand(
     }
   } catch (error) {
     io.stderr(`sync deferred: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+
+  // Path B: the selected website Soul arrives via the first Pull, not in the
+  // pre-login snapshot. Set it as the account default only after it actually exists
+  // locally; never fabricate a same-name replacement.
+  if (login.default_soul_uid) {
+    try {
+      const store = await openStore(root, adoptedProfileForCredentials);
+      try {
+        const snap = await store.read();
+        const restored = snap.souls[login.default_soul_uid];
+        if (restored) {
+          await setAccountDefaultSoul(adoptedProfileForCredentials, login.default_soul_uid, { root });
+          const assets = Object.values(snap.assets).filter(
+            (asset) => asset.soul_uid === login.default_soul_uid && asset.state !== "deleted",
+          );
+          io.stdout(`Soul restored: ${restored.identity.name || restored.soul_uid} (${restored.soul_uid}), ${assets.length} asset(s)\n`);
+        } else {
+          io.stderr(`the selected Soul ${login.default_soul_uid} has not downloaded yet; run 37soul sync\n`);
+        }
+      } finally {
+        await store.close();
+      }
+    } catch {
+      // A failed default write must not turn a successful login into an error.
+    }
   }
 
   // Print the profile actually adopted (the writer result), never the current/anonymous

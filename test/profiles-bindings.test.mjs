@@ -36,6 +36,7 @@ import {
 } from "../dist/local/profiles.js";
 import { deviceLogin } from "../dist/install.js";
 import { loginCommand, bindCommand } from "../dist/cli.js";
+import { configureSyncHttp } from "../dist/sync/client.js";
 
 function tempDir(prefix = "profiles-bindings-") {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -1088,6 +1089,45 @@ test("login: --use-profile leaves resolution untouched when the default is absen
 
 // R8: detach is an explicit user intent; ordinary lifecycle resolution must not
 // silently recreate a binding through defaults or the unique-Soul path.
+test("P2: an unconfirmed unauthorized switch cannot enqueue the authorized target", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+    d.souls["A"] = makeSoul("A");
+    d.souls["B"] = makeSoul("B");
+    // The user ran `soul authorize B` but has not synced it yet.
+    d.outbox["register-B"] = {
+      operation_id: "register-B",
+      operation_kind: "register_soul",
+      request: { soul_uid: "B", identity: makeSoul("B").identity, consent_categories: ["identity"] },
+      predecessor_operation_ids: [],
+    };
+  });
+  const key = keyOf("p1", "dev-1", "hermes", "same-session");
+  const a = await selectSoul(key, "A", { root });
+  assert.equal(a.revision, 1);
+
+  const refused = await selectSoul(key, "B", { root });
+  assert.deepEqual(refused, { error: "needs_new_session" });
+
+  const store = await openStore(root, "p1");
+  const snap = await store.read();
+  await store.close();
+  assert.equal(snap.bindings[bindingKey(key)].soul_uid, "A", "the local A binding is preserved");
+  assert.ok(
+    !Object.values(snap.outbox).some((op) => op.operation_kind === "binding" && op.request.soul_uid === "B"),
+    "no invalid base_revision=1 B operation is queued",
+  );
+
+  // Following the prompt with a new native session creates a legal B binding at base 0.
+  const freshKey = keyOf("p1", "dev-1", "hermes", "new-session");
+  const b = await selectSoul(freshKey, "B", { root });
+  assert.equal(b.soul_uid, "B");
+  assert.equal(b.revision, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("R8: detach survives ordinary resolution and only explicit selection rebinds", async () => {
   const root = tempDir();
   const profileId = "p1";
@@ -1106,4 +1146,60 @@ test("R8: detach survives ordinary resolution and only explicit selection rebind
   assert.equal(explicit.state, "bound");
   assert.equal(explicit.revision, detached.revision + 1);
   rmSync(root, { recursive: true, force: true });
+});
+
+
+test("login: a selected website Soul is downloaded and becomes the account default", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1");
+  const soul = makeSoul("s-cloud", "Restored Soul");
+  const asset = {
+    asset_uid: "a-cloud", soul_uid: "s-cloud", kind: "relationship", trait: "preference",
+    content: "RESTORED_FACT", applicability: "", tags: [], evidence: "explicit_user_statement",
+    verification: "unverified", sensitivity: "normal", state: "active", revision: 1,
+    supersedes_uid: null, pinned: false,
+    source: { runtime_kind: "hermes", session_ref: "s", event_ref: "e", occurred_at: "2026-10-21T00:00:00Z" },
+  };
+  configureSyncHttp(async (url) => {
+    const body = new URL(String(url)).pathname === "/api/v1/me/soul_sync/pull"
+      ? {
+          protocol: "soul-assets/v1",
+          events: [
+            { event_uid: "e-consent", object_type: "consent", object: { cloud_device_uid: "cdu", soul_uid: "s-cloud", revision: 1, categories: ["identity", "relationship", "experience"], enabled: true } },
+            { event_uid: "e-soul", object_type: "soul", object: soul },
+            { event_uid: "e-asset", object_type: "asset", object: asset },
+          ],
+          next_cursor: null,
+          has_more: false,
+        }
+      : {};
+    const status = body.protocol ? 200 : 500;
+    return {
+      status,
+      ok: status === 200,
+      headers: { get: () => null },
+      body: { cancel: async () => {} },
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    };
+  });
+
+  try {
+    const { io, text } = capturingIO();
+    const code = await loginCommand(root, ["--profile", "p1"], io, makeLoginDeps("owner-1", { defaultSoulUid: "s-cloud" }));
+    assert.equal(code, 0);
+
+    const index = await readAccountsIndex(root);
+    assert.equal(index["owner-1"].default_soul_uid, "s-cloud");
+    const store = await openStore(root, "p1");
+    const snap = await store.read();
+    await store.close();
+    assert.ok(snap.souls["s-cloud"], text());
+    assert.equal(snap.souls["s-cloud"].identity.name, "Restored Soul");
+    assert.equal(snap.assets["a-cloud"].content, "RESTORED_FACT");
+    assert.match(text(), /Soul restored: Restored Soul/);
+  } finally {
+    configureSyncHttp(null);
+    rmSync(root, { recursive: true, force: true });
+  }
 });

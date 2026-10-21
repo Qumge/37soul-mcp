@@ -840,6 +840,60 @@ test("sync: revoked device clears only downloaded private cache", async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("P2: a rebind with base>0 and no cloud-confirmed predecessor is parked as needs_new_session", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.souls["B"] = {
+      soul_uid: "B", legacy_host_id: 9, identity_revision: 1,
+      identity: { name: "B", description: "", character: "", greeting: "" }, state: "active",
+    };
+    d.consents[`${IDS.cloudDevice}:B`] = {
+      cloud_device_uid: IDS.cloudDevice, soul_uid: "B", revision: 1,
+      categories: ["identity"], enabled: true,
+    };
+    d.bindings[bindingKeyOf()] = {
+      ...d.bindings[bindingKeyOf()],
+      soul_uid: "B", revision: 2, cloud_revision: 0, unconfirmed: true,
+    };
+    d.outbox["switch"] = {
+      operation_id: "switch",
+      operation_kind: "binding",
+      request: { base_revision: 1, session_ref: d.bindings[bindingKeyOf()].session_ref, runtime_kind: "hermes", soul_uid: "B", state: "bound" },
+      predecessor_operation_ids: [],
+    };
+  });
+
+  const http = fakeHttp(() => ({ status: 500, body: {} }));
+  const report = await syncOnce("p1", http, syncOpts(root));
+  assert.equal(
+    http.requests.filter((request) => request.method === "PUT" && request.url.includes("/bindings/")).length,
+    0,
+    "the invalid CAS is never sent",
+  );
+  assert.equal(report.conflicts, 1);
+  const snap = await readSnap(root);
+  assert.equal(snap.quarantine.switch.reason, "needs_new_session");
+  assert.equal(snap.bindings[bindingKeyOf()].soul_uid, "B", "the local intent is kept for the new-session prompt");
+
+  const sameSession = await selectSoul(
+    { profile_id: "p1", device_id: "dev-1", runtime_kind: "hermes", native_session_id: "ns-1" },
+    "B",
+    { root },
+  );
+  assert.deepEqual(sameSession, { error: "needs_new_session" }, "a second bind cannot claim success for the parked record");
+  assert.equal(
+    await resolveBinding(
+      { profile_id: "p1", device_id: "dev-1", runtime_kind: "hermes", native_session_id: "ns-1" },
+      "B",
+      { root },
+    ),
+    null,
+    "the parked record is not injected into the same session",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
 // 18 ───────────────────────────────────────────────────────────────────────────────
 test("sync: publishing a soul never widens device consent", async () => {
   const root = tempDir();
