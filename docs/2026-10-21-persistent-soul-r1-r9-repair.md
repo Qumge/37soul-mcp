@@ -2,7 +2,7 @@
 
 日期：2026-10-21
 分支：`fix/persistent-soul-r1-r9`
-提交：`c5a8350`（R1–R9）+ 补修 `F1–F3`；运行包版本 `0.11.2`
+提交：`c5a8350`（R1–R9）+ `5ccd6e6`（F1–F3 补修）；运行包版本 `0.11.2`
 Skill：`feat/persistent-soul` @ 6.11.2
 主仓库：`feat/persistent-soul-a` @ `e1a479f9`（未修改本轮 B 代码；用户原有文档保持未跟踪/未提交）
 
