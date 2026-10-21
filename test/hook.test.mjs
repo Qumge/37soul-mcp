@@ -16,6 +16,7 @@ import { loadState, saveConfig, saveState } from "../dist/agentd/state.js";
 import { spoolFile } from "../dist/agentd/spool.js";
 import { openStore } from "../dist/local/store.js";
 import { startWriter } from "../dist/local/writer.js";
+import "../dist/extraction/scheduler.js"; // register runtime_event in the in-process test writer
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -455,6 +456,180 @@ test('hook command: assets-mode SessionStart injects the Soul context and record
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].stage, 'injected');
   assert.equal(receipts[0].binding_uid, 'b1');
+  cleanup();
+});
+
+test('hook command: UserPromptSubmit uses the real task hint for relevant experience', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = 'hint-session';
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(path.join(root, 'profiles', profileId, 'device.json'), `${JSON.stringify({ device_id: deviceId })}\n`, { mode: 0o600 });
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = '123';
+    d.cloud_device_uid = 'cdu';
+    d.souls['s1'] = { soul_uid: 's1', legacy_host_id: null, identity_revision: 1, identity: { name: 'Growth', description: '', character: '', greeting: '' }, state: 'active' };
+    d.consents['cdu:s1'] = { cloud_device_uid: 'cdu', soul_uid: 's1', revision: 1, categories: ['identity', 'relationship', 'experience'], enabled: true };
+    d.bindings[`${profileId}\u0000${deviceId}\u0000claude-code\u0000${sessionId}`] = {
+      binding_uid: 'b1', session_ref: '30000000-0000-4000-8000-000000000001', runtime_kind: 'claude-code',
+      soul_uid: 's1', revision: 1, state: 'bound', profile_id: profileId, device_id: deviceId, native_session_id: sessionId,
+    };
+    d.assets['exp1'] = {
+      asset_uid: 'exp1', soul_uid: 's1', kind: 'experience', trait: 'fact',
+      content: '产品验收先写验收结论，再列已证实和待验证', applicability: '产品验收', tags: [],
+      evidence: 'explicit_user_statement', verification: 'unverified', sensitivity: 'normal',
+      state: 'active', revision: 1, supersedes_uid: null, pinned: false,
+      source: { runtime_kind: 'claude-code', session_ref: '30000000-0000-4000-8000-000000000001', event_ref: 'e1', occurred_at: '2026-10-20T04:00:00Z' },
+      sync_state: 'pending_sync', cloud_revision: null,
+    };
+  });
+  await store.close();
+  writeFileSync(path.join(root, 'accounts.json'), `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`, { mode: 0o600 });
+  const writer = await startWriter(root);
+  const io = capture();
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'UserPromptSubmit',
+    fetch: async () => { throw new Error('no repo brief in assets mode'); },
+    stdin: JSON.stringify({ session_id: sessionId, cwd: '/tmp/hint', hook_event_name: 'UserPromptSubmit', prompt: '产品验收应该怎么组织？' }),
+    stdout: io.stdout, stderr: io.stderr,
+    getGitState: async () => { throw new Error('no repo brief in assets mode'); },
+  });
+  await writer.close();
+  assert.equal(io.out.length, 1);
+  const wrapper = JSON.parse(io.out[0]);
+  assert.equal(wrapper.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+  assert.match(wrapper.hookSpecificOutput.additionalContext, /产品验收先写验收结论/);
+  cleanup();
+});
+
+test('hook command: each Stop selects its own latest turn and replay shares one range', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = 'two-turn-session';
+  const transcriptPath = path.join(home, 'two-turn.jsonl');
+  const transcript = [
+    JSON.stringify({ type: 'user', uuid: 'u1', parentUuid: null, message: { role: 'user', content: 'first preference' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'text', text: 'first noted' }] } }),
+    JSON.stringify({ type: 'user', uuid: 'u2', parentUuid: 'a1', message: { role: 'user', content: 'second preference' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', message: { role: 'assistant', content: [{ type: 'text', text: 'second noted' }] } }),
+  ].join('\n');
+  writeFileSync(transcriptPath, transcript, { mode: 0o600 });
+
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(path.join(root, 'profiles', profileId, 'device.json'), `${JSON.stringify({ device_id: deviceId })}\n`, { mode: 0o600 });
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = '123';
+    d.cloud_device_uid = 'cdu';
+    d.souls['s1'] = {
+      soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
+      identity: { name: 'Growth', description: '', character: '', greeting: '' }, state: 'active',
+    };
+    d.consents['cdu:s1'] = { cloud_device_uid: 'cdu', soul_uid: 's1', revision: 1, categories: ['identity', 'relationship', 'experience'], enabled: true };
+    d.bindings[`${profileId}\u0000${deviceId}\u0000claude-code\u0000${sessionId}`] = {
+      binding_uid: 'b1', session_ref: '30000000-0000-4000-8000-000000000001', runtime_kind: 'claude-code',
+      soul_uid: 's1', revision: 1, state: 'bound', profile_id: profileId, device_id: deviceId, native_session_id: sessionId,
+    };
+  });
+  await store.close();
+  writeFileSync(
+    path.join(root, 'accounts.json'),
+    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    { mode: 0o600 },
+  );
+
+  const writer = await startWriter(root);
+  const stop = (event, last) => runHookCommand({
+    home, agentKind: 'claude-code', event,
+    fetch: async () => { throw new Error('no repo brief in assets mode'); },
+    stdin: JSON.stringify({ session_id: sessionId, cwd: home, hook_event_name: event, transcript_path: transcriptPath, last_assistant_message: last }),
+    stdout: () => {}, stderr: () => {},
+    getGitState: async () => { throw new Error('no repo brief in assets mode'); },
+  });
+  await stop('Stop', 'second noted');
+  await stop('Stop', 'second noted');
+  await stop('SessionEnd', 'second noted');
+  await writer.close();
+
+  const after = await openStore(root, profileId);
+  const snap = await after.read();
+  await after.close();
+  const watermarks = Object.values(snap.extraction_watermarks);
+  assert.equal(watermarks.length, 1, 'Stop/SessionEnd replay created one extraction range');
+  assert.deepEqual(watermarks[0].request.source_turn_refs, ['u2', 'a2'], 'the second turn, not the first turn');
+  assert.equal(watermarks[0].attempts, 1, 'replay did not spend another attempt');
+  cleanup();
+});
+
+test('hook command: first SessionStart waits for writer-created binding before injecting', async () => {
+  const { home, cleanup } = tempHome();
+  const root = dataRoot(home);
+  const profileId = 'p1';
+  const deviceId = 'dev-1';
+  const sessionId = 'first-session-no-binding';
+
+  mkdirSync(path.join(root, 'profiles', profileId), { recursive: true });
+  writeFileSync(
+    path.join(root, 'profiles', profileId, 'device.json'),
+    `${JSON.stringify({ device_id: deviceId })}\n`,
+    { mode: 0o600 },
+  );
+  const store = await openStore(root, profileId);
+  await store.transact((d) => {
+    d.owner_id = '123';
+    d.cloud_device_uid = 'cdu';
+    d.souls['s1'] = {
+      soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
+      identity: { name: 'Growth', description: '', character: '', greeting: '' }, state: 'active',
+    };
+    d.consents['cdu:s1'] = {
+      cloud_device_uid: 'cdu', soul_uid: 's1', revision: 1,
+      categories: ['identity', 'relationship', 'experience'], enabled: true,
+    };
+    d.assets['a1'] = {
+      asset_uid: 'a1', soul_uid: 's1', kind: 'relationship', trait: 'preference',
+      content: '首次会话也必须看到这条偏好', applicability: '客户分析', tags: [],
+      evidence: 'explicit_user_statement', verification: 'unverified', sensitivity: 'normal',
+      state: 'active', revision: 1, supersedes_uid: null, pinned: false,
+      source: { runtime_kind: 'claude-code', session_ref: '30000000-0000-4000-8000-000000000001', event_ref: 'e1', occurred_at: '2026-10-20T04:00:00Z' },
+      sync_state: 'pending_sync', cloud_revision: null,
+    };
+  });
+  await store.close();
+  writeFileSync(
+    path.join(root, 'accounts.json'),
+    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    { mode: 0o600 },
+  );
+
+  const writer = await startWriter(root);
+  const io = capture();
+  await runHookCommand({
+    home, agentKind: 'claude-code', event: 'SessionStart',
+    fetch: async () => { throw new Error('no repo brief in assets mode'); },
+    stdin: JSON.stringify({ session_id: sessionId, cwd: '/tmp/first', hook_event_name: 'SessionStart', source: 'startup' }),
+    stdout: io.stdout, stderr: io.stderr,
+    getGitState: async () => { throw new Error('no repo brief in assets mode'); },
+  });
+  await writer.close();
+
+  assert.equal(io.out.length, 1, 'first SessionStart injected context');
+  const wrapper = JSON.parse(io.out[0]);
+  assert.match(wrapper.hookSpecificOutput.additionalContext, /首次会话也必须看到这条偏好/);
+
+  const after = await openStore(root, profileId);
+  const snap = await after.read();
+  await after.close();
+  const bindings = Object.values(snap.bindings).filter((binding) => binding.native_session_id === sessionId);
+  assert.equal(bindings.length, 1, 'writer created exactly one binding before injection');
+  const receipts = Object.values(snap.receipts);
+  assert.equal(receipts.length, 1, 'injected receipt was recorded after delivery');
+  assert.equal(receipts[0].binding_uid, bindings[0].binding_uid);
   cleanup();
 });
 

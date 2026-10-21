@@ -27,6 +27,17 @@ import {
   isInternalEvent,
   MAX_AUTO_ATTEMPTS,
 } from "../dist/extraction/scheduler.js";
+test("rangeForEvent: host turn refs, not random event refs, define the watermark", () => {
+  const binding = { native_session_id: "native-session", revision: 1 };
+  const one = rangeForEvent({ event_ref: "event-a", kind: "turn_completed", internal_job_uid: null, source_turn_refs: ["u2", "a2"] });
+  const two = rangeForEvent({ event_ref: "event-b", kind: "checkpoint", internal_job_uid: null, source_turn_refs: ["u2", "a2"] });
+  assert.deepEqual(one.turn_refs, ["u2", "a2"]);
+  assert.equal(one.start, two.start, "same host turn has a stable start");
+  assert.equal(one.end, two.end, "same host turn has a stable end");
+  assert.notEqual(one.event_refs[0], two.event_refs[0], "the pointer refs stay distinct");
+  assert.equal(watermarkKey(binding, one), watermarkKey(binding, two), "Stop/SessionEnd replay shares one budget");
+});
+
 import { classifyProposalState } from "../dist/assets/validation.js";
 import { contentDigest } from "../dist/assets/protocol.js";
 import { loadContractFixture, classificationCases } from "./helpers/contract-fixture.mjs";

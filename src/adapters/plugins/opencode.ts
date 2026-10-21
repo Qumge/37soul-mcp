@@ -32,18 +32,33 @@ export const OPENCODE_PLUGIN_FILENAME = "37soul-soul.js" as const;
  * installed file. Node builtins only; no runtime dependency is added.
  */
 export const OPENCODE_PLUGIN_SOURCE = `/**
- * 37soul OpenCode bridge — ONE managed static file (api_generation v2).
- * UNVERIFIED against a live OpenCode host: the plugin API shape below is modeled,
- * not confirmed by an authorized live probe. It performs no model call and
- * schedules nothing — it forwards the native session/request/message lifecycle to
- * the local 37soul writer via \`hook --agent opencode --event <event>\`. A bridge
- * failure never fails the user's work.
+ * 37soul OpenCode bridge - ONE managed static file (api_generation v2).
+ * The host API is the documented OpenCode plugin surface: a named async plugin
+ * function returning lifecycle hooks. The bridge only talks to the local 37soul
+ * hook command; it performs no model call and no network call.
  */
-import { Buffer } from "node:buffer";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+
+export const api_generation = "v2";
+const MAX_BRIDGE_PAYLOAD_BYTES = 8192;
+const BRIDGE_TIMEOUT_MS = 2000;
+const SESSION_DIR = ".37soul";
+const soulHome = process.env.SOUL37_HOME || os.homedir();
+
+export function boundedPayload(event, payload) {
+  const bounded = { ...(payload ?? {}) };
+  for (const key of Object.keys(bounded)) {
+    if (typeof bounded[key] === "string") bounded[key] = bounded[key].slice(0, 1024);
+  }
+  const json = JSON.stringify({ ...bounded, agent: "opencode", event });
+  if (Buffer.byteLength(json, "utf8") > MAX_BRIDGE_PAYLOAD_BYTES) {
+    return JSON.stringify({ agent: "opencode", event, payload: null, truncated: true });
+  }
+  return json;
+}
 
 function launcher() {
   const env = process.env.SOUL37_LAUNCHER;
@@ -53,53 +68,31 @@ function launcher() {
   return "37soul";
 }
 
-// The bridge spawns exactly ONE command: the installed 37soul launcher's local
-// \`hook --agent opencode --event <event>\` — fixed argv array (no shell), never the
-// host runtime, never a network call. The payload is bounded and fed on stdin; a
-// short timeout bounds the wait; exit code 0 is the only success signal we rely on.
-const MAX_BRIDGE_PAYLOAD_BYTES = 8192;
-const BRIDGE_TIMEOUT_MS = 2000;
-
-export function boundedPayload(event, payload) {
-  const bounded = { ...(payload ?? {}) };
-  for (const key of Object.keys(bounded)) {
-    if (typeof bounded[key] === "string") bounded[key] = bounded[key].slice(0, 1024);
-  }
-  const json = JSON.stringify(bounded);
-  if (Buffer.byteLength(json, "utf8") > MAX_BRIDGE_PAYLOAD_BYTES) {
-    // Never slice bytes (that can split JSON): emit a still-valid envelope the
-    // receiver can drop as truncated instead of failing to parse.
-    return JSON.stringify({ agent: "opencode", event, payload: null, truncated: true });
-  }
-  return json;
-}
-
 function bridge(event, payload) {
   return new Promise((resolve) => {
     let child;
     try {
       child = spawn(launcher(), ["hook", "--agent", "opencode", "--event", event], {
-        stdio: ["pipe", "ignore", "ignore"],
+        stdio: ["pipe", "pipe", "ignore"],
+        env: process.env,
       });
     } catch {
-      resolve();
+      resolve("");
       return;
     }
+    let stdout = "";
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      resolve();
+      resolve(stdout);
     };
     const timer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
+      try { child.kill("SIGKILL"); } catch {}
       finish();
     }, BRIDGE_TIMEOUT_MS);
     if (typeof timer.unref === "function") timer.unref();
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
     child.on("error", finish);
     child.on("close", finish);
     try {
@@ -110,46 +103,208 @@ function bridge(event, payload) {
   });
 }
 
-function sessionId(input) {
-  if (!input || typeof input !== "object") return null;
-  for (const key of ["session_id", "sessionID", "sessionId"]) {
-    const value = input[key];
-    if (typeof value === "string" && value !== "") return value;
+function bridgeSync(event, payload) {
+  try {
+    spawnSync(launcher(), ["hook", "--agent", "opencode", "--event", event], {
+      input: boundedPayload(event, payload),
+      encoding: "utf8",
+      timeout: BRIDGE_TIMEOUT_MS,
+      stdio: ["pipe", "ignore", "ignore"],
+      env: process.env,
+    });
+  } catch {}
+}
+
+function tracePath(sessionID) {
+  const safe = String(sessionID).replace(/[^A-Za-z0-9._-]/g, "_");
+  return path.join(soulHome, SESSION_DIR, "opencode-sessions", safe + ".jsonl");
+}
+
+function ensureTrace(sessionID) {
+  const file = tracePath(sessionID);
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (!existsSync(file)) writeFileSync(file, "", { mode: 0o600 });
+  return file;
+}
+
+function appendTrace(sessionID, record) {
+  const file = ensureTrace(sessionID);
+  appendFileSync(file, JSON.stringify(record) + "\\n", { mode: 0o600 });
+  return file;
+}
+
+function textOfParts(parts) {
+  if (!Array.isArray(parts)) return "";
+  return parts
+    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\\n");
+}
+
+function traceFromMessages(sessionID, rows) {
+  const records = [];
+  for (const row of rows) {
+    const info = row && (row.info && typeof row.info === "object" ? row.info : row);
+    if (!info || typeof info !== "object") continue;
+    const parts = Array.isArray(row.parts)
+      ? row.parts
+      : Array.isArray(info.content)
+        ? info.content
+        : [];
+    const text = textOfParts(parts);
+    if (info.role === "user" && text.trim() !== "") {
+      records.push({ type: "request", id: info.id, session_id: sessionID, prompt: text });
+    } else if (info.role === "assistant" && text.trim() !== "") {
+      records.push({ type: "message", id: info.id, session_id: sessionID, role: "assistant", content: text });
+    }
+    for (const part of parts) {
+      if (!part || part.type !== "tool") continue;
+      records.push({
+        type: "tool",
+        id: part.id,
+        session_id: sessionID,
+        name: part.tool || part.type,
+        input: part.state && part.state.input,
+        output: part.state && part.state.output,
+      });
+    }
   }
-  return null;
+  return records;
+}
+
+async function syncTrace(ctx, sessionID) {
+  const file = ensureTrace(sessionID);
+  try {
+    const result = await ctx.client.session.messages({ path: { id: sessionID } });
+    const rows = Array.isArray(result) ? result : Array.isArray(result && result.data) ? result.data : [];
+    const records = traceFromMessages(sessionID, rows);
+    if (records.length > 0) writeFileSync(file, records.map((record) => JSON.stringify(record)).join("\\n") + "\\n", { mode: 0o600 });
+    const lastAssistant = [...records].reverse().find((record) => record.type === "message");
+    return { file, lastAssistant: lastAssistant ? lastAssistant.content : "" };
+  } catch {
+    return { file, lastAssistant: "" };
+  }
+}
+
+function contextFromHook(stdout) {
+  try {
+    const parsed = JSON.parse(stdout);
+    return parsed && parsed.hookSpecificOutput && typeof parsed.hookSpecificOutput.additionalContext === "string"
+      ? parsed.hookSpecificOutput.additionalContext.trim()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeTraceFromMessages(sessionID, rows) {
+  const file = ensureTrace(sessionID);
+  const records = traceFromMessages(sessionID, rows);
+  if (records.length > 0) {
+    writeFileSync(file, records.map((record) => JSON.stringify(record)).join("\\n") + "\\n", { mode: 0o600 });
+  }
+  const lastAssistant = [...records].reverse().find((record) => record.type === "message");
+  return { file, lastAssistant: lastAssistant ? lastAssistant.content : "" };
 }
 
 export default {
-  api_generation: "v2",
+  id: "37soul",
+  async setup(ctx) {
+    const directory = ctx && ctx.location && typeof ctx.location.directory === "string"
+      ? ctx.location.directory
+      : process.cwd();
+    const traces = new Map();
+    const assistantText = new Map();
+    const controller = new AbortController();
 
-  // V2 surface (modeled, UNVERIFIED): a single onEvent hook named by lifecycle.
-  async onEvent(input) {
-    const sid = sessionId(input);
-    if (!sid) return {};
-    try {
-      const event = input && input.event;
-      switch (event) {
-        case "session.created":
-        case "session.reset":
-          await bridge("SessionStart", {
-            session_id: sid,
-            cwd: input.cwd,
-            source: event === "session.reset" ? "reset" : "startup",
-          });
-          break;
-        case "request.started":
-          await bridge("UserPromptSubmit", { session_id: sid, prompt: input.prompt ?? "" });
-          break;
-        case "message.completed":
-          await bridge("Stop", { session_id: sid, last_assistant_message: input.message ?? "" });
-          break;
-        default:
-          break;
-      }
-    } catch {
-      // A bridge failure never fails the user's work.
+    function fileFor(sessionID) {
+      if (!traces.has(sessionID)) traces.set(sessionID, ensureTrace(sessionID));
+      return traces.get(sessionID);
     }
-    return {};
+
+    await ctx.session.hook("context", async (event) => {
+      try {
+        const sid = event && event.sessionID;
+        if (!sid) return;
+        const file = fileFor(sid);
+        if (Array.isArray(event.messages)) writeTraceFromMessages(sid, event.messages);
+        const stdout = await bridge("SessionStart", {
+          session_id: sid,
+          cwd: directory,
+          source: "startup",
+          transcript_path: file,
+        });
+        const context = contextFromHook(stdout);
+        if (context && Array.isArray(event.system)) event.system.push({ type: "text", text: context });
+
+        // Before the model call, use the real user task as the selector hint for
+        // relevant experience assets; SessionStart above keeps identity/relationship.
+        const lastUser = [...(Array.isArray(event.messages) ? event.messages : [])]
+          .reverse()
+          .find((row) => row && (row.role || (row.info && row.info.role)) === "user");
+        const userParts = lastUser && Array.isArray(lastUser.parts)
+          ? lastUser.parts
+          : lastUser && Array.isArray(lastUser.content)
+            ? lastUser.content
+            : [];
+        const taskText = textOfParts(userParts);
+        if (taskText !== "") {
+          const promptStdout = await bridge("UserPromptSubmit", {
+            session_id: sid,
+            cwd: directory,
+            prompt: taskText,
+            transcript_path: file,
+          });
+          const promptContext = contextFromHook(promptStdout);
+          if (promptContext && Array.isArray(event.system) && promptContext !== context) {
+            event.system.push({ type: "text", text: promptContext });
+          }
+        }
+      } catch {}
+    });
+
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          const data = event.data || {};
+          const sid = data.sessionID;
+          if (!sid) continue;
+          if (event.type === "session.text.delta" && typeof data.delta === "string") {
+            assistantText.set(sid, (assistantText.get(sid) || "") + data.delta);
+            continue;
+          }
+          if (event.type === "session.text.ended" && typeof data.text === "string") {
+            assistantText.set(sid, data.text);
+            continue;
+          }
+          if (event.type !== "session.execution.succeeded") continue;
+          try {
+            const file = fileFor(sid);
+            const text = assistantText.get(sid) || "";
+            if (text !== "") {
+              appendTrace(sid, {
+                type: "message",
+                id: data.assistantMessageID || "assistant-" + event.id,
+                session_id: sid,
+                role: "assistant",
+                content: text,
+              });
+            }
+            // This runs while the host is finalizing the turn. Awaiting an
+            // asynchronous child can lose the event at CLI shutdown; use the
+            // bounded synchronous bridge so the local writer definitely sees Stop.
+            bridgeSync("Stop", {
+              session_id: sid,
+              cwd: directory,
+              transcript_path: file,
+              last_assistant_message: text,
+            });
+          } catch {}
+        }
+      } catch {}
+    })();
+
+    return () => controller.abort();
   },
 };
 `;

@@ -97,6 +97,7 @@ function freezeRequest(binding: BindingSnapshot, range: SourceRange, jobUid: str
     runtime_kind: binding.runtime_kind,
     native_session_id: binding.native_session_id,
     source_event_refs: range.event_refs.slice(),
+    ...(range.turn_refs && range.turn_refs.length > 0 ? { source_turn_refs: range.turn_refs.slice() } : {}),
     binding_uid: binding.binding_uid,
     binding_revision: binding.revision,
     soul_uid: binding.soul_uid,
@@ -126,8 +127,14 @@ function refsDigest(refs: readonly string[]): number {
  * onto the same `start=0,end=0` budget for the whole session.
  */
 export function rangeForEvent(event: RuntimeEvent): SourceRange {
-  const interval = refsDigest([event.event_ref]);
-  return { event_refs: [event.event_ref], start: interval, end: interval };
+  // Use the actual host turn ids for the stable watermark interval when present.
+  // The random event_ref remains the source-pointer key, so repetitive Stop/
+  // SessionEnd events for the same turn share one budget instead of re-extracting.
+  const turnRefs = event.source_turn_refs && event.source_turn_refs.length > 0
+    ? event.source_turn_refs.slice()
+    : null;
+  const interval = refsDigest(turnRefs ?? [event.event_ref]);
+  return { event_refs: [event.event_ref], start: interval, end: interval, ...(turnRefs ? { turn_refs: turnRefs } : {}) };
 }
 
 function openFs(options: { fs?: Partial<StoreFs> }): StoreFs {
@@ -276,6 +283,12 @@ async function beginExtractionDirect(
     const snap = await store.read();
     const existing = snap.extraction_watermarks[key];
     if (existing?.completed) return { scheduled: false, reason: "completed" };
+    // A completed-turn hook can fire Stop and SessionEnd for the same host turn.
+    // Replaying a stable turn_refs range must not spend another automatic attempt;
+    // a prior error remains explicitly retryable.
+    if (range.turn_refs && range.turn_refs.length > 0 && existing && existing.state !== "error") {
+      return { scheduled: false, reason: "duplicate_turn" };
+    }
     if (existing && existing.attempts >= MAX_AUTO_ATTEMPTS) {
       return { scheduled: false, reason: "budget_exhausted" };
     }
@@ -481,11 +494,15 @@ export async function handleRuntimeEvent(
   options: ExtractionOptions,
 ): Promise<{ scheduled: boolean; reason?: string; jobUid?: string }> {
   if (isInternalEvent(event)) return { scheduled: false, reason: "internal" };
+  // Resolve (and, for a first session, create) the native-session binding even for
+  // non-extractable lifecycle events. SessionStart/UserPromptSubmit are exactly
+  // where the hook must see that binding before injecting context; only the
+  // extraction scheduling below is limited to applicable completed-turn events.
+  const binding = await resolveBinding(event.key, undefined, { root: options.root, fs: options.fs });
+  if (!binding) return { scheduled: false, reason: "no_binding" };
   if (!(APPLICABLE_EVENT_KINDS as readonly string[]).includes(event.kind)) {
     return { scheduled: false, reason: "not_applicable" };
   }
-  const binding = await resolveBinding(event.key, undefined, { root: options.root, fs: options.fs });
-  if (!binding) return { scheduled: false, reason: "no_binding" };
   await scheduleExtraction(binding, rangeForEvent(event), options);
   return { scheduled: true };
 }
@@ -573,11 +590,14 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
     }
   }
 
+  // Resolve/create the binding for every non-internal lifecycle event. A first
+  // SessionStart has no binding yet; the hook awaits this command and then reads
+  // that binding to inject. Only completed-turn events schedule extraction.
+  const binding = await resolveBinding(event.key, undefined, { root });
+  if (!binding) return { scheduled: false, reason: "no_binding" };
   if (!(APPLICABLE_EVENT_KINDS as readonly string[]).includes(event.kind)) {
     return { scheduled: false, reason: "not_applicable" };
   }
-  const binding = await resolveBinding(event.key, undefined, { root });
-  if (!binding) return { scheduled: false, reason: "no_binding" };
 
   const jobUid = randomUUID();
   const result = await beginExtractionDirect(root, binding, rangeForEvent(event), jobUid, defaultStoreFs);
@@ -674,7 +694,12 @@ function rangeFromKeyAndRequest(key: string, request: ExtractionRequest): Source
   const match = /#(-?\d+)-(-?\d+)#rev\d+$/.exec(key);
   const start = match ? Number(match[1]) : 0;
   const end = match ? Number(match[2]) : 0;
-  return { event_refs: request.source_event_refs.slice(), start, end };
+  return {
+    event_refs: request.source_event_refs.slice(),
+    start,
+    end,
+    ...(request.source_turn_refs && request.source_turn_refs.length > 0 ? { turn_refs: request.source_turn_refs.slice() } : {}),
+  };
 }
 
 async function listProfiles(root: string): Promise<string[]> {

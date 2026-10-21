@@ -1,133 +1,199 @@
 #!/usr/bin/env python3
-"""
-37soul Hermes bridge -- ONE managed static file.
+"""37soul Hermes shell hook.
 
-UNVERIFIED against a live Hermes host: the hook/plugin API shape below is
-MODELED, not confirmed by an authorized live probe. It performs no model call
-and schedules nothing -- it forwards the native session/request/message
-lifecycle to the local 37soul writer via `hook --agent hermes --event <event>`.
-A bridge failure never fails the user's work and never writes to the host's
-stdout. Standard library only -- no third-party Python dependency.
+Installed as ONE managed script under ~/.hermes/agent-hooks and referenced from
+the `hooks:` block in ~/.hermes/config.yaml. It uses only the documented Hermes
+shell-hook JSON protocol:
+
+  pre_llm_call  -> write the real user turn to a local trace, ask the local 37soul
+                   hook for context, and return {"context": text}
+  post_llm_call -> append the real assistant turn, then notify the local writer
+                   with Stop + the trace path so extraction can schedule
+
+No network call is made here, and no conversation text is uploaded. A failure is
+always a no-op: Hermes keeps working.
 """
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-# The bridge spawns exactly ONE command: the installed 37soul launcher's local
-# `hook --agent hermes --event <event>` -- a fixed argv list (no shell), never the
-# host runtime, never a network call. Exit code 0 is the only success signal
-# relied on; the writer's own exit code is never inspected.
-MAX_BRIDGE_PAYLOAD_BYTES = 8192
-BRIDGE_TIMEOUT_SECONDS = 2.0
+TRACE_DIR = ".37soul"
+TIMEOUT_SECONDS = 2.0
+
+
+def _soul_home():
+    return Path(os.environ.get("SOUL37_HOME") or os.path.expanduser("~"))
 
 
 def _launcher():
     env = os.environ.get("SOUL37_LAUNCHER")
     if env and os.path.isfile(env):
         return env
-    local = os.path.join(os.path.expanduser("~"), ".local", "bin", "37soul")
+    local = os.path.expanduser("~/.local/bin/37soul")
     if os.path.isfile(local):
         return local
     return "37soul"
 
 
-def _bounded_payload(event, payload):
-    if not isinstance(payload, dict):
-        payload = {}
-    bounded = {}
-    for key, value in payload.items():
-        if isinstance(value, str):
-            value = value[:1024]
-        bounded[key] = value
+def _trace_path(session_id):
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(session_id))
+    directory = _soul_home() / TRACE_DIR / "hermes-sessions"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory / (safe + ".jsonl")
+
+
+def _append(session_id, record):
+    file = _trace_path(session_id)
     try:
-        text = json.dumps(bounded)
-    except (TypeError, ValueError):
-        text = "{}"
-    if len(text.encode("utf-8")) > MAX_BRIDGE_PAYLOAD_BYTES:
-        # Never slice bytes (that can split JSON): emit a still-valid envelope
-        # the receiver can drop as truncated instead of failing to parse.
-        text = json.dumps({"agent": "hermes", "event": event, "payload": None, "truncated": True})
+        with open(file, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return file
+
+
+def _last_record(session_id):
+    try:
+        with open(_trace_path(session_id), encoding="utf-8") as handle:
+            lines = [line for line in handle.read().splitlines() if line.strip()]
+        return json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        return None
+
+
+def _extra(payload):
+    value = payload.get("extra")
+    return value if isinstance(value, dict) else {}
+
+
+def _field(payload, key):
+    value = payload.get(key)
+    if value is not None:
+        return value
+    return _extra(payload).get(key)
+
+
+def _turn_id(payload):
+    for key in ("turn_id", "task_id", "message_id"):
+        value = _field(payload, key)
+        if isinstance(value, str) and value:
+            return value
+    user = _field(payload, "user_message")
+    return hashlib.sha1(str(user).encode("utf-8")).hexdigest()[:24]
+
+
+def _run_hook(event, payload):
+    try:
+        completed = subprocess.run(
+            [_launcher(), "hook", "--agent", "hermes", "--event", event],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            capture_output=True,
+            timeout=TIMEOUT_SECONDS,
+            env=os.environ.copy(),
+        )
+        return completed.stdout or ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _context_from(stdout):
+    try:
+        parsed = json.loads(stdout)
+        value = parsed.get("hookSpecificOutput", {}).get("additionalContext", "")
+        return value.strip() if isinstance(value, str) else ""
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _record_request(payload, session_id, cwd):
+    text = _field(payload, "user_message")
+    if not isinstance(text, str) or not text.strip():
+        return
+    turn_id = _turn_id(payload)
+    last = _last_record(session_id)
+    if last and last.get("type") == "user_message" and last.get("id") == turn_id:
+        return
+    _append(session_id, {
+        "type": "user_message",
+        "id": turn_id,
+        "session_id": session_id,
+        "text": text,
+    })
+
+
+def _record_assistant(payload, session_id):
+    text = _field(payload, "assistant_response")
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    message_id = "assistant-" + _turn_id(payload)
+    _append(session_id, {
+        "type": "assistant_message",
+        "id": message_id,
+        "session_id": session_id,
+        "text": text,
+    })
     return text
 
 
-def _bridge(event, payload):
-    """Forward one lifecycle event to the local writer.
-
-    Never raises and never waits past the timeout: a bridge failure never fails
-    the user's work. The writer's exit code is deliberately ignored -- the only
-    outcome the host depends on is that this call returns.
-    """
-    try:
-        proc = subprocess.Popen(
-            [_launcher(), "hook", "--agent", "hermes", "--event", event],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return
-    try:
-        proc.communicate(_bounded_payload(event, payload).encode("utf-8"), timeout=BRIDGE_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        try:
-            proc.communicate()
-        except OSError:
-            pass
-
-
-def _session_id(payload):
-    if not isinstance(payload, dict):
-        return None
-    for key in ("session_id", "sessionID", "sessionId"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def on_event(event, payload=None):
-    """Modeled Hermes hook surface (UNVERIFIED). Always returns {}."""
-    if not isinstance(payload, dict):
-        payload = {}
-    sid = _session_id(payload)
-    if not sid:
-        return {}
-    mapping = {
-        "session.started": ("SessionStart", lambda p: {"session_id": sid, "cwd": p.get("cwd"), "source": "startup"}),
-        "session.reset": ("SessionStart", lambda p: {"session_id": sid, "cwd": p.get("cwd"), "source": "reset"}),
-        "session.ended": ("SessionEnd", lambda p: {"session_id": sid}),
-        "session.compacted": ("PreCompact", lambda p: {"session_id": sid}),
-        "request.submitted": ("UserPromptSubmit", lambda p: {"session_id": sid, "prompt": p.get("prompt", "")}),
-        "message.completed": ("Stop", lambda p: {"session_id": sid, "last_assistant_message": p.get("message", "")}),
-    }
-    mapped = mapping.get(event)
-    if mapped is None:
-        return {}
-    hook_event, build = mapped
-    _bridge(hook_event, build(payload))
-    return {}
-
-
 def main(argv=None):
-    """Read a JSON event from stdin and forward it. Always exit 0."""
     argv = argv if argv is not None else sys.argv[1:]
     event = argv[0] if argv else ""
-    if not event:
-        return 0
     try:
         payload = json.load(sys.stdin)
-    except (TypeError, ValueError):
-        payload = {}
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return 0
+    cwd = _field(payload, "cwd") or payload.get("working_directory") or os.getcwd()
+
     try:
-        on_event(event, payload)
+        if event == "pre_llm_call":
+            _record_request(payload, session_id, cwd)
+            file = _trace_path(session_id)
+            session_stdout = _run_hook("SessionStart", {
+                "session_id": session_id,
+                "cwd": cwd,
+                "source": "startup",
+                "transcript_path": str(file),
+            })
+            user_text = _field(payload, "user_message")
+            prompt_stdout = ""
+            if isinstance(user_text, str) and user_text.strip():
+                prompt_stdout = _run_hook("UserPromptSubmit", {
+                    "session_id": session_id,
+                    "cwd": cwd,
+                    "prompt": user_text,
+                    "transcript_path": str(file),
+                })
+            contexts = []
+            for out in (session_stdout, prompt_stdout):
+                value = _context_from(out)
+                if value and value not in contexts:
+                    contexts.append(value)
+            context = "\n\n".join(contexts)
+            print(json.dumps({"context": context} if context else {}))
+        elif event == "post_llm_call":
+            _record_request(payload, session_id, cwd)
+            response = _record_assistant(payload, session_id)
+            file = _trace_path(session_id)
+            _run_hook("Stop", {
+                "session_id": session_id,
+                "cwd": cwd,
+                "transcript_path": str(file),
+                "last_assistant_message": response,
+            })
+            print("{}")
     except Exception:
-        pass
+        # A broken hook must never fail a Hermes turn.
+        print("{}")
     return 0
 
 

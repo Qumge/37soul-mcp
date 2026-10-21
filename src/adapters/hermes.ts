@@ -55,12 +55,12 @@ export function hermesConfigDir(home: string): string {
 
 /** Hermes's own config file (the only place a transport/gateway marker may live). */
 export function hermesConfigPath(home: string): string {
-  return path.join(hermesConfigDir(home), "config.json");
+  return path.join(hermesConfigDir(home), "config.yaml");
 }
 
-/** The plugin directory install writes the ONE managed bridge file into. */
+/** The official shell-hook directory install writes the ONE managed bridge file into. */
 export function hermesPluginDir(home: string): string {
-  return path.join(hermesConfigDir(home), "plugin");
+  return path.join(hermesConfigDir(home), "agent-hooks");
 }
 
 /** The exact path of the managed bridge file (the only entry 37soul owns). */
@@ -82,22 +82,10 @@ export function hermesPluginSha256(): string {
  */
 function isGatewayConfig(text: string): boolean {
   if (text.trim() === "") return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return false;
-  }
-  if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const record = parsed as Record<string, unknown>;
-    if (record.transport === "gateway") return true;
-    const gateway = record.gateway;
-    if (gateway !== null && typeof gateway === "object" && !Array.isArray(gateway)) {
-      const url = (gateway as Record<string, unknown>).url;
-      if (typeof url === "string" && url !== "") return true;
-    }
-  }
-  return false;
+  // Hermes's real config is YAML. Do not attempt a general YAML parse here;
+  // detect only the explicit remote-gateway marker, never secret/config values.
+  return /^\s*(?:transport|type)\s*:\s*["']?gateway["']?\s*$/im.test(text) ||
+    /^\s*gateway\s*:\s*$/im.test(text);
 }
 
 /**
@@ -185,7 +173,73 @@ export function inspectHermesPlugin(home: string): HermesInspection {
  * plugin file in the same directory is never touched. Returns the exact path and
  * SHA-256 for the install manifest.
  */
-export function writeHermesPlugin(home: string): { installed: boolean; path: string; sha256: string } {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function managedHookBlock(scriptPath: string): string[] {
+  const command = `python3 ${shellQuote(scriptPath)}`;
+  return [
+    "# 37soul managed shell hooks:start",
+    `  pre_llm_call:`,
+    `    - command: ${JSON.stringify(`${command} pre_llm_call`)}`,
+    `      timeout: 5`,
+    `  post_llm_call:`,
+    `    - command: ${JSON.stringify(`${command} post_llm_call`)}`,
+    `      timeout: 5`,
+    "# 37soul managed shell hooks:end",
+  ];
+}
+
+/** Remove a previous managed block, if any. */
+function stripManagedHooks(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (line.includes("# 37soul managed shell hooks:start")) { skipping = true; continue; }
+    if (line.includes("# 37soul managed shell hooks:end")) { skipping = false; continue; }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+/**
+ * Add the documented Hermes shell-hook entries to config.yaml without replacing
+ * unrelated configuration. If both event keys already exist, leave the user's
+ * hooks untouched and report hooks_installed=false (never silently overwrite).
+ */
+export function writeHermesHookConfig(home: string, scriptPath: string): { hooks_installed: boolean; config: string } {
+  const config = hermesConfigPath(home);
+  let text = "";
+  try { text = readFileSync(config, "utf8"); } catch {}
+  text = stripManagedHooks(text);
+  const lines = text === "" ? [] : text.split("\n");
+  const hooksIndex = lines.findIndex((line) => /^hooks\s*:\s*(?:#.*)?$/.test(line));
+  const hasPre = /^\s*pre_llm_call\s*:/m.test(text);
+  const hasPost = /^\s*post_llm_call\s*:/m.test(text);
+  if (hooksIndex >= 0 && (hasPre || hasPost)) {
+    return { hooks_installed: false, config };
+  }
+  const block = managedHookBlock(scriptPath);
+  let result: string;
+  if (hooksIndex >= 0) {
+    const before = lines.slice(0, hooksIndex + 1);
+    const after = lines.slice(hooksIndex + 1);
+    result = [...before, ...block, ...after].join("\n");
+  } else {
+    result = [...lines, "", "hooks:", ...block].join("\n");
+  }
+  mkdirSync(path.dirname(config), { recursive: true });
+  if (text !== "") {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+    writeFileSync(`${config}.37soul-${stamp}.bak`, text, { mode: 0o600 });
+  }
+  writeFileSync(config, `${result.trimEnd()}\n`, { mode: 0o600 });
+  return { hooks_installed: true, config };
+}
+
+export function writeHermesPlugin(home: string): { installed: boolean; path: string; sha256: string; hooks_installed: boolean } {
   const file = hermesPluginPath(home);
   mkdirSync(path.dirname(file), { recursive: true });
   let existing = "";
@@ -199,7 +253,8 @@ export function writeHermesPlugin(home: string): { installed: boolean; path: str
     writeFileSync(`${file}.37soul-${stamp}.bak`, existing, { mode: 0o600 });
   }
   writeFileSync(file, HERMES_PLUGIN_SOURCE, { mode: 0o600 });
-  return { installed: true, path: file, sha256: hermesPluginSha256() };
+  const hookConfig = writeHermesHookConfig(home, file);
+  return { installed: true, path: file, sha256: hermesPluginSha256(), hooks_installed: hookConfig.hooks_installed };
 }
 
 export interface HermesPluginRemoval {
@@ -235,6 +290,15 @@ export function removeHermesPlugin(home: string, opts: { expectedSha256?: string
     writeFileSync(`${file}.37soul-${stamp}.bak`, text, { mode: 0o600 });
   }
   rmSync(file, { force: true });
+  const config = hermesConfigPath(home);
+  try {
+    const text = readFileSync(config, "utf8");
+    if (text.includes("# 37soul managed shell hooks:start")) {
+      writeFileSync(config, `${stripManagedHooks(text).trimEnd()}\n`, { mode: 0o600 });
+    }
+  } catch {
+    // config absent/unreadable: the hook script removal still succeeded
+  }
   return { removed: true, backed_up: !unchanged, preserved: false };
 }
 
@@ -263,7 +327,7 @@ function parseJsonl(jsonl: string): Array<Record<string, any>> {
  * leaks in. The session id comes from the transcript itself (session.started),
  * never from the file path or a process-global.
  */
-export function hermesCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+export function hermesCompletedTurnRefs(jsonl: string, latest = false): { session_id: string | null; refs: string[] } {
   const records = parseJsonl(jsonl);
   let sessionId: string | null = null;
   for (const record of records) {
@@ -276,6 +340,12 @@ export function hermesCompletedTurnRefs(jsonl: string): { session_id: string | n
   let turnStarted = false;
   for (const record of records) {
     if (record.type === "user_message") {
+      if (latest) {
+        refs.length = 0;
+        turnStarted = true;
+        if (typeof record.id === "string" && record.id !== "") refs.push(record.id);
+        continue;
+      }
       if (turnStarted) break; // the next user message begins the next turn
       turnStarted = true;
       if (typeof record.id === "string" && record.id !== "") refs.push(record.id);
@@ -287,6 +357,10 @@ export function hermesCompletedTurnRefs(jsonl: string): { session_id: string | n
     }
   }
   return { session_id: sessionId, refs };
+}
+
+export function latestHermesCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+  return hermesCompletedTurnRefs(jsonl, true);
 }
 
 function truncate(text: string, max: number): string {
@@ -332,7 +406,7 @@ export function renderHermesTurn(jsonl: string, refs: readonly string[]): string
     if (typeof record.id !== "string" || !wanted.has(record.id)) continue;
     if (record.type === "user_message" || record.type === "assistant_message") {
       const text = typeof record.text === "string" ? record.text : "";
-      if (text.trim() !== "") lines.push(text);
+      if (text.trim() !== "") lines.push(`${record.type === "user_message" ? "User" : "Assistant"}: ${text}`);
     } else if (record.type === "tool_call") {
       const name = typeof record.name === "string" && record.name !== "" ? record.name : "tool";
       const summary = [summarizeHermesToolInput(record.input), truncateHermesToolOutput(record.output)]
@@ -356,7 +430,12 @@ export function buildHermesExtractionInvocation(
   turnText: string,
 ): { args: readonly string[]; input: string } {
   const { input } = buildExtractionInvocation(request, turnText);
-  return { args: ["run", "--output", "json"], input };
+  // Official non-interactive CLI surface: prompt from stdin, one-shot, quiet,
+  // no project rules, tagged as a tool session so it is not a user chat.
+  return {
+    args: ["chat", "--query-file", "-", "--oneshot", "-Q", "--ignore-rules", "--source", "tool"],
+    input,
+  };
 }
 
 export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
@@ -383,7 +462,9 @@ export function createHermesAdapter(deps: AdapterDeps): RuntimeAdapter {
         return { error: { code: "gateway_only", retryable: false } };
       }
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const { refs } = hermesCompletedTurnRefs(transcript);
+      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+        ? request.source_turn_refs.slice()
+        : hermesCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.

@@ -894,6 +894,88 @@ test("P2: a rebind with base>0 and no cloud-confirmed predecessor is parked as n
   rmSync(root, { recursive: true, force: true });
 });
 
+// P0: same-revision cloud normalization must converge (candidate -> active), but
+// never overwrite a local pending edit/delete.
+test("sync: same-revision pull applies authoritative cloud state to a clean synced asset", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, PREF, "candidate", "synced", 1, 1);
+  });
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "e1", object_type: "asset",
+      object: { ...localAsset(IDS.assetA, PREF, "active", "synced", 1, 1), content_digest: contentDigest(PREF) },
+    }],
+    next_cursor: null,
+    has_more: false,
+  });
+  await store.close();
+  const snap = await readSnap(root);
+  assert.equal(snap.assets[IDS.assetA].state, "active", "server normalization is applied at the same revision");
+  assert.equal(snap.assets[IDS.assetA].revision, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("sync: same-revision pull never overwrites a pending local edit", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, LOCAL_EDIT, "candidate", "pending_sync", null, 1);
+    d.outbox[IDS.assetA] = proposeOp(IDS.assetA, LOCAL_EDIT);
+  });
+  const store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{
+      event_uid: "e1", object_type: "asset",
+      object: { ...localAsset(IDS.assetA, CLOUD_WINNER, "active", "synced", 1, 1), content_digest: contentDigest(CLOUD_WINNER) },
+    }],
+    next_cursor: null,
+    has_more: false,
+  });
+  await store.close();
+  const snap = await readSnap(root);
+  assert.equal(snap.assets[IDS.assetA].content, LOCAL_EDIT);
+  assert.equal(snap.assets[IDS.assetA].sync_state, "pending_sync");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("sync: an accepted push ACK applies the server's same-revision normalized state", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets[IDS.assetA] = localAsset(IDS.assetA, PREF, "candidate", "pending_sync", null, 1);
+    d.outbox[IDS.assetA] = proposeOp(IDS.assetA, PREF);
+  });
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "POST" && p === "/api/v1/me/soul_sync/push") {
+      return {
+        status: 200,
+        body: {
+          protocol: "soul-assets/v1",
+          results: [{
+            change_id: IDS.assetA, status: "accepted",
+            objects: [{ object_type: "asset", object: { ...localAsset(IDS.assetA, PREF, "active", "synced", 1, 1), content_digest: contentDigest(PREF) } }],
+            error: null,
+          }],
+        },
+      };
+    }
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/pull") return { status: 200, body: emptyPull() };
+    return { status: 500, body: {} };
+  });
+  await syncOnce("p1", http, syncOpts(root));
+  const snap = await readSnap(root);
+  assert.equal(snap.assets[IDS.assetA].state, "active");
+  assert.equal(snap.assets[IDS.assetA].sync_state, "synced");
+  assert.equal(snap.assets[IDS.assetA].cloud_revision, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
 // 18 ───────────────────────────────────────────────────────────────────────────────
 test("sync: publishing a soul never widens device consent", async () => {
   const root = tempDir();

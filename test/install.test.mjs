@@ -570,11 +570,12 @@ test("install: reports Codex hooks as installed-but-unverified and the AGENTS fr
     "the honest five-state line is logged",
   );
 
-  // The "installed" state is a file we wrote; it must not look like a trust marker.
+  // Official hooks.json shape. Installing it is not evidence of trust/execution.
   const hookConfig = JSON.parse(readFileSync(codexHookConfigPath(h.home), "utf8"));
-  assert.equal(hookConfig.managed_by, "37soul");
-  assert.equal(hookConfig.verified, false);
-  assert.deepEqual(hookConfig.events, ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"]);
+  assert.ok(hookConfig.hooks.SessionStart, "official SessionStart group exists");
+  assert.ok(hookConfig.hooks.UserPromptSubmit, "official UserPromptSubmit group exists");
+  assert.ok(hookConfig.hooks.Stop, "official Stop group exists");
+  assert.match(hookConfig.hooks.SessionStart[0].hooks[0].command, /hook --agent codex --event SessionStart/);
 
   // The global AGENTS fragment carries no Soul identity — persona lives only in the
   // per-session ContextBundle.
@@ -588,32 +589,23 @@ test("install: reports Codex hooks as installed-but-unverified and the AGENTS fr
   h.cleanup();
 });
 
-test("install: Codex trust flips green only from a Codex-authored marker, never our own write", async () => {
+test("install: Codex official hooks are installed but trust stays unclaimed", async () => {
   const h = harness();
-  // A trust marker Codex itself wrote (UNVERIFIED marker path, modeled as data —
-  // a section named 37soul-hooks with trusted = true in Codex's own config.toml).
-  writeFileSync(path.join(h.home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
-
   const result = await install(h.deps, { agents: ["codex"] });
   const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
-
-  // Trusted flips green, but events_seen stays false: a trust marker means "Codex
-  // may run the hook", not "Codex ran it" — no event has been observed.
   assert.deepEqual(codexEntry.report, {
     installed: true,
-    trusted: true,
+    trusted: false,
     events_seen: false,
     extraction_capable: false,
-    injection_capable: true,
+    injection_capable: false,
   });
   assert.ok(
-    h.logs.some((line) => line.includes("codex") && line.includes("trusted=yes") && line.includes("events=no") && line.includes("injection=yes")),
-    "trusted Codex hooks log green injection but events=no",
+    h.logs.some((line) => line.includes("codex") && line.includes("trusted=pending") && line.includes("injection=no")),
+    "the honest five-state line is logged",
   );
-
   h.cleanup();
 });
-
 test("uninstall: clears our entries from every Claude hook event, not just SessionStart", async () => {
   const h = harness();
   const settings = claudeSettingsPath(h.home);
@@ -838,15 +830,15 @@ test("doctor: Codex hook reports an honest trust state, never a blanket ok", asy
   assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
   assert.equal(
     check.detail,
-    "installed, not trusted — Codex has not authorized the hook (no `trusted = true` in its config.toml)",
+    "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — review with /hooks",
   );
 
-  // A Codex-authored trust marker flips trust green, but no SessionStart event
-  // has been observed yet — trust is not observation, so the check stays not-ok.
-  writeFileSync(path.join(h.home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
-  const trusted = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
-  assert.equal(trusted.ok, false, "trust alone (no observed event) is not green");
-  assert.equal(trusted.detail, "installed and trusted, but no SessionStart events observed yet");
+  // A real hook spool event is evidence of execution, but still not a trust claim.
+  mkdirSync(path.join(h.home, ".37soul", "spool", "codex"), { recursive: true });
+  writeFileSync(path.join(h.home, ".37soul", "spool", "codex", "s.jsonl"), "{}\n", { mode: 0o600 });
+  const observed = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
+  assert.equal(observed.ok, false, "observation is not persistent trust");
+  assert.equal(observed.detail, "hook events observed; Codex's persistent trust state is managed in /hooks");
 
   h.cleanup();
 });
@@ -976,7 +968,7 @@ test("doctor: Hermes gateway-only reports explicitly, never as CLI", async () =>
   // A gateway-only config exists before install: the surface is detected and the
   // doctor must say so instead of pretending the CLI can extract.
   mkdirSync(path.dirname(hermesConfigPath(h.home)), { recursive: true });
-  writeFileSync(hermesConfigPath(h.home), `${JSON.stringify({ transport: "gateway", gateway: { url: "https://gateway.example" } })}\n`, { mode: 0o600 });
+  writeFileSync(hermesConfigPath(h.home), "transport: gateway\ngateway:\n  url: https://gateway.example\n", { mode: 0o600 });
 
   await install(h.deps, { agents: ["hermes"] });
 

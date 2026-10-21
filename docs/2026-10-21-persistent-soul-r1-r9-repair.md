@@ -3,10 +3,11 @@
 日期：2026-10-21
 
 > **MVP 后续（同日）：** 本文件记录的 0.11.2 是 R1–R9/F1–F3 复审基线。之后补了
-> Task 0 同 Session 改选残留、重复安装保留凭据、首次恢复默认 Soul、状态文案和
-> Node20 本地测试，最终候选为 **0.11.4**，tar hash
-> `55ddbd893f101f2f55eaf9217da899dfeedaf96af8c19adf0443e4b3957b55b0`。
-> Node18.20.4 / Node20.20.2 / Node24.18.0 均 307/307；四工具实机、GitHub CI、
+> Task 0 同 Session 改选残留、重复安装保留凭据、首次恢复默认 Soul、状态文案、
+> 真实宿主接入（Claude/Codex/OpenCode/Hermes）、按任务 hint 的 before-prompt 注入、
+> 同版本云端资产状态收敛和 Node20 本地测试，最终候选为 **0.11.5**，tar hash
+> `8c7b79de1aa2c4f0ceefefd12c1cde4b9a0808bf3ed793cfec0a7651995baf5e`。
+> Node18.20.4 / Node20.20.2 / Node24.18.0 均 327/327；四工具实机、GitHub CI、
 > 发布和生产仍未执行。详细验收以
 > `37soul/docs/superpowers/plans/2026-10-21-persistent-soul-mvp-launch.md` 为准。
 

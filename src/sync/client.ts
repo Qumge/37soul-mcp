@@ -679,11 +679,11 @@ async function applyPushResults(
 
 function applyPushObjects(draft: StoreSnapshot, result: PushResult): void {
   for (const wrapped of result.objects ?? []) {
-    applyWrappedObject(draft, wrapped);
+    applyWrappedObject(draft, wrapped, "ack");
   }
 }
 
-function applyWrappedObject(draft: StoreSnapshot, wrapped: WrappedObject): void {
+function applyWrappedObject(draft: StoreSnapshot, wrapped: WrappedObject, mode: "cloud" | "ack" = "cloud"): void {
   const obj = wrapped.object as Record<string, unknown>;
   const uid = typeof obj.asset_uid === "string" ? obj.asset_uid : null;
   const state = typeof obj.state === "string" ? (obj.state as Asset["state"]) : null;
@@ -693,7 +693,7 @@ function applyWrappedObject(draft: StoreSnapshot, wrapped: WrappedObject): void 
     return;
   }
   if (wrapped.object_type === "asset" && uid) {
-    applyAssetObject(draft, obj as unknown as Asset);
+    applyAssetObject(draft, obj as unknown as Asset, mode);
     return;
   }
   if (wrapped.object_type === "consent" && obj) {
@@ -1119,13 +1119,27 @@ function applyAssetEvent(draft: StoreSnapshot, obj: Record<string, unknown>): vo
     applyTombstoneObject(draft, obj);
     return;
   }
-  applyAssetObject(draft, obj as unknown as Asset);
+  applyAssetObject(draft, obj as unknown as Asset, "cloud");
 }
 
-function applyAssetObject(draft: StoreSnapshot, asset: Asset): void {
+function applyAssetObject(draft: StoreSnapshot, asset: Asset, mode: "cloud" | "ack" = "cloud"): void {
   if (!asset?.asset_uid) return;
   const previous = draft.assets[asset.asset_uid];
-  if (previous && previous.revision >= asset.revision) return;
+  if (previous && previous.revision > asset.revision) return; // a newer local edit/delete wins
+  if (previous && previous.revision === asset.revision) {
+    const localDirty = previous.sync_state === "pending_sync" ||
+      previous.sync_state === "conflict" ||
+      previous.sync_state === "local_only";
+    const tombstone = previous.state === "deleted" ||
+      previous.state === "rejected" ||
+      previous.state === "superseded";
+    // Pull may apply authoritative cloud normalization (e.g. candidate -> active)
+    // only to an already-confirmed, clean copy. An ACK applies the same-revision
+    // server object for the operation we just sent, but never over a newer local
+    // edit/delete (revision check above).
+    if (tombstone) return;
+    if (mode === "cloud" && (localDirty || previous.sync_state !== "synced")) return;
+  }
   draft.assets[asset.asset_uid] = {
     ...(previous ?? ({} as LocalAsset)),
     ...asset,

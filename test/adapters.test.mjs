@@ -385,26 +385,26 @@ test("codex: untrusted hooks expose pending reason and never claim injection/ext
   rmSync(root, { recursive: true, force: true });
 });
 
-test("codex: a section-scoped Codex-authored trust marker is the only path to trusted (events stay unseen)", () => {
+test("codex: official hooks.json is installed; trust is never fabricated", () => {
   const home = tempDir("codex-trust-");
   mkdirSync(path.join(home, ".codex"), { recursive: true });
   writeFileSync(path.join(home, ".codex", "config.toml"), "[hooks.37soul-hooks]\ntrusted = true\n", { mode: 0o600 });
 
-  // Trusted is green, but events_seen stays false: a trust marker means "Codex may
-  // run the hook", not "Codex ran it" — there is no event-observation mechanism.
-  assert.deepEqual(inspectCodexTrust(home), { trusted: true, events_seen: false, reason: "trusted" });
-
-  // `trusted = true` under an unrelated section must never flip trust.
-  writeFileSync(path.join(home, ".codex", "config.toml"), "[mcp_servers.37soul]\nenv = {}\ntrusted = true\n", { mode: 0o600 });
+  // A config.toml marker is not Codex's hook trust store and must never be read as one.
   assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: false, reason: "pending" });
 
-  // `trusted = true` inside a comment must never flip trust.
-  writeFileSync(path.join(home, ".codex", "config.toml"), "[hooks.37soul-hooks]\n# trusted = true\n", { mode: 0o600 });
-  assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: false, reason: "pending" });
+  writeCodexHookConfig(home, { command: "/tmp/37soul" });
+  const hooks = JSON.parse(readFileSync(path.join(home, ".codex", "hooks.json"), "utf8"));
+  assert.ok(hooks.hooks.SessionStart, "official SessionStart group exists");
+  assert.ok(hooks.hooks.UserPromptSubmit, "official UserPromptSubmit group exists");
+  assert.ok(hooks.hooks.Stop, "official Stop group exists");
+  assert.match(hooks.hooks.SessionStart[0].hooks[0].command, /hook --agent codex --event SessionStart/);
+  assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: false, reason: "pending" }, "installing is not trusting");
 
-  // The quoted section form is also recognised.
-  writeFileSync(path.join(home, ".codex", "config.toml"), '[hooks."37soul-hooks"]\ntrusted = true\n', { mode: 0o600 });
-  assert.deepEqual(inspectCodexTrust(home), { trusted: true, events_seen: false, reason: "trusted" });
+  // A real hook event in the local spool is evidence of execution, not trust.
+  mkdirSync(path.join(home, ".37soul", "spool", "codex"), { recursive: true });
+  writeFileSync(path.join(home, ".37soul", "spool", "codex", "s.jsonl"), "{}\n", { mode: 0o600 });
+  assert.deepEqual(inspectCodexTrust(home), { trusted: false, events_seen: true, reason: "observed" });
 
   rmSync(home, { recursive: true, force: true });
 });
@@ -462,8 +462,8 @@ test("codex: structured extraction uses bounded source refs", async () => {
   assert.deepEqual(reads[0], ["rollout-marker"]);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
-  assert.deepEqual(buildCodexExtractionInvocation(request, "turn text").args, ["exec", "--output-format", "json"]);
-  assert.deepEqual(invokeArgs, ["exec", "--output-format", "json"]);
+  assert.deepEqual(buildCodexExtractionInvocation(request, "turn text").args, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"]);
+  assert.deepEqual(invokeArgs, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"]);
   assert.equal(invokeRuntime, "codex", "the native tool is codex");
   assert.equal(invokeJobUid, "codex-job-1", "the model call is tagged with the job uid");
 
@@ -608,8 +608,8 @@ test("opencode: unsupported plugin generation is explicit", () => {
     internal_task: true,
   };
   assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v3"), { unsupported: true, declared: "v3" });
-  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v1").args, ["run", "--output-format", "json"]);
-  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v2").args, ["run", "--output-format", "json", "--plugin-generation", "v2"]);
+  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v1").args, ["run", "--format", "json"]);
+  assert.deepEqual(buildOpenCodeExtractionInvocation(request, "turn", "v2").args, ["run", "--format", "json", "--standalone"]);
 });
 
 test("opencode: message completion extracts through tool model", async () => {
@@ -679,7 +679,7 @@ test("opencode: message completion extracts through tool model", async () => {
   assert.deepEqual(reads[0], ["oc-marker"]);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
-  assert.deepEqual(invokeArgs, ["run", "--output-format", "json", "--plugin-generation", "v2"]);
+  assert.deepEqual(invokeArgs, ["run", "--format", "json", "--standalone"]);
   assert.equal(invokeRuntime, "opencode", "the native tool is opencode");
   assert.equal(invokeJobUid, "oc-job-1", "the model call is tagged with the job uid");
 
@@ -794,27 +794,46 @@ test("opencode: an oversized bridge payload is still valid JSON and the bridge s
   assert.equal(overflow.agent, "opencode", "the envelope keeps the agent");
   assert.equal(overflow.event, "Stop", "the envelope keeps the event");
 
-  // A small payload is bounded per-field and never truncated.
+  // A small payload is bounded per-field and never truncated. Hook stdin needs
+  // the native fields at the top level, not nested under another object.
   const small = JSON.parse(mod.boundedPayload("Stop", { session_id: "s", last_assistant_message: "hi" }));
   assert.equal(small.truncated, undefined, "small payload is not truncated");
   assert.equal(small.session_id, "s");
 
-  // End-to-end: the bridge forwards to the local hook through the fixed argv and
-  // stays live (onEvent resolves) with valid JSON on stdin.
+  // End-to-end: the real OpenCode plugin hook forwards through the fixed argv to
+  // the local hook and stays live with valid JSON on stdin.
   const capture = path.join(root, "captured.json");
   const launcher = path.join(root, "37soul");
   writeFileSync(launcher, "#!/bin/sh\ncat > \"$SOUL37_TEST_CAPTURE\"\n", { mode: 0o755 });
   process.env.SOUL37_LAUNCHER = launcher;
   process.env.SOUL37_TEST_CAPTURE = capture;
+  process.env.SOUL37_HOME = root;
+  let contextHook;
+  const ctx = {
+    location: { directory: root },
+    session: {
+      hook: async (name, fn) => { if (name === "context") contextHook = fn; return { dispose: async () => {} }; },
+      context: async () => [],
+    },
+    event: { subscribe: async function* () {} },
+  };
   try {
-    await mod.default.onEvent({ session_id: "s", event: "request.started", prompt: "hello" });
+    await mod.default.setup(ctx);
+    const system = [];
+    await contextHook({
+      sessionID: "s",
+      messages: [{ id: "m1", role: "user", content: [{ type: "text", text: "hello" }] }],
+      system,
+    });
   } finally {
     delete process.env.SOUL37_LAUNCHER;
     delete process.env.SOUL37_TEST_CAPTURE;
+    delete process.env.SOUL37_HOME;
   }
   const received = JSON.parse(readFileSync(capture, "utf8"));
   assert.equal(received.session_id, "s");
-  assert.equal(received.prompt, "hello");
+  assert.match(received.transcript_path, /opencode-sessions\/s\.jsonl/);
+  assert.equal(received.agent, "opencode");
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -886,8 +905,8 @@ test("hermes: CLI events drive structured extraction", async () => {
   assert.deepEqual(reads[0], ["h-marker"]);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
-  assert.deepEqual(buildHermesExtractionInvocation(request, "turn text").args, ["run", "--output", "json"]);
-  assert.deepEqual(invokeArgs, ["run", "--output", "json"]);
+  assert.deepEqual(buildHermesExtractionInvocation(request, "turn text").args, ["chat", "--query-file", "-", "--oneshot", "-Q", "--ignore-rules", "--source", "tool"]);
+  assert.deepEqual(invokeArgs, ["chat", "--query-file", "-", "--oneshot", "-Q", "--ignore-rules", "--source", "tool"]);
   assert.equal(invokeRuntime, "hermes", "the native tool is hermes");
   assert.equal(invokeJobUid, "h-job-1", "the model call is tagged with the job uid");
 
@@ -1088,71 +1107,52 @@ test("hermes: the python bridge spawns only the local hook command and makes no 
   }
   assert.ok(importedModules.size > 0, "the bridge's imports are extracted");
   assert.ok(
-    [...importedModules].every((name) => ["json", "os", "subprocess", "sys"].includes(name)),
+    [...importedModules].every((name) => ["Path", "hashlib", "json", "os", "pathlib", "subprocess", "sys"].includes(name)),
     `standard library only — got: ${[...importedModules].join(", ")}`,
   );
   assert.ok(!/\b(urllib|http|https|socket|requests|aiohttp|ftplib|smtplib)\b/.test(source), "no network call");
 
   // The payload is bounded and the wait has a short timeout (never hangs the host),
   // and every error path still returns 0 (main always exits 0).
-  assert.ok(source.includes("MAX_BRIDGE_PAYLOAD_BYTES"), "payload is bounded");
-  assert.ok(source.includes("BRIDGE_TIMEOUT_SECONDS"), "a short timeout bounds the wait");
+  assert.ok(source.includes("TIMEOUT_SECONDS"), "a short timeout bounds the wait");
   assert.ok(source.includes("sys.exit(main())"), "the CLI entry always exits through main()");
-
-  // The bridge writes nothing to the host's stdout: the child's stdout/stderr are
-  // routed to DEVNULL.
-  assert.ok(source.includes("stdout=subprocess.DEVNULL"), "host stdout is never written");
-  assert.ok(source.includes("stderr=subprocess.DEVNULL"), "host stderr is never written");
+  assert.ok(source.includes("capture_output=True"), "the local hook output is captured, never printed raw");
 });
 
-test("hermes: an oversized bridge payload is still valid JSON and the bridge exits 0", async () => {
-  const root = tempDir("hermes-bridge-");
-  const pyFile = path.join(root, "hermes.py");
+test("hermes: official shell hook writes a real turn trace and returns injected context", async () => {
+  const root = tempDir("hermes-shell-hook-");
+  const pyFile = path.join(root, "37soul-hook.py");
   writeFileSync(pyFile, hermesPySource, { mode: 0o600 });
-  const { execFileSync, spawnSync } = await import("node:child_process");
-
-  // An oversized payload must become a still-valid envelope, never a sliced byte
-  // string that the receiver would drop as "stdin was not valid JSON".
-  const probe = `
-import importlib.util
-spec = importlib.util.spec_from_file_location("hermes_bridge", ${JSON.stringify(pyFile)})
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-print(mod._bounded_payload("Stop", {"session_id": "s", "big": ["1234567890"] * 4000}))
-`;
-  const overflowText = execFileSync("python3", ["-c", probe], { encoding: "utf8" }).trim();
-  const overflow = JSON.parse(overflowText);
-  assert.equal(overflow.truncated, true, "oversized payload is marked truncated");
-  assert.equal(overflow.payload, null, "the payload is dropped, not sliced");
-  assert.equal(overflow.agent, "hermes", "the envelope keeps the agent");
-  assert.equal(overflow.event, "Stop", "the envelope keeps the event");
-
-  // A small payload is bounded per-field and never truncated.
-  const smallProbe = `
-import importlib.util
-spec = importlib.util.spec_from_file_location("hermes_bridge", ${JSON.stringify(pyFile)})
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-print(mod._bounded_payload("Stop", {"session_id": "s", "last_assistant_message": "hi"}))
-`;
-  const small = JSON.parse(execFileSync("python3", ["-c", smallProbe], { encoding: "utf8" }).trim());
-  assert.equal(small.truncated, undefined, "small payload is not truncated");
-  assert.equal(small.session_id, "s");
-
-  // End-to-end: main() forwards a real hermes event (message.completed -> hook
-  // Stop) through the fixed argv and exits 0, with valid JSON on the child's stdin.
   const capture = path.join(root, "captured.json");
   const launcher = path.join(root, "37soul");
-  writeFileSync(launcher, "#!/bin/sh\ncat > \"$SOUL37_TEST_CAPTURE\"\n", { mode: 0o755 });
-  const run = spawnSync("python3", [pyFile, "message.completed"], {
-    input: JSON.stringify({ session_id: "s", message: "hello" }),
+  writeFileSync(
+    launcher,
+    "#!/bin/sh\ncat > \"$SOUL37_TEST_CAPTURE\"\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"real context\"}}'\n",
+    { mode: 0o755 },
+  );
+  const env = { ...process.env, SOUL37_LAUNCHER: launcher, SOUL37_TEST_CAPTURE: capture, SOUL37_HOME: root };
+  const { spawnSync } = await import("node:child_process");
+  const pre = spawnSync("python3", [pyFile, "pre_llm_call"], {
+    input: JSON.stringify({ session_id: "s1", user_message: "remember this preference", turn_id: "t1", cwd: root }),
     encoding: "utf8",
-    env: { ...process.env, SOUL37_LAUNCHER: launcher, SOUL37_TEST_CAPTURE: capture },
+    env,
   });
-  assert.equal(run.status, 0, "the bridge exits 0");
-  const received = JSON.parse(readFileSync(capture, "utf8"));
-  assert.equal(received.session_id, "s");
-  assert.equal(received.last_assistant_message, "hello");
+  assert.equal(pre.status, 0);
+  assert.deepEqual(JSON.parse(pre.stdout), { context: "real context" });
+  const traceFile = path.join(root, ".37soul", "hermes-sessions", "s1.jsonl");
+  assert.match(readFileSync(traceFile, "utf8"), /remember this preference/);
+
+  const post = spawnSync("python3", [pyFile, "post_llm_call"], {
+    input: JSON.stringify({ session_id: "s1", user_message: "remember this preference", assistant_response: "noted", turn_id: "t1", cwd: root }),
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(post.status, 0);
+  assert.match(readFileSync(traceFile, "utf8"), /noted/);
+  const stopPayload = JSON.parse(readFileSync(capture, "utf8"));
+  assert.equal(stopPayload.session_id, "s1");
+  assert.equal(stopPayload.last_assistant_message, "noted");
+  assert.match(stopPayload.transcript_path, /hermes-sessions\/s1\.jsonl/);
 
   rmSync(root, { recursive: true, force: true });
 });
@@ -1163,8 +1163,8 @@ test("hermes: probe and doctor report gateway-only honestly, never as CLI", asyn
   // A gateway-only config is detected explicitly.
   mkdirSync(path.join(root, ".hermes"), { recursive: true });
   writeFileSync(
-    path.join(root, ".hermes", "config.json"),
-    `${JSON.stringify({ transport: "gateway", gateway: { url: "https://gateway.example" } })}\n`,
+    path.join(root, ".hermes", "config.yaml"),
+    "transport: gateway\ngateway:\n  url: https://gateway.example\n",
     { mode: 0o600 },
   );
   assert.equal(detectHermesSurface(root), "gateway");
@@ -1194,7 +1194,7 @@ test("hermes: probe and doctor report gateway-only honestly, never as CLI", asyn
   assert.deepEqual(extraction, { error: { code: "gateway_only", retryable: false } });
 
   // A CLI-shaped config (any non-gateway config) is "cli"; no config is "none".
-  writeFileSync(path.join(root, ".hermes", "config.json"), `${JSON.stringify({ transport: "cli" })}\n`, { mode: 0o600 });
+  writeFileSync(path.join(root, ".hermes", "config.yaml"), "transport: cli\n", { mode: 0o600 });
   assert.equal(detectHermesSurface(root), "cli");
   rmSync(path.join(root, ".hermes", "config.json"), { force: true });
   assert.equal(detectHermesSurface(root), "cli", "an existing .hermes dir without a gateway marker is modeled as cli");

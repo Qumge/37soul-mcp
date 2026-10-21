@@ -22,6 +22,8 @@ export interface SourceRange {
   event_refs: string[];
   start: number;
   end: number;
+  /** Actual host turn record ids when the hook can identify them; never wire data. */
+  turn_refs?: string[];
 }
 
 export type RuntimeEventKind =
@@ -37,6 +39,8 @@ export interface RuntimeEvent {
   key: NativeSessionKey;
   event_ref: string;
   kind: RuntimeEventKind;
+  /** Actual host turn record ids for this completed event, if the hook observed them. */
+  source_turn_refs?: string[];
   /** Set for events emitted by an internal extraction job so the scheduler can exclude them. */
   internal_job_uid: string | null;
 }
@@ -46,6 +50,8 @@ export interface ExtractionRequest {
   runtime_kind: RuntimeKind;
   native_session_id: string;
   source_event_refs: string[];
+  /** Actual host turn record ids selected for this job (optional, local only). */
+  source_turn_refs?: string[];
   binding_uid: string;
   binding_revision: number;
   soul_uid: string;

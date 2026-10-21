@@ -7,10 +7,11 @@ you explicitly log in and authorize a Soul.
 
 > **Status honesty.** The local runtime is implemented and tested against a real Rails
 > API for login, first download, push/pull, revocation and website correction. The four
-> host adapters are **not yet live-probed** with a real model turn; observed CLI versions
-> are recorded below, and no supported-version table exists until those probes pass.
-> Node 18, 20 and 24 suites pass locally; the CI workflow is defined but has not been
-> run on GitHub yet.
+> host adapters have local live smoke evidence for extraction, but full cross-session
+> adoption (website correction → new native Session) is still being independently verified;
+> observed CLI versions are recorded below.
+> Node 18, 20 and 24 full suites pass locally (327/327); the CI workflow is defined but
+> has not been run on GitHub yet.
 
 ## Quick start: a new Soul
 
@@ -105,10 +106,10 @@ authorized Soul.
 
 | Host | Observed locally | Status |
 | --- | --- | --- |
-| Claude Code | 2.1.305 | adapter installed; live model turn `not_run` |
-| Codex | 0.163.0 | adapter installed; hook trust is an explicit user step; live turn `not_run` |
-| OpenCode | 2.0.32 | managed plugin v2 installed; live load/injection `not_run` |
-| Hermes | 0.21.0 CLI | managed bridge installed; live load/injection `not_run` |
+| Claude Code | 2.1.305 | real CLI extraction and hook path observed; full adoption pending |
+| Codex | 0.163.0 | official `hooks.json`; trust is Codex-owned `/hooks`; one-off bypass observed |
+| OpenCode | 2.0.32 | v2 plugin loads; live extraction/trace observed; full injection pending |
+| Hermes | 0.21.0 CLI | official shell hooks load; live extraction/trace observed; full injection pending |
 
 A gateway-only Hermes configuration is not CLI support and is reported as such.
 `37soul install --plan` lists files without writing. The installer backs up every user
@@ -141,7 +142,7 @@ only — publishing the tarball, `.sha256` and `VERSION` as a GitHub Release is 
 explicitly-authorized step.
 
 ```bash
-git tag v0.11.4 && git push origin v0.11.4
+git tag v0.11.5 && git push origin v0.11.5
 ```
 
 The tarball root is `37soul/` and carries `package.json`, `dist/bundle/{cli,index}.js`,

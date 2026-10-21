@@ -12,6 +12,7 @@
  */
 
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { GitStateResult } from "./agentd/git-state.js";
 import { getGitState } from "./agentd/git-state.js";
@@ -29,7 +30,10 @@ import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
 import { extractTranscriptPath } from "./agentd/source-index.js";
-import { inspectCodexTrust } from "./adapters/codex.js";
+import { latestCompletedTurnSourceRefs } from "./adapters/claude-code.js";
+import { latestCodexCompletedTurnRefs } from "./adapters/codex.js";
+import { latestOpenCodeCompletedTurnRefs } from "./adapters/opencode.js";
+import { latestHermesCompletedTurnRefs } from "./adapters/hermes.js";
 
 export interface HookDeps {
   home: string;
@@ -49,9 +53,9 @@ interface HookPayload {
   hook_event_name?: string;
 }
 
-export function wrapAdditionalContext(text: string): string {
+export function wrapAdditionalContext(text: string, eventName: "SessionStart" | "UserPromptSubmit" = "SessionStart"): string {
   return JSON.stringify({
-    hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: text },
+    hookSpecificOutput: { hookEventName: eventName, additionalContext: text },
   });
 }
 
@@ -192,6 +196,8 @@ export interface HookCommandDeps extends HookDeps {
 const INJECTION_CHANNEL: Record<string, "SessionStart" | "UserPromptSubmit" | "none"> = {
   "claude-code": "SessionStart",
   codex: "SessionStart",
+  opencode: "SessionStart",
+  hermes: "SessionStart",
 };
 
 export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
@@ -221,11 +227,29 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       });
     }
 
-    // Assets mode (soul-assets/v1): additionally deliver the runtime event to the
-    // local writer. Fire-and-forget — it never blocks the hook, never changes the
-    // legacy exit-0 / spool / injection behavior, and does nothing outside assets
-    // mode or when there is no real session id.
-    void emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId, extractTranscriptPath(payload)).catch(() => {});
+    // Assets mode (soul-assets/v1): deliver the runtime event to the local writer.
+    // SessionStart is awaited: a first-time session has no binding yet, and the
+    // writer creates it while handling this event. Injecting concurrently would
+    // read the snapshot before that binding commits (first-session race).
+    const sourcePath = extractTranscriptPath(payload);
+    let sourceTurnRefs: string[] | undefined;
+    if (deps.event === "Stop" && sourcePath) {
+      try {
+        const transcript = readFileSync(sourcePath, "utf8");
+        if (deps.agentKind === "claude-code") sourceTurnRefs = latestCompletedTurnSourceRefs(transcript);
+        else if (deps.agentKind === "codex") sourceTurnRefs = latestCodexCompletedTurnRefs(transcript).refs;
+        else if (deps.agentKind === "opencode") sourceTurnRefs = latestOpenCodeCompletedTurnRefs(transcript).refs;
+        else if (deps.agentKind === "hermes") sourceTurnRefs = latestHermesCompletedTurnRefs(transcript).refs;
+        if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = undefined;
+      } catch {
+        // A missing/unreadable transcript leaves the old event-ref range intact.
+      }
+    }
+    const runtimeEvent = emitRuntimeEvent(root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs).catch(() => {});
+    // SessionStart needs the binding before injecting. Stop is the completed-turn
+    // event whose source pointer must reach the writer before the host exits.
+    if (deps.event === "SessionStart" || deps.event === "Stop") await runtimeEvent;
+    else void runtimeEvent;
 
     if (deps.event === "PreCompact") {
       await writeReinjectMarker(root, sessionId).catch(() => {});
@@ -243,7 +267,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
         await withBudget(deps.timeoutMs ?? 300, () =>
-          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout),
+          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout, "session", "SessionStart"),
         ).catch(() => {});
         return 0;
       }
@@ -256,6 +280,18 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       return 0;
     }
 
+    if (deps.event === "UserPromptSubmit") {
+      const assets = resolveLocalAssetsProfileSync(root);
+      if (assets) {
+        const prompt = firstString(payload.prompt, payload.user_prompt, payload.userPrompt, payload.message, payload.text) ?? "";
+        if (prompt.trim() !== "") {
+          await withBudget(deps.timeoutMs ?? 300, () =>
+            injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout, prompt, "UserPromptSubmit"),
+          ).catch(() => {});
+          return 0;
+        }
+      }
+    }
     if (deps.event === "UserPromptSubmit" && channel === "UserPromptSubmit") {
       if (await reinjectPending(root, sessionId)) {
         try {
@@ -280,7 +316,6 @@ const RUNTIME_KINDS = new Set<string>(["claude-code", "codex", "opencode", "herm
 const RUNTIME_EVENT_KINDS: Record<string, RuntimeEventKind> = {
   SessionStart: "resume",
   Stop: "turn_completed",
-  SessionEnd: "checkpoint",
   PreCompact: "compact",
   UserPromptSubmit: "request",
 };
@@ -297,6 +332,7 @@ async function emitRuntimeEvent(
   hookEvent: string,
   sessionId: string,
   sourcePath: string | null,
+  sourceTurnRefs?: string[],
 ): Promise<void> {
   if (sessionId === "unknown" || !RUNTIME_KINDS.has(agentKind)) return;
   const kind = RUNTIME_EVENT_KINDS[hookEvent];
@@ -313,6 +349,7 @@ async function emitRuntimeEvent(
     },
     event_ref: randomUUID(),
     kind,
+    ...(sourceTurnRefs && sourceTurnRefs.length > 0 ? { source_turn_refs: sourceTurnRefs.slice() } : {}),
     internal_job_uid: process.env.SOUL37_INTERNAL_JOB_UID ?? null,
   };
   await sendWriter(root, {
@@ -345,9 +382,9 @@ async function injectSoulContext(
   agentKind: string,
   sessionId: string,
   stdout: (text: string) => void,
+  taskHint = "session",
+  outputEvent: "SessionStart" | "UserPromptSubmit" = "SessionStart",
 ): Promise<void> {
-  if (agentKind === "codex" && !inspectCodexTrust(home).trusted) return;
-
   const store = await openStore(root, assets.profile_id);
   try {
     const snap = await store.read();
@@ -362,7 +399,7 @@ async function injectSoulContext(
 
     let input;
     try {
-      input = ownerContextInput(snap, binding.soul_uid, binding, "session");
+      input = ownerContextInput(snap, binding.soul_uid, binding, taskHint);
     } catch (error) {
       // Revoked identity/device: never inject a cached private identity. Local
       // originals are handled inside ownerContextInput and remain available.
@@ -374,7 +411,7 @@ async function injectSoulContext(
 
     // Deliver first, then record the receipt — an injected receipt must only exist
     // after the context actually reached the session.
-    stdout(`${wrapAdditionalContext(bundle.rendered_text)}\n`);
+    stdout(`${wrapAdditionalContext(bundle.rendered_text, outputEvent)}\n`);
     await sendWriter(root, {
       request_uid: randomUUID(),
       profile_id: assets.profile_id,

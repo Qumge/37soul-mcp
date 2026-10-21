@@ -110,7 +110,7 @@ export function openCodeConfigDir(home: string): string {
 
 /** The plugin directory install writes the ONE managed file into. */
 export function openCodePluginDir(home: string): string {
-  return path.join(openCodeConfigDir(home), "plugin");
+  return path.join(openCodeConfigDir(home), "plugins");
 }
 
 /** The exact path of the managed plugin file (the only entry 37soul owns). */
@@ -297,7 +297,7 @@ function parseJsonl(jsonl: string): Array<Record<string, any>> {
  * The session id comes from the transcript itself (a session.created record), never
  * from the file path or a process-global.
  */
-export function opencodeCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+export function opencodeCompletedTurnRefs(jsonl: string, latest = false): { session_id: string | null; refs: string[] } {
   const records = parseJsonl(jsonl);
   let sessionId: string | null = null;
   for (const record of records) {
@@ -310,6 +310,12 @@ export function opencodeCompletedTurnRefs(jsonl: string): { session_id: string |
   let turnStarted = false;
   for (const record of records) {
     if (record.type === "request") {
+      if (latest) {
+        refs.length = 0;
+        turnStarted = true;
+        if (typeof record.id === "string" && record.id !== "") refs.push(record.id);
+        continue;
+      }
       if (turnStarted) break; // the next request begins: the first turn is complete
       turnStarted = true;
       if (typeof record.id === "string" && record.id !== "") refs.push(record.id);
@@ -321,6 +327,10 @@ export function opencodeCompletedTurnRefs(jsonl: string): { session_id: string |
     }
   }
   return { session_id: sessionId, refs };
+}
+
+export function latestOpenCodeCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+  return opencodeCompletedTurnRefs(jsonl, true);
 }
 
 function truncate(text: string, max: number): string {
@@ -385,10 +395,10 @@ export function renderOpenCodeTurn(jsonl: string, refs: readonly string[]): stri
     if (typeof record.id !== "string" || !wanted.has(record.id)) continue;
     if (record.type === "request") {
       const text = renderOpenCodeRequestText(record);
-      if (text.trim() !== "") lines.push(text);
+      if (text.trim() !== "") lines.push(`User: ${text}`);
     } else if (record.type === "message") {
       const text = renderOpenCodeMessageText(record);
-      if (text.trim() !== "") lines.push(text);
+      if (text.trim() !== "") lines.push(`Assistant: ${text}`);
     } else if (record.type === "tool") {
       const name = typeof record.name === "string" && record.name !== "" ? record.name : "tool";
       const summary = [summarizeOpenCodeToolInput(record.input), truncateOpenCodeToolOutput(record.output)]
@@ -417,9 +427,9 @@ export function buildOpenCodeExtractionInvocation(
   const { input } = buildExtractionInvocation(request, turnText);
   switch (generation) {
     case "v1":
-      return { args: ["run", "--output-format", "json"], input };
+      return { args: ["run", "--format", "json"], input };
     case "v2":
-      return { args: ["run", "--output-format", "json", "--plugin-generation", "v2"], input };
+      return { args: ["run", "--format", "json", "--standalone"], input };
     default:
       return { unsupported: true, declared: generation };
   }
@@ -450,7 +460,9 @@ export function createOpenCodeAdapter(deps: AdapterDeps): RuntimeAdapter {
       // 1. Read the raw transcript through the ONLY raw-source seam.
       const transcript = await deps.readSource(request.source_event_refs);
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const { refs } = opencodeCompletedTurnRefs(transcript);
+      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+        ? request.source_turn_refs.slice()
+        : opencodeCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read source — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.

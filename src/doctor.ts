@@ -295,9 +295,8 @@ function hermesDoctorDetail(inspection: { status: string; surface: string }): st
 /** Codex SessionStart hook 的诚实人话：installed → trusted → events 三步，谁缺谁说。 */
 function codexHookDetail(installed: boolean, trust: { trusted: boolean; events_seen: boolean }): string {
   if (!installed) return "not installed — run `37soul install`";
-  if (trust.trusted && trust.events_seen) return "trusted and SessionStart events observed";
-  if (trust.trusted) return "installed and trusted, but no SessionStart events observed yet";
-  return "installed, not trusted — Codex has not authorized the hook (no `trusted = true` in its config.toml)";
+  if (trust.events_seen) return "hook events observed; Codex's persistent trust state is managed in /hooks";
+  return "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — review with /hooks";
 }
 
 async function dirCheck(name: string, dir: string): Promise<DoctorCheck> {

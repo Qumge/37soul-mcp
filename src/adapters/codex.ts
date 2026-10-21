@@ -30,7 +30,7 @@
  * process-global like SOUL37_HOST_ID.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ParsedEvent } from "../agentd/types.js";
 import { codexNativeSessionId, createCodexParser } from "../agentd/parsers/codex.js";
@@ -56,99 +56,127 @@ export const CODEX_HOOK_EVENTS: ReadonlyArray<{ event: string; verified: boolean
   { event: "SessionEnd", verified: false },
 ];
 
-/** Where 37soul writes its own hook subscription record (the "installed" state). */
+/** Official Codex hook file (hooks.json next to the active config layer). */
 export function codexHookConfigPath(home: string): string {
-  return path.join(home, ".codex", "37soul-hooks.json");
-}
-
-/** Codex's own config (the only place a trust marker may live). */
-export function codexConfigPath(home: string): string {
-  return path.join(home, ".codex", "config.toml");
-}
-
-/** Distinct from `codex mcp add 37soul` (which writes `[mcp_servers.37soul]`), so
- *  our own MCP registration can never be mistaken for a Codex-authored trust marker. */
-const CODEX_TRUST_SECTION = "hooks.37soul-hooks";
-
-/**
- * Extract the `[hooks.37soul-hooks]` TOML section only. Trust must be section-scoped:
- * a `trusted = true` under an unrelated section — or inside a comment — never counts.
- */
-function readCodexHooksSection(text: string): string {
-  // Section headers: [hooks.37soul-hooks] or the quoted [hooks."37soul-hooks"] form.
-  const header = /^\s*\[\s*hooks\s*\.\s*(?:"?37soul-hooks"?|'37soul-hooks')\s*\]\s*(?:#.*)?$/;
-  const lines = text.split("\n");
-  let inSection = false;
-  const collected: string[] = [];
-  for (const line of lines) {
-    if (!inSection) {
-      if (header.test(line)) inSection = true;
-      continue;
-    }
-    if (/^\s*\[/.test(line)) break; // the next section ends ours
-    collected.push(line);
-  }
-  return collected.join("\n");
+  return path.join(home, ".codex", "hooks.json");
 }
 
 export interface CodexTrustState {
   trusted: boolean;
   events_seen: boolean;
-  reason: "trusted" | "pending";
+  reason: "pending" | "observed";
 }
 
 /**
- * Read Codex's own config and report trust only from a Codex-authored marker in the
- * `[hooks.37soul-hooks]` section. UNVERIFIED marker path: the real trust store
- * format is not confirmed by an authorized live probe. Anything else — including a
- * config write we performed — stays pending.
- *
- * `events_seen` is independently derived and honest: there is no event-observation
- * mechanism yet, so a trust marker ("Codex may run the hook") can never report that
- * events were seen. It stays false regardless of the trust marker until an
- * observation path exists.
+ * Codex trusts hooks by exact definition hash and records that decision in its own
+ * (currently undocumented) trust store. We never fabricate a trust marker: this
+ * reports `trusted:false` until Codex itself shows the hook as trusted. `events_seen`
+ * is independent evidence from our local hook spool, never from a config write.
  */
 export function inspectCodexTrust(home: string): CodexTrustState {
-  let text = "";
+  let eventsSeen = false;
   try {
-    text = readFileSync(codexConfigPath(home), "utf8");
+    const dir = path.join(home, ".37soul", "spool", "codex");
+    eventsSeen = readdirSync(dir).some((name) => name.endsWith(".jsonl"));
   } catch {
-    // no config.toml yet: nothing Codex wrote, so nothing is trusted
+    // no spool yet
   }
-  const section = readCodexHooksSection(text);
-  const trusted = /^\s*trusted\s*=\s*true\s*(?:#.*)?$/m.test(section);
-  return trusted
-    ? { trusted: true, events_seen: false, reason: "trusted" }
+  return eventsSeen
+    ? { trusted: false, events_seen: true, reason: "observed" }
     : { trusted: false, events_seen: false, reason: "pending" };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 /**
- * Record the hook events 37soul installs. This is the "installed" state only —
- * a config write we ourselves performed. It never claims Codex executes the hooks.
+ * Write the official hooks.json shape. Existing vendor hooks are preserved; only
+ * groups containing our `hook --agent codex` command are replaced. This file is
+ * not proof of trust or execution.
  */
 export function writeCodexHookConfig(
   home: string,
-  opts: { now?: () => number } = {},
+  opts: { now?: () => number; command?: string } = {},
 ): { installed: boolean; path: string } {
   const file = codexHookConfigPath(home);
   mkdirSync(path.dirname(file), { recursive: true });
-  const payload = {
-    managed_by: "37soul",
-    note:
-      "Codex hook config format is UNVERIFIED (no authorized live probe). This file records the " +
-      "events 37soul subscribes to; it does not claim Codex executes them.",
-    installed_at: new Date(opts.now?.() ?? Date.now()).toISOString(),
-    verified: false,
-    events: CODEX_HOOK_EVENTS.map((entry) => entry.event),
-  };
-  writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  let document: Record<string, any> = {};
+  let existing = "";
+  try {
+    existing = readFileSync(file, "utf8");
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) document = parsed;
+  } catch {
+    // absent or malformed: replace with a valid managed document
+  }
+  if (existing !== "") {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+    writeFileSync(`${file}.37soul-${stamp}.bak`, existing, { mode: 0o600 });
+  }
+  const launcher = opts.command ?? "37soul";
+  const hooks = document.hooks && typeof document.hooks === "object" && !Array.isArray(document.hooks)
+    ? document.hooks as Record<string, any>
+    : {};
+  const entries: Array<[string, string | null]> = [
+    ["SessionStart", "startup|resume|clear|compact|fork"],
+    ["UserPromptSubmit", null],
+    ["PreCompact", "manual|auto"],
+    ["Stop", null],
+    ["SessionEnd", null],
+  ];
+  for (const [event, matcher] of entries) {
+    const groups = Array.isArray(hooks[event]) ? hooks[event] : [];
+    const preserved = groups.filter((group: any) =>
+      !(Array.isArray(group?.hooks) && group.hooks.some((handler: any) =>
+        typeof handler?.command === "string" && handler.command.includes("hook --agent codex"),
+      )),
+    );
+    const group: Record<string, any> = {
+      hooks: [{
+        type: "command",
+        command: `${shellQuote(launcher)} hook --agent codex --event ${event}`,
+        timeout: 5,
+      }],
+    };
+    if (matcher) group.matcher = matcher;
+    preserved.push(group);
+    hooks[event] = preserved;
+  }
+  document.hooks = hooks;
+  writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
   return { installed: true, path: file };
 }
 
-/** Remove the managed hook config; returns false when there is nothing to remove. */
+/** Remove only our handlers; preserve every other vendor hook in hooks.json. */
 export function removeCodexHookConfig(home: string): boolean {
   const file = codexHookConfigPath(home);
   if (!existsSync(file)) return false;
+  try {
+    const document = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
+    if (document && typeof document.hooks === "object" && !Array.isArray(document.hooks)) {
+      let remaining = 0;
+      for (const [event, groups] of Object.entries(document.hooks as Record<string, any>)) {
+        if (!Array.isArray(groups)) continue;
+        const kept = groups.filter((group: any) =>
+          !(Array.isArray(group?.hooks) && group.hooks.some((handler: any) =>
+            typeof handler?.command === "string" && handler.command.includes("hook --agent codex"),
+          )),
+        );
+        if (kept.length > 0) { (document.hooks as Record<string, any>)[event] = kept; remaining += kept.length; }
+        else delete (document.hooks as Record<string, any>)[event];
+      }
+      if (remaining === 0 && Object.keys(document.hooks).length === 0) {
+        rmSync(file, { force: true });
+      } else {
+        writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+      }
+      return true;
+    }
+  } catch {
+    // malformed file: leave it untouched rather than deleting user data
+    return false;
+  }
   rmSync(file, { force: true });
   return true;
 }
@@ -178,19 +206,24 @@ function parseJsonl(jsonl: string): Array<Record<string, any>> {
  * The session id comes from the rollout itself (session_meta.payload.id), never
  * from the file path or a process-global.
  */
-export function codexCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+export function codexCompletedTurnRefs(jsonl: string, latest = false): { session_id: string | null; refs: string[] } {
   const sessionId = codexNativeSessionId(jsonl);
   const refs: string[] = [];
   let turnStarted = false;
   for (const record of parseJsonl(jsonl)) {
     if (record.type === "turn_context") {
+      if (latest) {
+        refs.length = 0; // the latest turn replaces the refs from earlier turns
+        turnStarted = true;
+        continue;
+      }
       if (turnStarted) break; // the next turn begins: the first turn is complete
       turnStarted = true;
       continue;
     }
-    if (record.type === "response_item") {
-      turnStarted = true;
-      if (typeof record.ordinal === "number") refs.push(String(record.ordinal));
+    if (!turnStarted) continue; // developer/setup messages before turn_context
+    if (record.type === "response_item" && typeof record.ordinal === "number") {
+      refs.push(String(record.ordinal));
     }
   }
   return { session_id: sessionId, refs };
@@ -201,6 +234,10 @@ export function codexCompletedTurnRefs(jsonl: string): { session_id: string | nu
  * parser (no second rollout parser). `refs` are the ordinals from
  * `codexCompletedTurnRefs`; a real `readSource` renders exactly those records.
  */
+export function latestCodexCompletedTurnRefs(jsonl: string): { session_id: string | null; refs: string[] } {
+  return codexCompletedTurnRefs(jsonl, true);
+}
+
 export function renderCodexTurn(jsonl: string, refs: readonly string[]): string {
   const wanted = new Set(refs);
   const records = parseJsonl(jsonl).filter(
@@ -214,7 +251,9 @@ export function renderCodexTurn(jsonl: string, refs: readonly string[]): string 
   const lines: string[] = [];
   for (const event of events) {
     if (event.role === "user" || event.role === "assistant") {
-      if (typeof event.text === "string" && event.text.trim() !== "") lines.push(event.text);
+      if (typeof event.text === "string" && event.text.trim() !== "") {
+        lines.push(`${event.role === "user" ? "User" : "Assistant"}: ${event.text}`);
+      }
     } else if (event.role === "tool") {
       const name = event.tool?.name ?? "tool";
       const summary = [event.tool?.input_summary, event.tool?.output_summary]
@@ -238,7 +277,10 @@ export function buildCodexExtractionInvocation(
   turnText: string,
 ): { args: readonly string[]; input: string } {
   const { input } = buildExtractionInvocation(request, turnText);
-  return { args: ["exec", "--output-format", "json"], input };
+  // Codex's non-interactive surface is `codex exec --json` (JSONL events), not
+  // `--output-format`. Read-only + skip-git-repo-check keeps this a text task and
+  // works from agentd's non-repository cwd; the prompt is piped on stdin.
+  return { args: ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"], input };
 }
 
 export function createCodexAdapter(deps: AdapterDeps): RuntimeAdapter {
@@ -265,7 +307,9 @@ export function createCodexAdapter(deps: AdapterDeps): RuntimeAdapter {
       // 1. Read the raw rollout through the ONLY raw-source seam.
       const transcript = await deps.readSource(request.source_event_refs);
       // 2. Resolve the completed turn's concrete refs (no later turn / meta record).
-      const { refs } = codexCompletedTurnRefs(transcript);
+      const refs = request.source_turn_refs && request.source_turn_refs.length > 0
+        ? request.source_turn_refs.slice()
+        : codexCompletedTurnRefs(transcript).refs;
       if (refs.length === 0) return { error: { code: "source_unavailable", retryable: true } };
       // 3. Render exactly the completed turn from the already-read rollout — the
       //    readSource seam is hit once (bounded); the turn is a local subset of it.

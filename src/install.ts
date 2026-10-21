@@ -589,7 +589,7 @@ async function configureCodex(
   // 订阅（installed）并检查 Codex 自己的 config 里的信任标记（trusted）——我们
   // 自己写的配置永远不能把 trusted/events/injection 变成绿。
   await editManagedFragment(codexInstructionsPath(deps.home), INSTRUCTIONS_FRAGMENT);
-  writeCodexHookConfig(deps.home);
+  writeCodexHookConfig(deps.home, { command: deps.launcher ?? "37soul" });
   const trust = inspectCodexTrust(deps.home);
 
   let mcp = false;
@@ -629,11 +629,11 @@ async function configureCodex(
     instructions: true,
     mcp,
     report: {
-      installed: true, // our own hook-config write
-      trusted: trust.trusted, // Codex-authored marker only
+      installed: true, // official hooks.json write, not proof of trust
+      trusted: trust.trusted, // never fabricated; Codex owns its trust store
       events_seen: trust.events_seen,
       extraction_capable: false, // no verified native command (P0 未验)
-      injection_capable: trust.trusted, // injection needs a trusted SessionStart hook
+      injection_capable: false, // do not claim injection until Codex shows trust/events
     },
   };
 }
