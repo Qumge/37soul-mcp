@@ -75,6 +75,27 @@ test("contract: content_digest matches every server-generated seed digest", () =
   }
 });
 
+test("context: sex and age are rendered into the identity line when present", () => {
+  const soul = {
+    soul_uid: "10000000-0000-4000-8000-000000000001",
+    legacy_host_id: null,
+    identity_revision: 1,
+    identity: {
+      name: "Growth", description: "", character: "", greeting: "",
+      sex: "female", age: 29,
+    },
+    state: "active",
+  };
+  const binding = {
+    binding_uid: "20000000-0000-4000-8000-000000000001",
+    session_ref: "s", runtime_kind: "hermes", soul_uid: soul.soul_uid,
+    revision: 1, state: "bound",
+  };
+  const actual = selectContext({ soul, binding, assets: [], taskHint: "", budgetBytes: 4096 });
+  assert.match(actual.rendered_text, /"sex":"female"/);
+  assert.match(actual.rendered_text, /"age":29/);
+});
+
 // ---------------------------------------------------------------------------
 // Context selection rules
 // ---------------------------------------------------------------------------

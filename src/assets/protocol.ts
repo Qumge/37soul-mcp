@@ -104,6 +104,10 @@ export interface Soul {
   publish_profile?: boolean;
   /** Canonical server/default avatar URL when known. Never a local path. */
   avatar_url?: string;
+  /** Server-authoritative public visibility; absent on legacy snapshots. */
+  public?: boolean;
+  /** Last local avatar upload failure, local-only and retryable. */
+  avatar_upload_error?: string;
   /** User-selected local image path; local-only until an authorized upload. */
   local_avatar_path?: string;
   /** True only after the cloud accepted the chosen image. */

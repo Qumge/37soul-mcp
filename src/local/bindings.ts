@@ -728,6 +728,7 @@ registerWriterCommand("set_soul_avatar", async ({ root, request }) => {
       if (typeof request.payload.local_avatar_path === "string" && request.payload.local_avatar_path !== "") {
         soul.local_avatar_path = request.payload.local_avatar_path;
         if (!request.payload.avatar_url) soul.avatar_uploaded = false;
+        delete soul.avatar_upload_error;
       }
     });
     return (await store.read()).souls[soulUid];

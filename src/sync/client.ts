@@ -12,7 +12,8 @@
  * other endpoint.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { basename, extname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BindingSnapshot, HttpFetch, ProfileId } from "../adapters/types.js";
 import { loadConfig } from "../agentd/state.js";
@@ -245,14 +246,35 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
           method: "GET",
           headers: authHeaders(auth.defaultToken),
         }, auth);
+        if (capabilities.status === 401) {
+          const revoked = await handleRevokedOrRejected(store, snap, capabilities, auth.root);
+          report.error = revoked ?? "token_invalid";
+          report.pending = pendingCount(await store.read());
+          return report;
+        }
+        if (capabilities.status === 403) {
+          report.error = fatalFromStatus(capabilities);
+          report.pending = pendingCount(snap);
+          return report;
+        }
+        if (capabilities.status !== 200) {
+          report.error = "capability_check_failed";
+          report.pending = pendingCount(snap);
+          return report;
+        }
         const listed = (capabilities.body as { capabilities?: unknown } | null)?.capabilities;
-        if (capabilities.status !== 200 || !Array.isArray(listed) || !listed.includes("soul_profile_public_v1")) {
+        if (!Array.isArray(listed)) {
+          report.error = "capability_check_failed";
+          report.pending = pendingCount(snap);
+          return report;
+        }
+        if (!listed.includes("soul_profile_public_v1")) {
           report.error = "server_upgrade_required";
           report.pending = pendingCount(snap);
           return report;
         }
       } catch {
-        report.error = "server_upgrade_required";
+        report.error = "sync_failed";
         report.pending = pendingCount(snap);
         return report;
       }
@@ -265,6 +287,10 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
     }
     const pullError = await pullLoop(store, http, auth, options, report);
     if (pullError) report.error = pullError;
+    if (!report.error) {
+      const avatarError = await flushPendingAvatars(store, http, auth);
+      if (avatarError) report.error = avatarError;
+    }
     report.pending = pendingCount(await store.read());
     return report;
   } catch (error) {
@@ -505,6 +531,180 @@ async function handleRegisterSoul(
   }
   if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
   return fatalFromStatus(res);
+}
+
+export interface AvatarUploadResult {
+  status: "uploaded" | "no_pending" | "not_logged_in" | "not_registered" | "not_authorized" | "failed";
+  soul_uid?: string;
+  avatar_url?: string;
+  error?: string;
+}
+
+interface AvatarAttempt {
+  fatal: string | null;
+  result: AvatarUploadResult;
+}
+
+/** One bounded avatar upload. Only registered Souls with identity consent and a
+ * local chosen image enter this path; the bytes, never the local path, go on the wire. */
+async function uploadAvatarForSoul(
+  store: LocalStore,
+  http: HttpFetch,
+  auth: SyncAuth,
+  soulUid: string,
+): Promise<AvatarAttempt> {
+  let snap = await store.read();
+  let soul = snap.souls[soulUid];
+  if (!soul) return { fatal: null, result: { status: "no_pending", soul_uid: soulUid } };
+  if (soul.legacy_host_id === null) {
+    return { fatal: null, result: { status: "not_registered", soul_uid: soulUid } };
+  }
+  if (!soul.local_avatar_path || soul.avatar_uploaded === true) {
+    return { fatal: null, result: { status: "no_pending", soul_uid: soulUid } };
+  }
+  if (!authorizedCategories(snap, soulUid).has("identity")) {
+    return { fatal: null, result: { status: "not_authorized", soul_uid: soulUid } };
+  }
+
+  const localPath = soul.local_avatar_path;
+  let bytes: Buffer;
+  try {
+    const info = statSync(localPath);
+    if (!info.isFile() || info.size > 5 * 1024 * 1024) {
+      await store.transact((draft) => {
+        if (draft.souls[soulUid]?.local_avatar_path === localPath) {
+          draft.souls[soulUid].avatar_upload_error = info.isFile() ? "image_too_large" : "image_unreadable";
+        }
+      });
+      return { fatal: null, result: { status: "failed", soul_uid: soulUid, error: "image_too_large_or_unreadable" } };
+    }
+    bytes = readFileSync(localPath);
+  } catch {
+    await store.transact((draft) => {
+      if (draft.souls[soulUid]?.local_avatar_path === localPath) {
+        draft.souls[soulUid].avatar_upload_error = "image_unreadable";
+      }
+    });
+    return { fatal: null, result: { status: "failed", soul_uid: soulUid, error: "image_unreadable" } };
+  }
+
+  const extension = extname(localPath).toLowerCase();
+  const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : "image/jpeg";
+  const form = new FormData();
+  form.append("file", new Blob([bytes as unknown as ArrayBuffer], { type: mime }), basename(localPath));
+  let response: FetchResponseLike;
+  try {
+    response = await fetchWithBackoff(http, `${auth.baseUrl}${ROUTES}/souls/${encodeURIComponent(soulUid)}/avatar`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${auth.defaultToken}` },
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    }, auth);
+  } catch {
+    await store.transact((draft) => {
+      if (draft.souls[soulUid]?.local_avatar_path === localPath) {
+        draft.souls[soulUid].avatar_upload_error = "network_or_timeout";
+      }
+    });
+    return { fatal: null, result: { status: "failed", soul_uid: soulUid, error: "network_or_timeout" } };
+  }
+
+  const body = await readJson(response);
+  if (response.status === 401) {
+    snap = await store.read();
+    const fatal = await handleRevokedOrRejected(store, snap, body, auth.root);
+    return { fatal, result: { status: "failed", soul_uid: soulUid, error: fatal ?? "unauthorized" } };
+  }
+  if (response.status === 403) {
+    return { fatal: fatalFromStatus(body), result: { status: "failed", soul_uid: soulUid, error: fatalFromStatus(body) } };
+  }
+  if (response.status !== 200) {
+    await store.transact((draft) => {
+      if (draft.souls[soulUid]?.local_avatar_path === localPath) {
+        draft.souls[soulUid].avatar_upload_error = `http_${response.status}`;
+      }
+    });
+    return { fatal: null, result: { status: "failed", soul_uid: soulUid, error: `http_${response.status}` } };
+  }
+
+  const avatarUrl = (body.body as { avatar_url?: unknown } | null)?.avatar_url;
+  if (typeof avatarUrl !== "string" || !/^https?:\/\//i.test(avatarUrl)) {
+    await store.transact((draft) => {
+      if (draft.souls[soulUid]?.local_avatar_path === localPath) {
+        draft.souls[soulUid].avatar_upload_error = "invalid_avatar_url";
+      }
+    });
+    return { fatal: null, result: { status: "failed", soul_uid: soulUid, error: "invalid_avatar_url" } };
+  }
+
+  await store.transact((draft) => {
+    const current = draft.souls[soulUid];
+    if (!current || current.local_avatar_path !== localPath) return;
+    current.avatar_url = avatarUrl;
+    current.avatar_uploaded = true;
+    delete current.avatar_upload_error;
+  });
+  return { fatal: null, result: { status: "uploaded", soul_uid: soulUid, avatar_url: avatarUrl } };
+}
+
+async function flushPendingAvatars(
+  store: LocalStore,
+  http: HttpFetch,
+  auth: SyncAuth,
+): Promise<string | null> {
+  const snap = await store.read();
+  for (const soul of Object.values(snap.souls)) {
+    if (soul.legacy_host_id === null || !soul.local_avatar_path || soul.avatar_uploaded === true) continue;
+    if (!authorizedCategories(snap, soul.soul_uid).has("identity")) continue;
+    const attempt = await uploadAvatarForSoul(store, http, auth, soul.soul_uid);
+    if (attempt.fatal) return attempt.fatal;
+  }
+  return null;
+}
+
+/** Manual/automatic entry point used by both `37soul sync` and `37soul soul avatar`. */
+export async function uploadPendingAvatar(
+  profileId: ProfileId,
+  http: HttpFetch,
+  options: SyncOptions & { soulUid?: string } = {},
+): Promise<AvatarUploadResult> {
+  const root = resolveRoot(options.root);
+  const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
+  const config = await loadConfig(root).catch(() => null);
+  const baseUrl = (options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const store = await openStore(root, profileId, { fs });
+  try {
+    const snap = await store.read();
+    const credentials: StoredCredential[] = options.token
+      ? [{
+          token: options.token,
+          owner_id: snap.owner_id ?? "",
+          cloud_device_uid: snap.cloud_device_uid ?? "",
+          runtime_kind: "*",
+          profile_id: profileId,
+          obtained_at: "",
+        }]
+      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid);
+    if (credentials.length === 0) return { status: "not_logged_in" };
+    const auth: SyncAuth = {
+      root,
+      baseUrl,
+      backoff: { ...defaultBackoff(), ...(options.backoff ?? {}) },
+      credentials,
+      defaultToken: credentials[0].token,
+    };
+    if (options.soulUid) {
+      const attempt = await uploadAvatarForSoul(store, http, auth, options.soulUid);
+      return attempt.result;
+    }
+    const pending = Object.values(snap.souls).find(
+      (soul) => soul.legacy_host_id !== null && soul.local_avatar_path && soul.avatar_uploaded !== true,
+    );
+    if (!pending) return { status: "no_pending" };
+    return (await uploadAvatarForSoul(store, http, auth, pending.soul_uid)).result;
+  } finally {
+    await store.close();
+  }
 }
 
 async function handleConsent(
@@ -1078,6 +1278,7 @@ function applySoulEvent(draft: StoreSnapshot, soul: Soul): void {
     // Avatar URL is not part of the identity text revision. The avatar endpoint
     // emits a soul event without changing identity_revision, so apply that one
     // field even when the text snapshot is already current.
+    if (typeof soul.public === "boolean") previous.public = soul.public;
     if (previous.local_avatar_path && !previous.avatar_uploaded) return;
     if (soul.avatar_url && soul.avatar_url !== previous.avatar_url) {
       previous.avatar_url = soul.avatar_url;

@@ -17,7 +17,7 @@ import { createDaemon } from "./agentd/daemon.js";
 import { createExtractAdapters, type NativeInvokerLog } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
-import { saveLoginCredentials, selectCredentials } from "./agentd/credentials.js";
+import { saveLoginCredentials } from "./agentd/credentials.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
 import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
@@ -32,7 +32,7 @@ import { RUNTIME_KINDS } from "./assets/protocol.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
-import { configureSyncHttp, isAssetsModeSync } from "./sync/client.js";
+import { configureSyncHttp, isAssetsModeSync, uploadPendingAvatar } from "./sync/client.js";
 import { runSync, runSyncProfiles } from "./sync/run.js";
 
 export interface CliIO {
@@ -74,7 +74,7 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
   37soul soul edit <uid> [--name <n> ...] [--avatar <path>] [--profile <id>]   edit a local (unregistered) Soul
   37soul soul authorize <uid> [--categories identity,relationship,experience] [--profile <id>]
-                                                explicitly authorize cloud sync for a Soul
+                                                explicitly authorize sync; profile is public, chats/memories are not
   37soul soul avatar <uid> --file <image> [--profile <id>]   upload a chosen avatar after login
   37soul soul export [--profile <id>]            export the owner-private core identity
   37soul soul review <uid> --approve|--reject [--profile <id>]   approve/reject a pending asset (interactive)
@@ -211,9 +211,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
           try {
             const snap = await store.read();
             for (const soul of Object.values(snap.souls)) {
-              const label = soul.legacy_host_id
-                ? `registered public: ${deps.apiBase}/hosts/${soul.legacy_host_id}`
-                : "local only (not public until login + explicit authorization + sync)";
+              const label = soulVisibilityLabel(soul, deps.apiBase);
               const avatar = soul.local_avatar_path && !soul.avatar_uploaded ? " — chosen avatar pending upload (retry: 37soul soul avatar)" : "";
               io.stdout(`  ${soul.soul_uid} ${soul.identity.name}: ${label}${avatar}\n`);
             }
@@ -326,6 +324,19 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
 
 // --- Task 3 local soul / binding / login commands ----------------------------------
 
+function soulVisibilityLabel(
+  soul: { legacy_host_id: number | null; public?: boolean },
+  apiBase: string,
+): string {
+  if (soul.legacy_host_id === null) {
+    return "local only (not public until login + explicit authorization + sync)";
+  }
+  const link = `${apiBase}/hosts/${soul.legacy_host_id}`;
+  if (soul.public === true) return `public: ${link}`;
+  if (soul.public === false) return `registered private: ${link}`;
+  return `registered; public state unknown: ${link}`;
+}
+
 function profileIdFromArgs(rest: string[]): string {
   return flagValue(rest, "--profile") ?? "default";
 }
@@ -411,7 +422,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
 
   if (sub === "list") {
     const store = await openStore(root, profileId);
-    let souls: Array<{ soul_uid: string; legacy_host_id: number | null; identity: { name: string }; local_avatar_path?: string; avatar_uploaded?: boolean }> = [];
+    let souls: Array<{ soul_uid: string; legacy_host_id: number | null; public?: boolean; identity: { name: string }; local_avatar_path?: string; avatar_uploaded?: boolean }> = [];
     try {
       souls = Object.values((await store.read()).souls);
     } finally {
@@ -419,11 +430,9 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
     }
     if (souls.length === 0) io.stdout("no local souls\n");
     for (const soul of souls) {
-      const registered = soul.legacy_host_id !== null
-        ? `  (public: ${deps.apiBase}/hosts/${soul.legacy_host_id})`
-        : "  (local only; authorize + sync to publish)";
+      const state = soulVisibilityLabel(soul, deps.apiBase);
       const avatar = soul.local_avatar_path && !soul.avatar_uploaded ? "  [chosen avatar pending upload]" : "";
-      io.stdout(`- ${soul.soul_uid}  ${soul.identity.name}${registered}${avatar}\n`);
+      io.stdout(`- ${soul.soul_uid}  ${soul.identity.name}  (${state})${avatar}\n`);
     }
     return 0;
   }
@@ -509,55 +518,39 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       io.stderr("usage: 37soul soul avatar <soul_uid> --file <image> [--profile <id>]\n");
       return 2;
     }
-    let bytes: Buffer;
     try {
-      bytes = await readFile(file);
+      if (!(await stat(file)).isFile()) throw new Error("not a file");
     } catch {
       io.stderr(`avatar file not found: ${file}\n`);
       return 2;
     }
-    const config = await loadConfig(root);
-    const store = await openStore(root, profileId);
-    let soul;
-    let ownerId: string | null = null;
-    let cloudDeviceUid: string | null = null;
-    try {
-      const snap = await store.read();
-      soul = snap.souls[soulUid];
-      ownerId = snap.owner_id;
-      cloudDeviceUid = snap.cloud_device_uid;
-    } finally { await store.close(); }
-    if (!soul) { io.stderr(`no local soul ${soulUid}\n`); return 1; }
-    const credentials = selectCredentials(config, profileId, ownerId, cloudDeviceUid);
-    const credential = credentials[0];
-    if (!credential) {
-      await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: file });
+    const saved = await runWriterCommand(root, profileId, "set_soul_avatar", {
+      soul_uid: soulUid,
+      local_avatar_path: file,
+    });
+    if (!saved.ok) {
+      io.stderr(`${saved.error.code}: ${saved.error.message}\n`);
+      return 1;
+    }
+    const result = await uploadPendingAvatar(profileId, deps.fetch, { root, soulUid });
+    if (result.status === "uploaded") {
+      io.stdout(`avatar uploaded for ${soulUid}${result.avatar_url ? `: ${result.avatar_url}` : ""}\n`);
+      return 0;
+    }
+    if (result.status === "not_logged_in") {
       io.stderr("avatar saved locally; run 37soul login before uploading\n");
       return 0;
     }
-    const extension = path.extname(file).toLowerCase();
-    const mime = extension === ".png" ? "image/png" : extension === ".webp" ? "image/webp" : "image/jpeg";
-    const form = new FormData();
-    form.append("file", new Blob([bytes as unknown as ArrayBuffer], { type: mime }), path.basename(file));
-    const response = await deps.fetch(`${deps.apiBase}/api/v1/me/soul_sync/souls/${encodeURIComponent(soulUid)}/avatar`, {
-      method: "PUT",
-      headers: { Authorization: `Bearer ${credential.token}` },
-      body: form,
-    }).catch(() => null);
-    if (!response || !response.ok) {
-      await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: file });
-      io.stderr(`avatar upload failed${response ? ` (HTTP ${response.status})` : ""}; image kept locally for retry\n`);
-      return 1;
+    if (result.status === "not_registered") {
+      io.stderr("avatar saved locally; authorize and sync this Soul before uploading\n");
+      return 0;
     }
-    const body = (await response.json().catch(() => ({}))) as { avatar_url?: unknown };
-    const avatarUrl = typeof body.avatar_url === "string" ? body.avatar_url : undefined;
-    await runWriterCommand(root, profileId, "set_soul_avatar", {
-      soul_uid: soulUid,
-      ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
-      local_avatar_path: file,
-    });
-    io.stdout(`avatar uploaded for ${soulUid}${avatarUrl ? `: ${avatarUrl}` : ""}\n`);
-    return 0;
+    if (result.status === "not_authorized") {
+      io.stderr("avatar saved locally; identity sync is not authorized for this Soul\n");
+      return 0;
+    }
+    io.stderr(`avatar upload failed${result.error ? ` (${result.error})` : ""}; image kept locally for retry\n`);
+    return 1;
   }
 
   if (sub === "authorize") {
@@ -573,9 +566,21 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       return 1;
     }
     const result = res.result as { operation?: string; categories?: string[] } | null;
+    const store = await openStore(root, profileId);
+    let soul: { legacy_host_id: number | null; public?: boolean } | undefined;
+    try { soul = (await store.read()).souls[soulUid]; } finally { await store.close(); }
+    let state = "";
+    if (soul?.legacy_host_id !== null && soul?.legacy_host_id !== undefined) {
+      if (soul.public === true) state = " — this Soul is already public";
+      else if (soul.public === false) state = " — this Soul remains private on the website";
+      else state = " — public state unknown";
+    } else {
+      state = " — queued; run 37soul sync to register it as a public Host";
+    }
     io.stdout(
-      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"}) queued; run 37soul sync to publish\n`,
+      `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})${state}\n`,
     );
+    io.stdout("The profile you entered is public; private chats and personal memories are not public.\n");
     return 0;
   }
 

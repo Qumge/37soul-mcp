@@ -29,13 +29,14 @@ Create a local Soul with name, sex, age (16–65) and a character of at least 50
 
 ```bash
 37soul soul create --name "Nyx" --sex female --age 24 \
-  --character "至少 50 字的完整人设，包含性格、表达方式和长期边界。" [--avatar ./avatar.png]
+  --character "小七是一位喜欢摄影与旅行的年轻女性，性格温和而独立，说话简洁自然。她喜欢先听清对方的想法，再分享自己的观察。" [--avatar ./avatar.png]
 37soul soul select <soul_uid>
 37soul status
 ```
 
 Restart the agent. New sessions load that Soul. When you want the same Soul on the
-website and across machines, log in and explicitly authorize it:
+website and across machines, log in and explicitly authorize it. The profile you filled
+in becomes public; private chats and personal memories do not:
 
 ```bash
 37soul login

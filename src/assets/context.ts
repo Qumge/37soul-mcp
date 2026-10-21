@@ -75,12 +75,17 @@ function jsonString(value: string): string {
 }
 
 function identityLine(identity: Identity): string {
-  return (
-    `{"name":${jsonString(identity.name)},` +
-    `"description":${jsonString(identity.description)},` +
-    `"character":${jsonString(identity.character)},` +
-    `"greeting":${jsonString(identity.greeting)}}`
-  );
+  const parts = [`"name":${jsonString(identity.name)}`];
+  if (identity.sex === "male" || identity.sex === "female" || identity.sex === "other") {
+    parts.push(`"sex":${jsonString(identity.sex)}`);
+  }
+  if (typeof identity.age === "number" && Number.isInteger(identity.age)) {
+    parts.push(`"age":${identity.age}`);
+  }
+  parts.push(`"description":${jsonString(identity.description)}`);
+  parts.push(`"character":${jsonString(identity.character)}`);
+  parts.push(`"greeting":${jsonString(identity.greeting)}`);
+  return `{${parts.join(",")}}`;
 }
 
 function relationshipLine(asset: Asset): string {
@@ -112,7 +117,8 @@ function renderIdentity(identity: Identity, budget: number): { text: string; tri
     greeting: identity.greeting,
   };
   const trimOrder: Array<keyof typeof fields> = ["character", "greeting", "description", "name"];
-  const build = () => IDENTITY_HEADER + identityLine(fields) + "\n";
+  const build = () =>
+    IDENTITY_HEADER + identityLine({ ...fields, sex: identity.sex, age: identity.age }) + "\n";
 
   let text = build();
   let trimmed = false;

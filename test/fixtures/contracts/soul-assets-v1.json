@@ -1372,6 +1372,44 @@
         "rendered_sha256": "901c7bebe93986dfc25ecdebdd024d6604f39918b3d62e026f74c24653b74fc8",
         "rendered_utf8_bytes_max": 16384
       }
+    },
+    {
+      "name": "identity_sex_age_present",
+      "input": {
+        "soul": {
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "legacy_host_id": 42,
+          "identity_revision": 1,
+          "identity": {
+            "name": "Growth",
+            "sex": "female",
+            "age": 29,
+            "description": "长期合作伙伴",
+            "character": "先给证据与假设。",
+            "greeting": ""
+          },
+          "state": "active"
+        },
+        "binding": {
+          "binding_uid": "20000000-0000-4000-8000-000000000001",
+          "session_ref": "30000000-0000-4000-8000-000000000001",
+          "runtime_kind": "hermes",
+          "soul_uid": "10000000-0000-4000-8000-000000000001",
+          "revision": 1,
+          "state": "bound"
+        },
+        "assets": [],
+        "task_hint": "",
+        "budget_bytes": 16384
+      },
+      "expected": {
+        "manifest": [],
+        "rendered_text": "[Soul]\n{\"name\":\"Growth\",\"sex\":\"female\",\"age\":29,\"description\":\"长期合作伙伴\",\"character\":\"先给证据与假设。\",\"greeting\":\"\"}\n",
+        "rendered_utf8_bytes": 137,
+        "rendered_sha256": "232db2186cfd5a388cf25f18328cf16965d85fcfef76061d61c66fbffce7b3b3",
+        "rendered_utf8_bytes_max": 16384,
+        "truncated": false
+      }
     }
   ],
   "privacy_fixture": {

@@ -747,6 +747,15 @@ test("sync: a same-revision avatar event updates the cloud URL but not a pending
   const soul = (await readSnap(root)).souls[IDS.soul];
   assert.equal(soul.avatar_url, "https://cdn.example/old.webp", "pending local image is not overwritten by the cloud default");
   assert.equal(soul.local_avatar_path, "/tmp/chosen.jpg");
+
+  store = await openStore(root, "p1");
+  await applyPullPage(store, {
+    protocol: "soul-assets/v1",
+    events: [{ event_uid: "p1", object_type: "soul", object: { ...cloudSoul, public: false } }],
+    next_cursor: "s3", has_more: false,
+  });
+  await store.close();
+  assert.equal((await readSnap(root)).souls[IDS.soul].public, false, "public state changes even when identity revision is unchanged");
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -1295,6 +1304,58 @@ test("sync: a public registration stops when the server lacks soul_profile_publi
   assert.equal(http.requests.some((request) => request.method === "POST" && pathnameOf(request.url).endsWith("/souls")), false);
   const snap = await readSnap(root);
   assert.ok(snap.outbox["public-reg"], "the public intent stays queued for a newer server");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// 21c ──────────────────────────────────────────────────────────────────────────────
+test("sync: capabilities 401 reuses revocation cleanup instead of claiming server upgrade", async () => {
+  const root = tempDir();
+  await seedProfile(root, "p1", "dev-1", (d) => {
+    baseChange(d);
+    d.assets["synced-1"] = localAsset("synced-1", "cloud cache", "active", "synced", 1, 1);
+    d.assets["local-only"] = localAsset("local-only", "keep me", "active", "local_only", null, 1);
+    d.outbox["public-reg"] = {
+      operation_id: "public-reg",
+      operation_kind: "register_soul",
+      request: {
+        soul_uid: IDS.soul,
+        identity: { name: "Growth", description: "", character: "complete", greeting: "", sex: "female", age: 28 },
+        consent_categories: ["identity"], publish_profile: true,
+      },
+      predecessor_operation_ids: [],
+    };
+  });
+  writeFileSync(
+    path.join(root, "config.json"),
+    `${JSON.stringify({
+      api_base_url: "https://fake.test",
+      machine_id: "m1",
+      tokens: {},
+      credentials: [{
+        token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
+        runtime_kind: "hermes", profile_id: "p1", obtained_at: "x",
+      }],
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const http = fakeHttp((req) => {
+    const p = pathnameOf(req.url);
+    if (req.method === "GET" && p === "/api/v1/me/soul_sync/capabilities") {
+      return { status: 401, body: { error: { code: "device_revoked", message: "revoked" } } };
+    }
+    return { status: 500, body: {} };
+  });
+
+  const report = await syncOnce("p1", http, { root, baseUrl: "https://fake.test", backoff: { sleep: async () => {}, maxRetries: 0 } });
+  assert.equal(report.error, "device_revoked");
+  assert.notEqual(report.error, "server_upgrade_required");
+  const config = JSON.parse(readFileSync(path.join(root, "config.json"), "utf8"));
+  assert.deepEqual(config.credentials, [], "revoked capability preflight must clear scoped credentials");
+  const snap = await readSnap(root);
+  assert.equal(snap.assets["synced-1"], undefined, "downloaded cloud cache must be cleared");
+  assert.ok(snap.assets["local-only"], "local original survives");
+  assert.ok(snap.outbox["public-reg"], "the explicit local intent is preserved");
+  assert.equal(snap.souls[IDS.soul], undefined, "a cloud-only soul is no longer injected");
   rmSync(root, { recursive: true, force: true });
 });
 

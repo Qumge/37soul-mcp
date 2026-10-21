@@ -183,6 +183,12 @@ test("profile: local create requires name/sex/age and a 50-character character",
     const repetitive = makeIo();
     assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "啊".repeat(60)], repetitive.io), 2);
     assert.match(repetitive.out.stderr, /character/);
+    const decimal = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "26.9", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证小数年龄会被拒绝。"] , decimal.io), 2);
+    assert.match(decimal.out.stderr, /age/);
+    const badSex = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "robot", "--age", "24", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证非法性别会被拒绝。"] , badSex.io), 2);
+    assert.match(badSex.out.stderr, /sex/);
 
     const created = makeIo();
     assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], created.io), 0);
@@ -314,6 +320,10 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
       identity: { name: "Avatar", description: "", character: "补齐后的完整人设，包含性格、表达方式和长期边界，用于头像上传路径。", greeting: "", sex: "female", age: 28 },
       state: "active", origin: "local", local_avatar_path: avatar, avatar_uploaded: false,
     };
+    d.consents[`cdu-1:${uid}`] = {
+      cloud_device_uid: "cdu-1", soul_uid: uid, revision: 1,
+      categories: ["identity"], enabled: true,
+    };
   });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
@@ -338,7 +348,8 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
     assert.equal(calls.length, 1);
     assert.equal(calls[0].method, "PUT");
     assert.match(calls[0].url, new RegExp(`/souls/${uid}/avatar$`));
-    assert.equal(calls[0].headers.Authorization, "Bearer token-1");
+    assert.equal(calls[0].headers.authorization, "Bearer token-1");
+    assert.match(calls[0].url, /^https:\/\/fake\.test\//, "uses config.api_base_url, not the CLI default");
     assert.equal(typeof calls[0].body.get, "function", "multipart FormData is sent, not a local path string");
     assert.equal(calls[0].body.get("file").name, "chosen.png");
     const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
@@ -351,8 +362,111 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
     const store2 = await openStore(root, "p1"); const snap2 = await store2.read(); await store2.close();
     assert.equal(snap2.souls[uid].local_avatar_path, avatar, "failed upload keeps the local image");
     assert.equal(snap2.souls[uid].avatar_uploaded, false);
+
+    globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) });
+    const empty = makeIo();
+    assert.equal(await main(["soul", "avatar", uid, "--profile", "p1", "--file", avatar], empty.io), 1);
+    assert.match(empty.out.stderr, /avatar upload failed/);
+    const store3 = await openStore(root, "p1"); const snap3 = await store3.read(); await store3.close();
+    assert.equal(snap3.souls[uid].avatar_uploaded, false, "an empty 200 is not success");
   } finally {
     globalThis.fetch = previousFetch;
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: create --avatar uploads after explicit registration on the sync path", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const avatar = path.join(home, "chosen.png");
+  writeFileSync(avatar, Buffer.from("LOCAL-AVATAR-BYTES"));
+  await seed(root, "p1", "dev-1", (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu-1";
+  });
+  writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
+    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+  })}\n`, { mode: 0o600 });
+  writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
+    api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
+    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+  })}\n`, { mode: 0o600 });
+  const previousHome = process.env.SOUL37_HOME;
+  const previousFetch = globalThis.fetch;
+  process.env.SOUL37_HOME = home;
+  const calls = [];
+  const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: { get: () => null }, json: async () => body });
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
+    calls.push(`${init.method ?? "GET"} ${pathname}`);
+    if (init.method === "GET" && pathname.endsWith("/capabilities")) {
+      return reply(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+    }
+    if (init.method === "POST" && pathname.endsWith("/souls")) {
+      return reply(201, {
+        protocol: "soul-assets/v1",
+        soul: { soul_uid: body.soul_uid, legacy_host_id: 99, identity_revision: 1, identity: body.identity, public: true, avatar_url: "https://cdn.example/default.webp", state: "active" },
+        consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
+      });
+    }
+    if (init.method === "PUT" && pathname.endsWith("/avatar")) {
+      calls.push("AVATAR_BODY:" + (typeof init.body?.get === "function" ? init.body.get("file")?.name : "not-formdata"));
+      return reply(200, { protocol: "soul-assets/v1", avatar_url: "https://cdn.example/chosen.webp" });
+    }
+    if (init.method === "GET" && pathname.endsWith("/pull")) return reply(200, { protocol: "soul-assets/v1", events: [], next_cursor: "0", has_more: false });
+    return reply(500, { error: { code: "unexpected" } });
+  };
+  try {
+    const created = makeIo();
+    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Avatar Sync", "--sex", "female", "--age", "24", "--character", "这是创建时选择头像并写入同步主链的完整人设，包含性格、表达方式、兴趣背景和长期边界，长度超过五十个字符。", "--avatar", avatar], created.io), 0);
+    const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
+    assert.ok(uid);
+    assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
+    const sync = makeIo();
+    assert.equal(await main(["sync", "--profile", "p1"], sync.io), 0, sync.out.stderr);
+    const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
+    assert.equal(snap.souls[uid].avatar_uploaded, true);
+    assert.equal(snap.souls[uid].avatar_url, "https://cdn.example/chosen.webp");
+    assert.ok(calls.some((call) => call.startsWith("PUT /api/v1/me/soul_sync/souls/") && call.endsWith("/avatar")), "sync must upload the chosen image after registration");
+    assert.ok(calls.includes("AVATAR_BODY:chosen.png"), "the multipart body carries the image bytes, not the local path");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profile: registered does not imply public when the cloud says private", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  const uid = "10000000-0000-4000-8000-0000000000ad";
+  await seed(root, "p1", "dev-1", (d) => {
+    d.souls[uid] = {
+      soul_uid: uid, legacy_host_id: 88, identity_revision: 2, public: false,
+      identity: { name: "Private registered", description: "", character: "完整人设，包含性格、表达方式、兴趣背景和长期边界，长度超过五十个字符。", greeting: "", sex: "female", age: 30 },
+      state: "active",
+    };
+  });
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const listed = makeIo();
+    assert.equal(await main(["soul", "list", "--profile", "p1"], listed.io), 0);
+    assert.match(listed.out.stdout, /registered private/);
+    assert.doesNotMatch(listed.out.stdout, /public: https/);
+
+    const unknownUid = "10000000-0000-4000-8000-0000000000ae";
+    const store = await openStore(root, "p1"); await store.transact((d) => {
+      d.souls[unknownUid] = { ...d.souls[uid], soul_uid: unknownUid, public: undefined };
+    }); await store.close();
+    const unknown = makeIo();
+    assert.equal(await main(["soul", "list", "--profile", "p1"], unknown.io), 0);
+    assert.match(unknown.out.stdout, /public state unknown/);
+  } finally {
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
     else process.env.SOUL37_HOME = previousHome;
     rmSync(home, { recursive: true, force: true });
