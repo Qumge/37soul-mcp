@@ -746,3 +746,42 @@ test('hook command: anonymous local edit is what the next SessionStart injects',
   assert.doesNotMatch(wrapped, /ORIGINAL_LOCAL_CANARY/, 'the old local identity is gone');
   cleanup();
 });
+
+// Pi（2026-10-30）：桥扩展只认 SessionStart 通道，载荷形状与其它宿主一致。
+test('hook command: Pi 的 SessionStart 写 spool 并回 additionalContext', async () => {
+  const { home, cleanup } = tempHome();
+  // Pi 的 token 必须在 config.tokens 里，brief 才会被请求（与其它宿主同一条路径）。
+  await seedConfig(home, { tokens: { pi: 'PI-TOKEN' } });
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'pi', event: 'SessionStart',
+    fetch: async () => ({ ok: true, status: 200, async json() { return { text: '=== soul ===' }; } }),
+    stdin: JSON.stringify({ session_id: 'pi-1', cwd: '/tmp/demo', source: 'startup' }),
+    stdout: io.stdout, stderr: io.stderr,
+    getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
+  });
+
+  const [line] = readFileSync(spoolFile(dataRoot(home), 'pi', 'pi-1'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(line.kind, 'session_start');
+  assert.equal(JSON.parse(io.out[0]).hookSpecificOutput.additionalContext, '=== soul ===');
+  cleanup();
+});
+
+test('hook command: Pi 的 Stop 载荷带 last_assistant_message 就记成 assistant 消息', async () => {
+  const { home, cleanup } = tempHome();
+  await seedConfig(home);
+  const io = capture();
+
+  await runHookCommand({
+    home, agentKind: 'pi', event: 'Stop',
+    stdin: JSON.stringify({ session_id: 'pi-2', cwd: '/tmp/demo', last_assistant_message: '搞定了。' }),
+    stdout: io.stdout, stderr: io.stderr,
+  });
+
+  const [line] = readFileSync(spoolFile(dataRoot(home), 'pi', 'pi-2'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(line.kind, 'message');
+  assert.equal(line.role, 'assistant');
+  assert.equal(line.text, '搞定了。');
+  cleanup();
+});

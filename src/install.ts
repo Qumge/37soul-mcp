@@ -25,6 +25,7 @@ import { CLAUDE_CODE_HOOK_EVENTS } from "./adapters/claude-code.js";
 import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS } from "./adapters/codex.js";
 import { inspectOpenCodePlugin, openCodePluginPath, removeOpenCodePlugin, writeOpenCodePlugin } from "./adapters/opencode.js";
 import { detectHermesSurface, hermesPluginPath, removeHermesPlugin, writeHermesPlugin } from "./adapters/hermes.js";
+import { inspectPiExtension, piExtensionPath, removePiExtension, writePiExtension } from "./adapters/pi.js";
 
 export const INSTRUCTIONS_FRAGMENT = `## 37Soul
 At the start of a session you may receive additional Soul context from the local 37Soul
@@ -89,7 +90,7 @@ export interface OpenCodeInstallReport {
   /** The plugin bridge is unverified, so injection is never claimed. */
   injection_capable: boolean;
   /** The plugin generation the installed file declares. */
-  generation: "v1" | "v2" | "unsupported";
+  generation: "v1" | "v2" | "pi-extension-v1" | "unsupported";
 }
 
 export interface HermesInstallReport {
@@ -127,13 +128,26 @@ export interface InstallPlan {
   agents: string[];
   files: string[];
   serviceFile: string | null;
+  /** Detected hosts we cannot capture yet — callers must print these. */
+  unsupported: string[];
 }
 
 export function installManifestPath(home: string): string {
   return path.join(dataRoot(home), "install-manifest.json");
 }
 
-const SUPPORTED_AGENTS = ["claude-code", "codex", "opencode", "hermes"];
+const SUPPORTED_AGENTS = ["claude-code", "codex", "opencode", "hermes", "pi"];
+
+/**
+ * 被检测到、但我们还没有采集能力的宿主。
+ *
+ * 2026-10-30 之前这些宿主是**静默丢弃**的：`detectAgents` 认得 `~/.gemini`，
+ * `planInstall` 却直接 filter 掉，不给任何提示 —— 装了 Gemini CLI 的人跑完
+ * `37soul install` 会以为成功了。明确列出来并打印，比假装支持诚实。
+ */
+const KNOWN_UNSUPPORTED: Record<string, string> = {
+  "gemini-cli": "detected, capture not implemented yet (tracked; MCP-only for now)",
+};
 
 /** v2 §6.1：`install --plan` 只打印要动哪些文件、装哪些 hook，不写入任何东西。 */
 export async function planInstall(deps: InstallDeps, opts: { agents?: string[] } = {}): Promise<InstallPlan> {
@@ -152,6 +166,9 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
   if (agents.includes("hermes")) {
     files.push(hermesPluginPath(deps.home));
   }
+  if (agents.includes("pi")) {
+    files.push(piExtensionPath(deps.home));
+  }
   files.push(configPath(dataRoot(deps.home)), installManifestPath(deps.home));
 
   const runtimeMeta = await resolveRuntimeMeta(deps);
@@ -160,7 +177,14 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
 
   const platform = deps.platform ?? process.platform;
   const serviceFile = platform === "darwin" ? plistPath(deps.home) : platform === "linux" ? systemdPath(deps.home) : null;
-  return { detected, agents, files, serviceFile };
+  return {
+    detected,
+    agents,
+    files,
+    serviceFile,
+    // 检测到但采集未实现：调用方必须打印出来，别让用户以为装上了。
+    unsupported: detected.filter((kind) => !SUPPORTED_AGENTS.includes(kind)),
+  };
 }
 
 async function resolveRuntimeMeta(deps: InstallDeps): Promise<{ sourceRoot: string; version: string }> {
@@ -664,6 +688,36 @@ async function configureOpenCode(
   };
 }
 
+/**
+ * Pi 走扩展桥（与 OpenCode 同一形态）：只写 ONE 受管静态扩展文件。
+ *
+ * Pi 没有 shell hook 面，但有文档化的扩展 API（session_start / before_agent_start /
+ * tool_execution_end / agent_settled），桥文件把这些生命周期转成
+ * `hook --agent pi --event <event>`。注入在 before_agent_start 追进 systemPrompt。
+ *
+ * 与 OpenCode 一样：我们自己写的文件永远不能把 trusted 变绿；结构化抽取尚未
+ * 验证，所以 extraction_capable 保持 false。
+ */
+async function configurePi(
+  deps: InstallDeps,
+): Promise<{ hook: boolean; instructions: boolean; mcp: boolean; report?: OpenCodeInstallReport }> {
+  const written = writePiExtension(deps.home);
+  const inspection = inspectPiExtension(deps.home);
+  return {
+    hook: false, // 没有全局 hook：事件由扩展桥转给本地 hook 命令
+    instructions: false, // 扩展文件是唯一受管产物
+    mcp: false,
+    report: {
+      installed: written.installed,
+      trusted: false, // Pi 没有可读的“已加载”标记，我们不猜
+      events_seen: false,
+      extraction_capable: false,
+      injection_capable: false,
+      generation: written.generation,
+    },
+  };
+}
+
 async function configureHermes(
   deps: InstallDeps,
   _token: string,
@@ -792,7 +846,9 @@ export async function install(
           ? await configureCodex(runtimeDeps, token)
           : agentKind === "opencode"
             ? await configureOpenCode(runtimeDeps, token)
-            : await configureHermes(runtimeDeps, token);
+            : agentKind === "pi"
+              ? await configurePi(runtimeDeps)
+              : await configureHermes(runtimeDeps, token);
     config.mcp = { ...(config.mcp ?? {}), [agentKind]: configured.mcp };
     results.push({
       agentKind,
@@ -865,6 +921,10 @@ export async function install(
     const bridge = writeHermesPlugin(deps.home);
     entries.push({ agent: "hermes", file: bridge.path, kind: "hermes_plugin", sha256: bridge.sha256 });
   }
+  if (selected.includes("pi")) {
+    const extension = writePiExtension(deps.home);
+    entries.push({ agent: "pi", file: extension.path, kind: "pi_extension", generation: extension.generation, sha256: extension.sha256 });
+  }
   entries.push({ file: configPath(root), kind: "config" });
   if (serviceFile) entries.push({ file: serviceFile, kind: "service" });
   await writeJsonFile(
@@ -888,6 +948,21 @@ async function openCodePluginManifestSha256(home: string): Promise<string | unde
     };
     for (const entry of parsed.entries ?? []) {
       if (entry.kind === "opencode_plugin" && typeof entry.sha256 === "string") return entry.sha256;
+    }
+  } catch {
+    // no manifest / unreadable: the file is treated as unverifiable (backed up)
+  }
+  return undefined;
+}
+
+/** The install manifest's recorded SHA-256 for the managed Pi extension, if any. */
+async function piExtensionManifestSha256(home: string): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(installManifestPath(home), "utf8")) as {
+      entries?: Array<{ kind?: string; sha256?: unknown }>;
+    };
+    for (const entry of parsed.entries ?? []) {
+      if (entry.kind === "pi_extension" && typeof entry.sha256 === "string") return entry.sha256;
     }
   } catch {
     // no manifest / unreadable: the file is treated as unverifiable (backed up)
@@ -965,6 +1040,14 @@ export async function uninstall(deps: InstallDeps): Promise<string[]> {
   if (hermesRemoval.removed) removed.push(path.relative(deps.home, hermesPluginPath(deps.home)));
   if (hermesRemoval.preserved) {
     deps.log?.(`  kept ${hermesPluginPath(deps.home)} (unreadable) — remove it by hand if it is 37soul's`);
+  }
+
+  // 2e. Pi 扩展桥（ONE 受管静态文件；只删声明了我们 generation 的那一个）。
+  const piSha = await piExtensionManifestSha256(deps.home);
+  const piRemoval = removePiExtension(deps.home, { expectedSha256: piSha });
+  if (piRemoval.removed) removed.push(path.relative(deps.home, piExtensionPath(deps.home)));
+  if (piRemoval.preserved) {
+    deps.log?.(`  kept ${piExtensionPath(deps.home)} (unreadable or not ours) — remove it by hand if it is 37soul's`);
   }
 
   // 3. MCP 条目（best effort）。

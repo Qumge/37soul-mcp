@@ -197,6 +197,9 @@ const INJECTION_CHANNEL: Record<string, "SessionStart" | "UserPromptSubmit" | "n
   codex: "SessionStart",
   opencode: "SessionStart",
   hermes: "SessionStart",
+  // Pi 的桥扩展把 SessionStart 的 additionalContext 存进内存，在 before_agent_start
+  // 追进 systemPrompt；通道仍是 SessionStart，与其它桥接运行时一致。
+  pi: "SessionStart",
 };
 
 export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
@@ -320,7 +323,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
 }
 
 /** hook 事件 → RuntimeEvent 种类（assets 模式才发送）。非四类运行时直接不发。 */
-const RUNTIME_KINDS = new Set<string>(["claude-code", "codex", "opencode", "hermes"]);
+const RUNTIME_KINDS = new Set<string>(["claude-code", "codex", "opencode", "hermes", "pi"]);
 const RUNTIME_EVENT_KINDS: Record<string, RuntimeEventKind> = {
   SessionStart: "resume",
   Stop: "turn_completed",

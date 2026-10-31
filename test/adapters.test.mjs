@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -37,6 +37,8 @@ import {
   renderOpenCodeTurn,
   buildOpenCodeExtractionInvocation,
 } from "../dist/adapters/opencode.js";
+import { createPiAdapter, inspectPiExtension, piExtensionPath, removePiExtension, writePiExtension } from "../dist/adapters/pi.js";
+import { PI_EXTENSION_SOURCE } from "../dist/adapters/plugins/pi.js";
 import { openStore } from "../dist/local/store.js";
 import { sendWriter, startWriter } from "../dist/local/writer.js";
 import { resolveBinding } from "../dist/local/bindings.js";
@@ -1279,4 +1281,120 @@ test("every adapter: zero-ref source is source_unavailable and never reaches the
 
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── Pi（2026-10-30）──────────────────────────────────────────────
+test("pi: extension is one managed file, generation-readable, removable", () => {
+  const root = tempDir("pi-ext-");
+
+  // Nothing installed yet: an explicit state, never a guess.
+  assert.deepEqual(inspectPiExtension(root), { status: "not_installed", path: piExtensionPath(root), generation: null });
+
+  const written = writePiExtension(root);
+  assert.equal(written.generation, "pi-extension-v1");
+  assert.equal(readFileSync(piExtensionPath(root), "utf8"), PI_EXTENSION_SOURCE);
+  assert.deepEqual(inspectPiExtension(root), {
+    status: "installed_unloaded",
+    path: piExtensionPath(root),
+    generation: "pi-extension-v1",
+  });
+
+  // Hash-aware removal: a file we did not write is preserved, ours is removed.
+  writeFileSync(piExtensionPath(root), `${PI_EXTENSION_SOURCE}\n// touched by a human\n`, { mode: 0o600 });
+  const touched = removePiExtension(root, { expectedSha256: written.sha256 });
+  assert.equal(touched.removed, true);
+  assert.equal(touched.backed_up, true, "a modified managed file is backed up, never destroyed");
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("pi: a foreign extension at our path is never deleted and is backed up on write", () => {
+  const root = tempDir("pi-foreign-");
+  const file = piExtensionPath(root);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, "export default function (pi) { pi.registerCommand('x', {}); }\n", { mode: 0o600 });
+
+  const written = writePiExtension(root);
+  assert.equal(written.backedUp, true, "the foreign file is backed up before we replace it");
+  assert.equal(readFileSync(file, "utf8"), PI_EXTENSION_SOURCE);
+  const backups = readdirSync(path.dirname(file)).filter((n) => n.includes(".37soul-") && n.endsWith(".bak"));
+  assert.equal(backups.length, 1);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("pi: the bridge spawns only the local hook command, makes no network call, and is bounded", () => {
+  const source = PI_EXTENSION_SOURCE;
+
+  assert.equal((source.match(/spawn\s*\(/g) ?? []).length, 1, "exactly one spawn in the bridge");
+  assert.equal(
+    (source.match(/spawn\s*\(\s*launcher\(\)\s*,\s*\[\s*"hook"\s*,\s*"--agent"\s*,\s*"pi"\s*,\s*"--event"\s*,\s*event\s*\]/g) ?? []).length,
+    1,
+    "the single spawn is exactly the hook command",
+  );
+  assert.ok(!/\b(fetch|http|https|net|tls|http2|dns|dgram|ws|undici|socket)\b/.test(source), "no network call");
+  assert.ok(source.includes("BRIDGE_TIMEOUT_MS"), "a short timeout bounds the wait");
+  assert.ok(source.includes('api_generation = "pi-extension-v1"'), "generation is declared literally");
+});
+
+test("pi: probe reports unverified honestly and extract refuses instead of guessing", async () => {
+  const root = tempDir("pi-probe-");
+  const adapter = createPiAdapter({ home: root, invoke: async () => ({ code: 1, stdout: "", stderr: "" }), readSource: async () => "", emit: async () => {} });
+
+  const probe = await adapter.probe();
+  assert.equal(probe.runtime_kind, "pi");
+  assert.equal(probe.structured_extraction, false, "no verified native invocation yet");
+  assert.equal(probe.before_request, false, "injection is bridged but not independently verified");
+  assert.equal(probe.version, "0.0.0-unverified", "no version is invented when nothing is observed");
+
+  // Empty source: the same honest, retryable short-circuit every adapter has.
+  const empty = await adapter.extract({ runtime_kind: "pi", source_event_refs: ["ref-1"] });
+  assert.deepEqual(empty, { error: { code: "source_unavailable", retryable: true } });
+
+  // Source present but no verified native invocation: explicit refusal, no guessing.
+  const withSource = createPiAdapter({
+    home: root,
+    invoke: async () => ({ code: 0, stdout: "{}", stderr: "" }),
+    readSource: async () => "a bounded turn",
+    emit: async () => {},
+  });
+  const refused = await withSource.extract({ runtime_kind: "pi", source_event_refs: ["ref-1"] });
+  assert.deepEqual(refused, { error: { code: "unsupported", retryable: false } });
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ⛔ 真机回归（2026-10-30）：生成的扩展曾经在 `base + "\n\n"` 处把换行展开成真实换行，
+// 生产出来的文件是跨行字符串，Pi 一加载就 ParseError（Unterminated string）。
+// 单测只检查「有 spawn / 无网络」是抓不到的 —— 必须真的把这份源码当模块载入。
+test("pi: the generated extension actually parses and registers handlers", async () => {
+  const root = tempDir("pi-parse-");
+  const file = path.join(root, "37soul-soul.mjs");
+  writeFileSync(file, PI_EXTENSION_SOURCE, { mode: 0o600 });
+
+  const mod = await import(pathToFileURL(file).href);
+  assert.equal(mod.api_generation, "pi-extension-v1");
+
+  const handlers = new Map();
+  const fakePi = {
+    on: (event, handler) => {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      return () => {};
+    },
+    registerCommand: () => {},
+  };
+  mod.default(fakePi);
+
+  for (const event of ["session_start", "before_agent_start", "tool_execution_end", "agent_settled", "session_shutdown"]) {
+    assert.equal(handlers.get(event)?.length, 1, `${event} 必须注册且只注册一次`);
+  }
+
+  // 没有注入上下文时，before_agent_start 不篡改 systemPrompt。
+  const out = await handlers.get("before_agent_start")[0]({ messageType: "user", prompt: "hi", systemPrompt: "BASE" }, {
+    cwd: root,
+    sessionManager: { getSessionId: () => "sess-1", getEntries: () => [] },
+  });
+  assert.equal(out, undefined);
+
+  rmSync(root, { recursive: true, force: true });
 });

@@ -1,6 +1,6 @@
 # 37Soul
 
-One persistent Soul across **Claude Code, Codex, OpenCode and Hermes** on your machine,
+One persistent Soul across **Claude Code, Codex, OpenCode, Hermes and Pi** on your machine,
 and on 37Soul.com. Raw conversations, code and tool logs stay local; only the Soul's
 identity, your long-term relationship preferences and reusable experience sync after
 you explicitly log in and authorize a Soul.
@@ -112,6 +112,7 @@ authorized Soul.
 | Codex | 0.163.0 | official `hooks.json`; trust is Codex-owned `/hooks`; one-off bypass observed |
 | OpenCode | 2.0.32 | v2 plugin loads; live extraction/trace observed; full injection pending |
 | Hermes | 0.21.0 CLI | official shell hooks load; live extraction/trace observed; full injection pending |
+| Pi | 1.4.0 | managed extension loads and all four bridged events fire (session_start / prompt / settled / shutdown observed 2026-10-30); structured extraction **unverified** |
 
 A gateway-only Hermes configuration is not CLI support and is reported as such.
 `37soul install --plan` lists files without writing. The installer backs up every user

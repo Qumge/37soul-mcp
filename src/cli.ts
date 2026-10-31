@@ -59,7 +59,7 @@ export function agentdExtractAdapters(
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
-  37soul install [--agents claude-code,codex,opencode,hermes] [--plan] [--fallback codex]
+  37soul install [--agents claude-code,codex,opencode,hermes,pi] [--plan] [--fallback codex]
                                                 connect the agents on this machine
   37soul doctor                                  check configuration and credentials
   37soul status                                  show machine, credentials and Soul sync state
@@ -117,12 +117,22 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       if (rest.includes("--plan")) {
         const plan = await planInstall(deps, { agents });
         io.stdout(`would connect: ${plan.agents.join(", ") || "(none detected)"}\n`);
+        if (plan.unsupported.length > 0) {
+          io.stdout(`detected but not capturable yet: ${plan.unsupported.join(", ")}\n`);
+        }
         io.stdout(`would touch:\n${plan.files.map((file) => `  ${file}`).join("\n")}\n`);
         if (plan.serviceFile) io.stdout(`would install the background service: ${plan.serviceFile}\n`);
         return 0;
       }
       const result = await install(deps, { agents, fallback });
       io.stdout(`\nConnected: ${result.installed.map((entry) => entry.agentKind).join(", ")}\n`);
+      const skipped = result.skipped.filter((kind) => kind !== "other");
+      if (skipped.length > 0) {
+        io.stdout(
+          `Detected but not capturable yet: ${skipped.join(", ")} — nothing was written for these. ` +
+            "Your Soul still works in them through the remote MCP endpoint (\`37soul login\`).\n",
+        );
+      }
       const doctor = await runDoctor(deps);
       for (const check of doctor.checks) {
         io.stdout(`${check.ok ? "✓" : "✗"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}\n`);
