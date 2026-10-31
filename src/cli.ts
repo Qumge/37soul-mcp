@@ -29,6 +29,7 @@ import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
+import { formatRecallHit, parseTerms, recallAssets } from "./assets/recall.js";
 import "./local/bindings.js"; // side effect: register create_soul / edit_local_identity / bind / detach / export
 import "./extraction/scheduler.js"; // side effect: register runtime_event / commit_extraction writer commands
 import "./sync/client.js"; // side effect: register sync_once / record_receipt / review_asset / delete_asset
@@ -198,6 +199,8 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       return startAgentd(io, home);
     case "soul":
       return soulCommand(root, rest, io, deps);
+    case "recall":
+      return recallCommand(root, rest, io);
     case "bind":
       return bindCommand(root, rest, io, false);
     case "detach":
@@ -392,6 +395,53 @@ async function readProfileDeviceId(root: string, profileId: ProfileId): Promise<
   } finally {
     await store.close();
   }
+}
+
+/**
+ * `37soul recall "<terms>"` — 检索她记得的关于你的事。
+ *
+ * 纯本地、零模型调用：读本地 snapshot，按关键词/类型/适用条件匹配 active 与
+ * candidate 资产（历史墓碑需要显式 --history）。这是 claude-mem 那类工具最常被
+ * 用到的动作（"我上次说过什么"），但我们的答案带状态与来源，而不是一堆片段。
+ */
+async function recallCommand(root: string, rest: string[], io: CliIO): Promise<number> {
+  const profileId = profileIdFromArgs(rest);
+  const terms = parseTerms(rest.filter((arg) => !arg.startsWith("--") && arg !== profileId).join(" "));
+  const includeHistory = rest.includes("--history");
+  const kindFlag = flagValue(rest, "--kind");
+  const limitFlag = flagValue(rest, "--limit");
+  const kind = kindFlag === "relationship" || kindFlag === "experience" ? kindFlag : undefined;
+  const limit = limitFlag ? Number(limitFlag) : undefined;
+  if (kindFlag && !kind) {
+    io.stderr('--kind must be "relationship" or "experience"\n');
+    return 2;
+  }
+
+  const store = await openStore(root, profileId, {});
+  let assets: Array<{ asset_uid: string; kind: string; trait: string; content: string; applicability: string; tags: string[]; evidence: string; verification: string; sensitivity: string; state: string; revision: number; supersedes_uid: string | null; pinned: boolean; source: any; soul_uid: string }> = [];
+  try {
+    const snap = await store.read();
+    assets = Object.values(snap.assets).map((asset) => asset as unknown as (typeof assets)[number]);
+  } finally {
+    await store.close();
+  }
+
+  const hits = recallAssets(assets as never, {
+    terms,
+    ...(kind ? { kind } : {}),
+    ...(includeHistory ? { includeHistory } : {}),
+    ...(limit ? { limit } : {}),
+  });
+
+  if (hits.length === 0) {
+    io.stdout(terms.length > 0
+      ? `nothing matches ${terms.join(" ").replace(/\n/g, " ")}\n`
+      : "she has not recorded anything yet\n");
+    return 0;
+  }
+  for (const hit of hits) io.stdout(`${formatRecallHit(hit)}\n`);
+  if (!includeHistory) io.stdout(`(${hits.length} hit(s); add --history to include replaced/deleted versions)\n`);
+  return 0;
 }
 
 async function soulCommand(root: string, rest: string[], io: CliIO, deps: InstallDeps): Promise<number> {
