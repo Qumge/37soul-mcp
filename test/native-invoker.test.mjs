@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 
 import { createNativeInvoker, createExtractAdapters } from "../dist/agentd/native-invoker.js";
 
-const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes"];
+const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"];
 
 /** A fake spawn that records every call and synchronously invokes its callback. */
 function recordingSpawn(responder = () => ({ stdout: "[]", stderr: "" })) {
@@ -78,7 +78,7 @@ test("native-invoker: a spawn without a stdin pipe is killed, never left running
 
 test("extract-adapters: all four runtimes are wired, and extract short-circuits honestly on an empty source", async () => {
   const adapters = createExtractAdapters("/tmp/37soul-adapters");
-  assert.deepEqual(Object.keys(adapters).sort(), [...ALL_KINDS].sort(), "exactly the four runtime adapters, no more");
+  assert.deepEqual(Object.keys(adapters).sort(), [...ALL_KINDS].sort(), "exactly the runtime adapters, no more");
 
   for (const kind of ALL_KINDS) {
     const adapter = adapters[kind];

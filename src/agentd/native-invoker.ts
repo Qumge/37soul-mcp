@@ -24,6 +24,7 @@ import { createClaudeCodeAdapter } from "../adapters/claude-code.js";
 import { createCodexAdapter } from "../adapters/codex.js";
 import { createOpenCodeAdapter } from "../adapters/opencode.js";
 import { createHermesAdapter } from "../adapters/hermes.js";
+import { createPiAdapter } from "../adapters/pi.js";
 import { readSourceRefs } from "./source-index.js";
 
 /** Runtime kind -> native CLI binary name. The adapters invoke by runtime kind; this
@@ -33,6 +34,9 @@ const RUNTIME_BINARIES: Record<RuntimeKind, string> = {
   codex: "codex",
   opencode: "opencode",
   hermes: "hermes",
+  // Pi 的二进制就在它自己的 install/bin 下，PATH 里不一定有；抽取尚未验证，
+  // 这个条目只是为了类型完整与将来启用时不必再改表。
+  pi: "pi",
 };
 
 export interface NativeInvokerLog {
@@ -106,5 +110,6 @@ export function createExtractAdapters(home: string, log?: NativeInvokerLog, root
     codex: createCodexAdapter(deps),
     opencode: createOpenCodeAdapter(deps),
     hermes: createHermesAdapter(deps),
+    pi: createPiAdapter(deps),
   };
 }

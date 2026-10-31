@@ -5,7 +5,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +28,7 @@ import { loadConfig, saveConfig } from "../dist/agentd/state.js";
 import { openStore } from "../dist/local/store.js";
 import { runDoctor } from "../dist/doctor.js";
 import { codexHookConfigPath } from "../dist/adapters/codex.js";
+import { PI_EXTENSION_SOURCE, piExtensionPath } from "../dist/adapters/pi.js";
 import {
   OPENCODE_PLUGIN_FILENAME,
   OPENCODE_PLUGIN_SOURCE,
@@ -1040,5 +1041,53 @@ test("install: repeat install preserves scoped credentials, profile, Soul UUID a
   assert.equal(snap.souls[soulUid].legacy_host_id, 42);
   assert.equal(snap.souls[soulUid].identity.character, "evidence first");
   assert.equal(snap.assets[assetUid].content, "keep me");
+  h.cleanup();
+});
+
+// ── Pi（2026-10-30）──────────────────────────────────────────────
+// 之前 Pi 在 AGENT_HOMES 里（能检测）却不在 SUPPORTED_AGENTS 里（会被 filter 掉），
+// 装了 Pi 的人跑 install 什么都不发生还看不到任何提示。这组用例把两件事钉住：
+// ① Pi 真的被写入并记进 manifest；② 检测到但装不了的宿主必须出现在 unsupported 里。
+test("install: 检测到 Pi 时写扩展桥并记进 manifest", async () => {
+  const h = harness();
+  mkdirSync(path.join(h.home, ".pi", "agent"), { recursive: true });
+
+  assert.ok((await detectAgents(h.home)).includes("pi"), "Pi 必须出现在检测结果里");
+
+  await install(h.deps, { agents: ["pi"] });
+
+  const manifest = JSON.parse(readFileSync(installManifestPath(h.home), "utf8"));
+  const entry = manifest.entries.find((e) => e.kind === "pi_extension");
+  assert.ok(entry, "Pi 扩展必须记进 manifest");
+  assert.equal(entry.agent, "pi");
+  assert.equal(entry.generation, "pi-extension-v1");
+  assert.equal(readFileSync(entry.file, "utf8"), PI_EXTENSION_SOURCE);
+  h.cleanup();
+});
+
+test("install: plan 把检测到但装不了的宿主列进 unsupported（不再静默丢弃）", async () => {
+  const h = harness();
+  mkdirSync(path.join(h.home, ".pi", "agent"), { recursive: true });
+  mkdirSync(path.join(h.home, ".gemini"), { recursive: true });
+
+  const plan = await planInstall(h.deps, {});
+
+  assert.ok(plan.agents.includes("pi"), "Pi 现在是可安装目标");
+  assert.ok(plan.unsupported.includes("gemini-cli"), "Gemini 检测到了但采集未实现，必须报出来");
+  assert.ok(!plan.agents.includes("gemini-cli"), "未实现的宿主不能被当成已连接");
+  h.cleanup();
+});
+
+test("uninstall: 只删我们写的那份 Pi 扩展，别的 vendor 文件不动", async () => {
+  const h = harness();
+  const dir = path.join(h.home, ".pi", "agent", "extensions");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "someone-else.ts"), "export default () => {};\n", { mode: 0o600 });
+
+  await install(h.deps, { agents: ["pi"] });
+  await uninstall(h.deps);
+
+  assert.equal(existsSync(piExtensionPath(h.home)), false, "受管扩展被删除");
+  assert.equal(readFileSync(path.join(dir, "someone-else.ts"), "utf8"), "export default () => {};\n");
   h.cleanup();
 });

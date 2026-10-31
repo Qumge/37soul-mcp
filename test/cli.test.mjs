@@ -149,15 +149,15 @@ test("cli: soul review/delete happy path with a TTY", async () => {
   delete process.env.SOUL37_HOME;
 });
 
-test("cli: agentdExtractAdapters gates the four runtime adapters on assets mode", () => {
+test("cli: agentdExtractAdapters gates the runtime adapters on assets mode", () => {
   const logger = { info: () => {}, error: () => {} };
   const root = "/tmp/37soul-adapters-root";
 
-  // Assets mode passes the four real adapters (whose readSource resolves event refs
+  // Assets mode passes the real adapters (whose readSource resolves event refs
   // through the local path-pointer index); legacy mode passes nothing.
   const assets = agentdExtractAdapters("/home/x", true, logger, root);
   assert.ok(assets, "assets mode returns adapters, not undefined");
-  assert.deepEqual(Object.keys(assets).sort(), ["claude-code", "codex", "hermes", "opencode"]);
+  assert.deepEqual(Object.keys(assets).sort(), ["claude-code", "codex", "hermes", "opencode", "pi"]);
 
   const legacy = agentdExtractAdapters("/home/x", false, logger, root);
   assert.equal(legacy, undefined, "legacy mode keeps its transcript-upload path and gets no extraction adapters");
