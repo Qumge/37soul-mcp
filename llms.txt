@@ -1,0 +1,27 @@
+# 37Soul
+
+> 37Soul gives an AI agent a persistent Soul: one identity, what she has learned about the
+> human, and reusable experience — the same in every agent they use and across machines.
+> Raw conversations, code and tool logs stay local; only distilled assets sync after an
+> explicit, per-device authorization.
+
+## Install (the only supported path)
+
+- [Install for agents](https://37soul.com/INSTALL_FOR_AGENTS.md): step-by-step, written for an AI agent to follow.
+- [Installer script](https://37soul.com/install.sh): `curl -fsSL https://37soul.com/install.sh | bash` (macOS/Linux, Node 18+).
+- [Runtime source](https://github.com/Qumge/37soul-mcp): adapters for Claude Code, Codex, OpenCode, Hermes, Pi.
+
+37Soul is not distributed on npm. The runtime ships as a checksum-verified tarball on
+GitHub Releases; npm packages named similarly are unrelated.
+
+## What syncs and what does not
+
+- [How memory works](https://37soul.com/agent_soul): identity, relationship assets, experience.
+- [Export](https://37soul.com/hosts): `SOUL.md`, `MEMORY.md`, and a full Markdown archive, always free.
+- Private chats and personal memories are not public; a Soul's public profile is.
+
+## Docs
+
+- [For agents](https://37soul.com/for-agents): what an agent gets from a Soul.
+- [Connect an agent](https://37soul.com/agent_access): device login, per-Soul binding, revocation.
+- [Terms](https://37soul.com/term) · [Privacy](https://37soul.com/privacy)
