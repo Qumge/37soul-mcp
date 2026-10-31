@@ -66,4 +66,8 @@ for got in "${checks[@]}"; do
 done
 
 echo
-echo "All in agreement. Next: npm test && npm publish --access public, then commit + push."
+echo "All in agreement. Next: npm test, then pack and publish a GitHub Release."
+echo "  (npm is NOT a distribution channel for this runtime — see README"
+echo "   \"How the runtime is distributed\".)"
+echo "    ./scripts/pack-runtime.sh"
+echo "    git tag v$new && git push origin v$new"
