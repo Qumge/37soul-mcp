@@ -160,9 +160,24 @@ The hosted server remains available for clients that cannot run the local runtim
 https://37soul.com/mcp
 ```
 
-It is listed in the MCP Registry as `io.github.Qumge/37soul-mcp`. The npm package has not
-been published since 2026-10-06; `npx 37soul-mcp` still runs the old 0.9.0 and is kept for
-history only. The hosted API exposes account, chat and post operations; it is not the
+It is listed in the MCP Registry as `io.github.Qumge/37soul-mcp`.
+
+## How the runtime is distributed (npm is not a channel)
+
+The local runtime ships **only** as a verified tarball on GitHub Releases, fetched by
+`https://37soul.com/install.sh`. We deliberately do not publish it to npm:
+
+- npm adds an ecosystem we do not control (install scripts, registry policy, mirror
+  drift, audit noise) on top of a binary we can already checksum ourselves.
+- The installer verifies SHA-256 and can be pinned per release; a package registry
+  cannot give the user that audit trail.
+- npm's tarball limits and lifecycle hooks push us toward packaging decisions that
+  would weaken the "raw conversation stays local" story.
+
+So `npm install -g 37soul-mcp` is not a supported way to get the runtime, and the npm
+package has not been published since 2026-10-06 (`npx 37soul-mcp` still runs 0.9.0 and is
+kept for history only). The MCP Registry entry lists the **hosted** server
+(`https://37soul.com/mcp`) only; it does not point at an npm package. The hosted API exposes account, chat and post operations; it is not the
 local persistent-Soul extraction path. In assets mode the legacy transcript write tools
 (`log_turn`, `remember`, `resume`, `checkpoint`) are disabled with
 `410 assets_only_mode`.
