@@ -1091,3 +1091,19 @@ test("uninstall: 只删我们写的那份 Pi 扩展，别的 vendor 文件不动
   assert.equal(readFileSync(path.join(dir, "someone-else.ts"), "utf8"), "export default () => {};\n");
   h.cleanup();
 });
+
+// 2026-10-31 走查：设备卡片上的版本显示 0.0.0 —— 发布包的 package.json 只有
+// {"type":"module"}，version 在打包时丢了。客户端版本要能在这种情况下回落到
+// 运行时目录名（安装器按版本建目录）与 install manifest。
+test("version: 发布包丢 version 时回落到运行时目录名", async () => {
+  const h = harness();
+  const runtimeDir = path.join(h.home, ".37soul", "runtime", "0.12.2");
+  mkdirSync(path.join(runtimeDir, "dist"), { recursive: true });
+  writeFileSync(path.join(runtimeDir, "package.json"), '{"type":"module"}\n', { mode: 0o600 });
+  writeFileSync(path.join(runtimeDir, "dist", "cli.js"), "// stub\n", { mode: 0o600 });
+
+  const { readClientVersion } = await import("../dist/cli.js");
+  const version = await readClientVersion(path.join(runtimeDir, "dist", "cli.js"));
+  assert.equal(version, "0.12.2", "回落到运行时目录名，而不是 0.0.0");
+  h.cleanup();
+});

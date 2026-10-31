@@ -945,3 +945,23 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// 2026-10-31 走查：全新安装后 doctor 有 7 个 ✗，其中 4 个只是「还没用过」。
+// 等待态必须渲染成 …，且末尾要有一句怎么读这些结果。
+test("cli: doctor 把「还没用过」渲染成 … 并给出总结句", async () => {
+  const { formatCheckForTest, doctorSummaryForTest } = await import("../dist/cli.js");
+  assert.equal(formatCheckForTest({ ok: true, name: "installation" }), "✓ installation");
+  assert.equal(formatCheckForTest({ ok: false, waiting: true, name: "codex: hook activity", detail: "no events yet" }),
+    "… codex: hook activity — no events yet");
+  assert.equal(formatCheckForTest({ ok: false, name: "codex: SessionStart hook", detail: "untrusted" }),
+    "✗ codex: SessionStart hook — untrusted");
+
+  const summary = doctorSummaryForTest([
+    { ok: true },
+    { ok: false, fatal: false },
+    { ok: false, waiting: true },
+  ]);
+  assert.match(summary, /1 item\(s\) marked ✗/);
+  assert.match(summary, /37soul login/);
+  assert.match(summary, /waiting on the host agent/);
+});

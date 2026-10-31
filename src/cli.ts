@@ -134,17 +134,17 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
         );
       }
       const doctor = await runDoctor(deps);
-      for (const check of doctor.checks) {
-        io.stdout(`${check.ok ? "✓" : "✗"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}\n`);
-      }
+      for (const check of doctor.checks) io.stdout(`${formatCheck(check)}\n`);
       io.stdout("\nLocal use is ready. Raw conversation stays local. To sync long-term Soul assets to 37Soul, run `37soul login`.\n");
+      const summary = doctorSummary(doctor.checks);
+      if (summary) io.stdout(summary);
       return doctor.ok ? 0 : 1;
     }
     case "doctor": {
       const doctor = await runDoctor(deps);
-      for (const check of doctor.checks) {
-        io.stdout(`${check.ok ? "✓" : "✗"} ${check.name}${check.detail ? ` — ${check.detail}` : ""}\n`);
-      }
+      for (const check of doctor.checks) io.stdout(`${formatCheck(check)}\n`);
+      const summary = doctorSummary(doctor.checks);
+      if (summary) io.stdout(summary);
       return doctor.ok ? 0 : 1;
     }
     case "status": {
@@ -696,15 +696,70 @@ export async function bindCommand(root: string, rest: string[], io: CliIO, detac
   return 0;
 }
 
-async function readClientVersion(cliScriptPath: string): Promise<string> {
+/**
+ * 客户端版本号的来源顺序（2026-10-31 走查：设备卡片上显示 0.0.0）。
+ *
+ * 发布包里的 package.json 只有 `{"type":"module"}`，version 字段在打包时丢了；
+ * 只读它会一律退回 0.0.0，运营在网站上看不出用户跑的是哪一版。所以：
+ *   1. 同目录上一级的 package.json（源码/开发态）
+ *   2. 运行时目录名（`~/.37soul/runtime/0.12.2` —— 安装器按版本建目录）
+ *   3. install manifest 里记录的 runtime version
+ * 都是本地文件，不发网络请求；全都没有时才承认不知道。
+ */
+/** 导出以便直接验证「发布包丢 version」时的回落顺序。 */
+export async function readClientVersion(cliScriptPath: string): Promise<string> {
+  const semver = /^\d+\.\d+\.\d+$/;
   try {
     const pkg = JSON.parse(await readFile(path.join(path.dirname(cliScriptPath), "..", "package.json"), "utf8")) as {
       version?: string;
     };
-    return pkg.version ?? "0.0.0";
+    if (typeof pkg.version === "string" && semver.test(pkg.version)) return pkg.version;
   } catch {
-    return "0.0.0";
+    // 发布包里可能没有 package.json 或没有 version
   }
+
+  // dist/cli.js → dist → 运行时目录（安装器按版本命名）
+  const runtimeDir = path.basename(path.dirname(path.dirname(cliScriptPath)));
+  if (semver.test(runtimeDir)) return runtimeDir;
+
+  try {
+    const home = process.env.SOUL37_HOME || (await import("node:os")).homedir();
+    const manifest = JSON.parse(await readFile(path.join(home, ".37soul", "install-manifest.json"), "utf8")) as {
+      entries?: Array<{ kind?: string; version?: string }>;
+    };
+    const runtime = (manifest.entries ?? []).find((e) => e.kind === "runtime" && typeof e.version === "string");
+    if (runtime?.version && semver.test(runtime.version)) return runtime.version;
+  } catch {
+    // 没有 manifest：当作不知道
+  }
+  return "0.0.0";
+}
+
+
+/** 一行渲染一个 doctor check：✓ 通过 · ✗ 需要处理 · … 还没发生（等待态）。 */
+function formatCheck(check: { ok: boolean; waiting?: boolean; name: string; detail?: string }): string {
+  const mark = check.waiting && !check.ok ? "…" : check.ok ? "✓" : "✗";
+  return `${mark} ${check.name}${check.detail ? ` — ${check.detail}` : ""}`;
+}
+
+/**
+ * doctor 末尾的「怎么读这些结果」。
+ * 2026-10-31 走查：全新安装会同时出现 7 个 ✗（codex 未信任、opencode 未加载、
+ * hermes 无模型授权、4 个 no events），没有人告诉新手哪些是正常的。
+ */
+function doctorSummary(checks: readonly { ok: boolean; waiting?: boolean; fatal?: boolean }[]): string {
+  const blocked = checks.filter((c) => !c.ok && !c.waiting).length;
+  const waiting = checks.filter((c) => c.waiting && !c.ok).length;
+  if (blocked === 0) {
+    return waiting > 0
+      ? `\n${waiting} item(s) marked … are waiting on the host agent itself — they turn into ✓ the first time you use that agent.\n`
+      : "";
+  }
+  return (
+    `\n${blocked} item(s) marked ✗ need an action: run \`37soul login\` for sync credentials, ` +
+    "approve the hook inside Codex (/hooks), and restart the agents you just connected.\n" +
+    (waiting > 0 ? `${waiting} item(s) marked … are waiting on the host agent — they turn into ✓ after first use.\n` : "")
+  );
 }
 
 export interface ProfileCandidate {
@@ -947,3 +1002,7 @@ if (invokedDirectly) {
     },
   );
 }
+
+/** 导出给测试：渲染与总结是纯函数。 */
+export const formatCheckForTest = formatCheck;
+export const doctorSummaryForTest = doctorSummary;
