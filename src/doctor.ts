@@ -33,6 +33,12 @@ export interface DoctorCheck {
   ok: boolean;
   detail?: string;
   fatal?: boolean;
+  /**
+   * 既不是成功也不是失败，而是「还没发生」或「需要宿主自己动作」。
+   * 2026-10-31 走查：全新的安装会用 ✗ 报 `hook activity — no hook events yet`，
+   * 新手会当成装失败了。waiting 用「…」渲染。
+   */
+  waiting?: boolean;
 }
 
 export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck[]; ok: boolean }> {
@@ -233,8 +239,12 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     const recent = Boolean(stats?.lastModifiedMs) && Date.now() - stats.lastModifiedMs < 24 * 3600 * 1000;
     checks.push({
       name: `${agentKind}: hook activity`,
+      // 还没用过不是失败：标成等待态，等这个 Agent 真的被用起来才会变绿。
       ok: recent,
-      detail: stats?.lastModifiedMs ? `last event ${new Date(stats.lastModifiedMs).toISOString()}` : "no hook events yet",
+      waiting: !recent,
+      detail: stats?.lastModifiedMs
+        ? `last event ${new Date(stats.lastModifiedMs).toISOString()}`
+        : "no events yet — normal until you use this agent",
     });
     if (!assetsMode && !recent && !(config.transcript_fallback ?? []).includes(agentKind)) {
       checks.push({
