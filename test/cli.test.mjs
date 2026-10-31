@@ -956,12 +956,21 @@ test("cli: doctor 把「还没用过」渲染成 … 并给出总结句", async 
   assert.equal(formatCheckForTest({ ok: false, name: "codex: SessionStart hook", detail: "untrusted" }),
     "✗ codex: SessionStart hook — untrusted");
 
-  const summary = doctorSummaryForTest([
-    { ok: true },
-    { ok: false, fatal: false },
-    { ok: false, waiting: true },
+  // 只装了一个 agent 时，总结句不能叫用户去处理别的宿主
+  const onlyCredential = doctorSummaryForTest([
+    { ok: true, name: "installation" },
+    { ok: false, name: "pi: sync credential" },
+    { ok: false, waiting: true, name: "pi: hook activity" },
   ]);
-  assert.match(summary, /1 item\(s\) marked ✗/);
-  assert.match(summary, /37soul login/);
-  assert.match(summary, /waiting on the host agent/);
+  assert.match(onlyCredential, /1 item\(s\) marked ✗/);
+  assert.match(onlyCredential, /37soul login/);
+  assert.doesNotMatch(onlyCredential, /Codex/, "不该叫只装了 Pi 的用户去 Codex 的 /hooks");
+  assert.match(onlyCredential, /waiting on the host agent/);
+
+  const withHook = doctorSummaryForTest([
+    { ok: false, name: "codex: SessionStart hook" },
+    { ok: false, name: "hermes: plugin bridge" },
+  ]);
+  assert.match(withHook, /Codex/);
+  assert.match(withHook, /restart/);
 });

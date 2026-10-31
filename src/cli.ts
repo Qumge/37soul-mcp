@@ -747,17 +747,27 @@ function formatCheck(check: { ok: boolean; waiting?: boolean; name: string; deta
  * 2026-10-31 走查：全新安装会同时出现 7 个 ✗（codex 未信任、opencode 未加载、
  * hermes 无模型授权、4 个 no events），没有人告诉新手哪些是正常的。
  */
-function doctorSummary(checks: readonly { ok: boolean; waiting?: boolean; fatal?: boolean }[]): string {
-  const blocked = checks.filter((c) => !c.ok && !c.waiting).length;
+function doctorSummary(checks: readonly { ok: boolean; waiting?: boolean; name: string }[]): string {
+  const blocked = checks.filter((c) => !c.ok && !c.waiting);
   const waiting = checks.filter((c) => c.waiting && !c.ok).length;
-  if (blocked === 0) {
+  if (blocked.length === 0) {
     return waiting > 0
       ? `\n${waiting} item(s) marked … are waiting on the host agent itself — they turn into ✓ the first time you use that agent.\n`
       : "";
   }
+
+  // 只提这个安装里真的存在的问题：只装了 Pi 时不该被叫去 Codex 的 /hooks。
+  const names = blocked.map((c) => c.name).join(" ");
+  const actions: string[] = [];
+  if (/sync credential/.test(names)) actions.push("run `37soul login` for sync credentials");
+  if (/SessionStart hook|hooks/.test(names)) actions.push("approve the hook inside the host (Codex: /hooks)");
+  if (/plugin bridge/.test(names)) actions.push("restart the agents you just connected");
+  if (actions.length === 0) actions.push("see the ✗ lines above");
+  actions.push("restart the agents you just connected");
+  const unique = [...new Set(actions)];
+
   return (
-    `\n${blocked} item(s) marked ✗ need an action: run \`37soul login\` for sync credentials, ` +
-    "approve the hook inside Codex (/hooks), and restart the agents you just connected.\n" +
+    `\n${blocked.length} item(s) marked ✗ need an action: ${unique.join("; ")}.\n` +
     (waiting > 0 ? `${waiting} item(s) marked … are waiting on the host agent — they turn into ✓ after first use.\n` : "")
   );
 }
