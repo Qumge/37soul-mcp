@@ -9,9 +9,11 @@ async function configurePi(
   const written = writePiExtension(deps.home);
   const inspection = inspectPiExtension(deps.home);
   return {
-    manifestEntries: [
-      { agent: "pi", file: written.path, kind: "pi_extension", generation: written.generation, sha256: written.sha256 },
-    ],
+    // Preserve the legacy second managed write at manifest time, after service/bin setup.
+    get manifestEntries() {
+      const entry = writePiExtension(deps.home);
+      return [{ agent: "pi", file: entry.path, kind: "pi_extension", generation: entry.generation, sha256: entry.sha256 }];
+    },
     hook: false, // 没有全局 hook：事件由扩展桥转给本地 hook 命令
     instructions: false, // 扩展文件是唯一受管产物
     mcp: false,

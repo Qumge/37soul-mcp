@@ -65,6 +65,7 @@ export interface HostInstallResult {
   instructions: boolean;
   mcp: boolean;
   report?: CodexInstallReport | OpenCodeInstallReport | HermesInstallReport;
+  /** Read once at manifest time; bridges preserve their historical second managed write. */
   manifestEntries: Array<Record<string, unknown>>;
 }
 

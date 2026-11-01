@@ -15,9 +15,11 @@ async function configureOpenCode(
   const inspection = inspectOpenCodePlugin(deps.home);
   const observedByOpenCode = inspection.status === "observation_only" || inspection.status === "model_refused";
   return {
-    manifestEntries: [
-      { agent: "opencode", file: written.path, kind: "opencode_plugin", generation: written.generation, sha256: written.sha256 },
-    ],
+    // Preserve the legacy second managed write at manifest time, after service/bin setup.
+    get manifestEntries() {
+      const entry = writeOpenCodePlugin(deps.home);
+      return [{ agent: "opencode", file: entry.path, kind: "opencode_plugin", generation: entry.generation, sha256: entry.sha256 }];
+    },
     hook: false, // no global hook: injection arrives via the plugin bridge at the next request boundary
     instructions: false, // no AGENTS fragment for OpenCode; the plugin file is the only managed artifact
     mcp: false,

@@ -15,9 +15,11 @@ async function configureHermes(
   const surface = detectHermesSurface(deps.home);
   const written = writeHermesPlugin(deps.home);
   return {
-    manifestEntries: [
-      { agent: "hermes", file: written.path, kind: "hermes_plugin", sha256: written.sha256 },
-    ],
+    // Preserve the legacy second managed write at manifest time, after service/bin setup.
+    get manifestEntries() {
+      const entry = writeHermesPlugin(deps.home);
+      return [{ agent: "hermes", file: entry.path, kind: "hermes_plugin", sha256: entry.sha256 }];
+    },
     hook: false, // no global hook: injection arrives via the Python bridge at the next request boundary
     instructions: false, // no AGENTS fragment for Hermes; the bridge file is the only managed artifact
     mcp: false,
