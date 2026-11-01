@@ -19,6 +19,8 @@ export interface ServiceSpec {
   logPath: string;
   platform?: NodeJS.Platform;
   uid?: number;
+  /** Backoff clock for transient launchd registration errors. */
+  sleep?: (ms: number) => Promise<void>;
   /** 固定 runtime 的启动器：优先用它当命令（运行期解析 node）。 */
   launcherPath?: string;
 }
@@ -137,9 +139,7 @@ export async function installService(spec: ServiceSpec, run: RunCommand): Promis
         if (result.code !== 0) throw new Error(`launchctl bootout failed: ${result.stderr || result.stdout}`);
         stopped = true;
       }
-      const start = ["launchctl", "bootstrap", domain, file];
-      commands.push(start);
-      const result = await run(start);
+      const result = await bootstrapService(spec, domain, file, run, commands);
       if (result.code !== 0) throw new Error(`launchctl bootstrap failed: ${result.stderr || result.stdout}`);
       return { serviceFile: file, commands };
     } catch (error) {
@@ -148,9 +148,7 @@ export async function installService(spec: ServiceSpec, run: RunCommand): Promis
         if (previous === undefined) await rm(file, { force: true });
         else await writePlist(file, previous);
         if (stopped && previous !== undefined) {
-          const rollback = ["launchctl", "bootstrap", domain, file];
-          commands.push(rollback);
-          const restored = await run(rollback);
+          const restored = await bootstrapService(spec, domain, file, run, commands);
           if (restored.code !== 0) recovery = `; previous service restore failed: ${restored.stderr || restored.stdout}`;
         }
       } catch (restoreError) { recovery = `; previous service restore failed: ${(restoreError as Error).message}`; }
@@ -201,4 +199,20 @@ async function writePlist(file: string, contents: string): Promise<void> {
     await writeFile(staged, contents, { mode: 0o644 });
     await rename(staged, file);
   } finally { await rm(staged, { force: true }); }
+}
+
+/** bootout can return before launchd finishes unregistering the old job.
+ * Retry only transient EIO, never evict a newly registered job or hide other errors.
+ * The same bounded recovery applies when restoring the previous plist.
+ */
+async function bootstrapService(spec: ServiceSpec, domain: string, file: string, run: RunCommand, commands: string[][]): Promise<Awaited<ReturnType<RunCommand>>> {
+  const backoff = [100, 250, 500, 1000, 2000];
+  const sleep = spec.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt++) {
+    const argv = ["launchctl", "bootstrap", domain, file];
+    commands.push(argv);
+    const result = await run(argv);
+    if (result.code !== 5 || attempt === backoff.length) return result;
+    await sleep(backoff[attempt]);
+  }
 }

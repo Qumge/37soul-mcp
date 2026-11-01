@@ -136,3 +136,16 @@ test('doctor reads pid and version through an actual isolated agentd-shaped chil
  });
  assert.equal(report.checks.find(c=>c.name==='runtime: service').ok,true);assert.equal(report.checks.find(c=>c.name==='runtime: running version').ok,true);
 });
+
+test('transient launchd bootstrap EIO after bootout is retried before rolling back',async t=>{
+ const home=await homeFor(t),file=plistPath(home),commands=[],waits=[];await mkdir(path.dirname(file),{recursive:true});await writeFile(file,'<plist>previous</plist>');let starts=0;
+ const launcher=path.join(home,'.37soul/runtime/0.13.3/bin/37soul');
+ await installService({home,nodePath:process.execPath,scriptPath:launcher,launcherPath:launcher,logPath:'log',platform:'darwin',uid:501,sleep:async ms=>waits.push(ms)},async argv=>{commands.push(argv);if(argv[1]==='print')return {code:0,stdout:`program = ${home}/.37soul/runtime/0.13.2/bin/37soul`,stderr:''};if(argv[1]==='bootstrap'&&++starts===1)return {code:5,stdout:'',stderr:'Bootstrap failed: 5: Input/output error'};return good();});
+ assert.equal(starts,2);assert.equal(commands.filter(a=>a[1]==='bootout').length,1);assert.ok(waits.length>0);assert.ok((await readFile(file,'utf8')).includes(launcher));
+});
+
+test('bootstrap EIO retries are bounded and an exhausted upgrade restores the previous job',async t=>{
+ const home=await homeFor(t),file=plistPath(home),old='<plist>previous</plist>';await mkdir(path.dirname(file),{recursive:true});await writeFile(file,old);let starts=0;const waits=[];
+ await assert.rejects(installService({home,nodePath:process.execPath,scriptPath:'new',launcherPath:path.join(home,'.37soul/runtime/0.13.3/bin/37soul'),logPath:'log',platform:'darwin',uid:501,sleep:async ms=>waits.push(ms)},async argv=>{if(argv[1]==='print')return {code:0,stdout:`program = ${home}/.37soul/runtime/0.13.2/bin/37soul`,stderr:''};if(argv[1]==='bootstrap'&&++starts<=6)return {code:5,stdout:'',stderr:'EIO'};return good();}),/bootstrap/);
+ assert.equal(starts,7);assert.equal(waits.length,5);assert.equal(await readFile(file,'utf8'),old);
+});

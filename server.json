@@ -7,7 +7,7 @@
     "url": "https://github.com/Qumge/37soul-mcp",
     "source": "github"
   },
-  "version": "0.13.3",
+  "version": "0.13.4",
   "remotes": [
     {
       "type": "streamable-http",
