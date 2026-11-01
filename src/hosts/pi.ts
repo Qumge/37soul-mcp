@@ -47,7 +47,6 @@ export const host: HostSpec = {
   kind: "pi",
   label: "Pi",
   home: ".pi",
-  level: "capture",
   hook: {
     events: [{ event: "SessionStart" }, { event: "UserPromptSubmit" }, { event: "PostToolUse" }, { event: "PostToolUseFailure" }, { event: "Stop" }, { event: "SessionEnd" }],
     injectionChannel: "SessionStart",

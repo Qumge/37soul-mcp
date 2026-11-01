@@ -121,7 +121,6 @@ export const host: HostSpec = {
   kind: "codex",
   label: "Codex",
   home: ".codex",
-  level: "full",
   hook: {
     events: CODEX_HOOK_EVENTS,
     injectionChannel: "SessionStart",

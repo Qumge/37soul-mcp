@@ -142,7 +142,6 @@ export const host: HostSpec = {
   kind: "claude-code",
   label: "Claude Code",
   home: ".claude",
-  level: "full",
   hook: {
     events: CLAUDE_HOOK_EVENTS,
     injectionChannel: "SessionStart",

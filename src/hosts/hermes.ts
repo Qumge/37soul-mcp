@@ -72,7 +72,6 @@ export const host: HostSpec = {
   kind: "hermes",
   label: "Hermes",
   home: ".hermes",
-  level: "full",
   hook: {
     events: [{ event: "SessionStart" }, { event: "UserPromptSubmit" }, { event: "Stop" }],
     injectionChannel: "SessionStart",

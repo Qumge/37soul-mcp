@@ -78,7 +78,6 @@ export const host: HostSpec = {
   kind: "opencode",
   label: "OpenCode",
   home: ".config/opencode",
-  level: "full",
   hook: {
     events: [{ event: "SessionStart" }, { event: "UserPromptSubmit" }, { event: "Stop" }],
     injectionChannel: "SessionStart",

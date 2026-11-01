@@ -3,7 +3,6 @@ import type { AdapterDeps, RuntimeAdapter } from "../adapters/types.js";
 import type { RunCommand } from "../service.js";
 import type { AgentConfig } from "../agentd/state.js";
 
-export type HostLevel = "full" | "capture";
 export type InjectionChannel = "SessionStart" | "UserPromptSubmit" | "none";
 
 export interface HostInstallDeps {
@@ -116,7 +115,6 @@ export interface HostSpec {
   kind: RuntimeKind;
   label: string;
   home: string;
-  level: HostLevel;
   hook: HostHookSpec;
   install: HostInstallSpec;
   doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]>;
