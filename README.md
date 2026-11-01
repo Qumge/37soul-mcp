@@ -8,7 +8,7 @@ identity, your long-term relationship preferences and reusable experience sync a
 you explicitly log in and authorize a Soul.
 
 > **Status honesty.** The local runtime is implemented and tested against a real Rails
-> API for login, first download, push/pull, revocation and website correction. The four
+> API for login, first download, push/pull, revocation and website correction. The five
 > host adapters have local live smoke evidence for extraction, but full cross-session
 > adoption (website correction → new native Session) is still being independently verified;
 > observed CLI versions are recorded below.
@@ -117,7 +117,7 @@ Local creation is not authorization: run `soul authorize` once for a locally cre
 Soul. A Soul left unauthorized stays in the local outbox and never blocks Pull for an
 authorized Soul.
 
-## Four hosts
+## Five hosts
 
 | Host | Observed locally | Status |
 | --- | --- | --- |
