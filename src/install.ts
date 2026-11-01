@@ -127,6 +127,13 @@ async function resolveRuntimeMeta(deps: InstallDeps): Promise<{ sourceRoot: stri
       version = undefined;
     }
   }
+  if (!version) {
+    try {
+      const marker = JSON.parse(await readFile(path.join(sourceRoot, ".installed"), "utf8"));
+      if (typeof marker.version === "string" && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(marker.version)) version = marker.version;
+    } catch {}
+  }
+  if (!version && path.basename(path.dirname(sourceRoot)) === "runtime" && /^\d+\.\d+\.\d+$/.test(path.basename(sourceRoot))) version = path.basename(sourceRoot);
   return { sourceRoot, version: version || "0.0.0" };
 }
 
@@ -183,8 +190,15 @@ export async function installRuntime(deps: {
   // ⚠️ npm/npx 会把依赖提升到包目录之外（~/.npm/_npx/<hash>/node_modules），包目录里
   // 根本没有 node_modules —— 所以优先用 esbuild 打好的自包含 bundle（只有两个文件），
   // 复制失败必须报错，绝不能吞掉后留下一个起不来的 runtime。
-  const bundleCli = path.join(deps.sourceRoot, "dist", "bundle", "cli.js");
-  const bundleIndex = path.join(deps.sourceRoot, "dist", "bundle", "index.js");
+  let bundleRoot = path.join(deps.sourceRoot, "dist", "bundle");
+  // Installed releases flatten the two self-contained files into dist/ and
+  // deliberately omit node_modules. Only a bundle marker authorizes this shape.
+  try {
+    const sourceMarker = JSON.parse(await readFile(path.join(deps.sourceRoot, ".installed"), "utf8"));
+    if (sourceMarker.mode === "bundle" && !(await existsFile(path.join(bundleRoot, "cli.js")))) bundleRoot = path.join(deps.sourceRoot, "dist");
+  } catch {}
+  const bundleCli = path.join(bundleRoot, "cli.js");
+  const bundleIndex = path.join(bundleRoot, "index.js");
   const hasBundle = (await existsFile(bundleCli)) && (await existsFile(bundleIndex));
   const hasDeps = await existsDirectory(path.join(deps.sourceRoot, "node_modules"));
 
@@ -214,7 +228,7 @@ export async function installRuntime(deps: {
   // CommonJS, so an ESM bundle fails with "Cannot use import statement outside a
   // module". Ship a minimal `{"type":"module"}` marker so the launcher's cli.js /
   // index.js load as ESM on Node 18 exactly as they do on Node 20/22/24.
-  await writeFile(path.join(dir, "package.json"), `${JSON.stringify({ type: "module" })}\n`, { mode: 0o644 });
+  await writeFile(path.join(dir, "package.json"), `${JSON.stringify({ type: "module", version: deps.version })}\n`, { mode: 0o644 });
 
   await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
   await writeFile(launcher, launcherScript(deps.nodePath, dir), { mode: 0o755 });
@@ -352,6 +366,7 @@ export async function deviceLogin(
   agents: string[],
   options: DeviceLoginOptions = {},
 ): Promise<DeviceLoginResult> {
+  const apiBase = deps.apiBase.replace(/\/+$/, "");
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -371,7 +386,7 @@ export async function deviceLogin(
       }
     : {};
 
-  const created = await deps.fetch(`${deps.apiBase}/api/v1/cli/device_codes`, {
+  const created = await deps.fetch(`${apiBase}/api/v1/cli/device_codes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agents, ...fields }),
@@ -387,19 +402,21 @@ export async function deviceLogin(
     expires_in?: number;
   };
 
+  const approval = new URL(device.verification_url);
+  const verificationUrl = `${apiBase}/cli/approve${approval.search}${approval.hash}`;
   log("");
-  log(`  Open:  ${device.verification_url}`);
+  log(`  Open:  ${verificationUrl}`);
   log(`  Code:  ${device.user_code}`);
   log("");
   // 尽量替用户打开浏览器；打不开就靠上面那行链接（SSH、无图形界面时）。
   const opener = (deps.platform ?? process.platform) === "darwin" ? "open" : (deps.platform ?? process.platform) === "linux" ? "xdg-open" : null;
   if (opener && deps.openBrowser !== false) {
-    await deps.runCommand([opener, device.verification_url]).catch(() => undefined);
+    await deps.runCommand([opener, verificationUrl]).catch(() => undefined);
   }
 
   const deadline = now() + (device.expires_in ?? 600) * 1000;
   for (;;) {
-    const poll = await deps.fetch(`${deps.apiBase}/api/v1/cli/tokens`, {
+    const poll = await deps.fetch(`${apiBase}/api/v1/cli/tokens`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device_code: device.device_code, agents, ...fields }),

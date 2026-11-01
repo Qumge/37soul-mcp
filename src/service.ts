@@ -6,8 +6,9 @@
  * 别的 LaunchAgent/unit 一根汗毛都不碰。
  */
 
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 export const SERVICE_LABEL = "com.37soul.agentd";
 
@@ -17,6 +18,7 @@ export interface ServiceSpec {
   scriptPath: string;
   logPath: string;
   platform?: NodeJS.Platform;
+  uid?: number;
   /** 固定 runtime 的启动器：优先用它当命令（运行期解析 node）。 */
   launcherPath?: string;
 }
@@ -99,16 +101,61 @@ export async function installService(spec: ServiceSpec, run: RunCommand): Promis
 
   if (platform === "darwin") {
     const file = plistPath(spec.home);
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, renderPlist(spec), { mode: 0o644 });
-    commands.push(["launchctl", "load", "-w", file]);
-    const result = await run(commands[commands.length - 1]);
-    if (result.code !== 0) {
-      // 失败回滚：别留下一个加载不起来的服务文件。
-      await rm(file, { force: true });
-      throw new Error(`launchctl load failed: ${result.stderr || result.stdout}`);
+    const uid = spec.uid ?? process.getuid?.();
+    if (uid === undefined) throw new Error("cannot determine the launchd GUI user");
+    const domain = `gui/${uid}`;
+    const target = `${domain}/${SERVICE_LABEL}`;
+    const inspect = ["launchctl", "print", target];
+    commands.push(inspect);
+    const current = await run(inspect);
+    if (current.code === 0) {
+      // Labels are per UID, not per HOME. An isolated test/install must never
+      // evict the user's real service just because it uses the same label.
+      const program = current.stdout.match(/^\s*program\s*=\s*(.+)$/m)?.[1];
+      const args = current.stdout.match(/\barguments\s*=\s*\{([^}]+)\}/)?.[1] ?? "";
+      const commandPaths = [program, ...args.split("\n")].filter((value): value is string => typeof value === "string")
+        .map(value => value.trim().replace(/^\d+\s*=\s*/, "").replace(/^"(.*)"$/, "$1"));
+      const homes = [spec.home, await realpath(spec.home).catch(() => spec.home)];
+      const ownsCommand = commandPaths.some(command => path.isAbsolute(command) && homes.some(home => path.resolve(command).startsWith(path.join(home, ".37soul") + path.sep)));
+      if (!ownsCommand) {
+        throw new Error(`${SERVICE_LABEL} is already registered for a different HOME or its owner cannot be verified; keep that service and use agentd manually in this HOME`);
+      }
     }
-    return { serviceFile: file, commands };
+    // Stage atomically before stopping a healthy old daemon. Both nonzero and
+    // thrown bootstrap failures restore its old plist and reload the old job.
+    let previous: string | undefined;
+    try { previous = await readFile(file, "utf8"); } catch {}
+    if (current.code === 0 && previous === undefined) throw new Error("cannot safely upgrade a loaded service without its previous plist; keep the running job and restore its configuration first");
+    let stopped = false;
+    try {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writePlist(file, renderPlist(spec));
+      if (current.code === 0) {
+        const stop = ["launchctl", "bootout", target];
+        commands.push(stop);
+        const result = await run(stop);
+        if (result.code !== 0) throw new Error(`launchctl bootout failed: ${result.stderr || result.stdout}`);
+        stopped = true;
+      }
+      const start = ["launchctl", "bootstrap", domain, file];
+      commands.push(start);
+      const result = await run(start);
+      if (result.code !== 0) throw new Error(`launchctl bootstrap failed: ${result.stderr || result.stdout}`);
+      return { serviceFile: file, commands };
+    } catch (error) {
+      let recovery = "";
+      try {
+        if (previous === undefined) await rm(file, { force: true });
+        else await writePlist(file, previous);
+        if (stopped && previous !== undefined) {
+          const rollback = ["launchctl", "bootstrap", domain, file];
+          commands.push(rollback);
+          const restored = await run(rollback);
+          if (restored.code !== 0) recovery = `; previous service restore failed: ${restored.stderr || restored.stdout}`;
+        }
+      } catch (restoreError) { recovery = `; previous service restore failed: ${(restoreError as Error).message}`; }
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${recovery}`);
+    }
   }
 
   if (platform === "linux") {
@@ -146,4 +193,12 @@ export async function removeService(spec: ServiceSpec, run: RunCommand): Promise
   }
   // 其他平台没有服务可删。
   await chmod(path.join(spec.home, ".37soul"), 0o700).catch(() => {});
+}
+
+async function writePlist(file: string, contents: string): Promise<void> {
+  const staged = `${file}.tmp-${randomUUID()}`;
+  try {
+    await writeFile(staged, contents, { mode: 0o644 });
+    await rename(staged, file);
+  } finally { await rm(staged, { force: true }); }
 }

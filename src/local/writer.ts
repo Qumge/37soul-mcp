@@ -47,6 +47,7 @@ export const WRITER_COMMANDS = [
   "sync_once",
   "record_receipt",
   "status",
+  "health",
   "export",
   "login_associate",
   "init_assets_profile",
@@ -80,6 +81,9 @@ export function registerWriterCommand(command: string, handler: WriterCommandHan
 }
 
 // --- the only command Task 2 ships -----------------------------------------------
+
+// Cheap liveness/version probe: no profile read, mutation, network or model call.
+registerWriterCommand("health", async () => ({ writer_pid: process.pid, entrypoint: process.argv[1] ?? null, agentd: process.argv[2] === "agentd" }));
 
 registerWriterCommand("status", async ({ root }) => {
   const ids = await listProfiles(root);
@@ -240,7 +244,7 @@ export async function startWriter(
   };
 }
 
-export function sendWriter(root: string, request: WriterRequest): Promise<WriterResult> {
+export function sendWriter(root: string, request: WriterRequest, options: { timeoutMs?: number } = {}): Promise<WriterResult> {
   const frame = JSON.stringify(request);
   if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES) {
     return Promise.resolve({
@@ -250,9 +254,11 @@ export function sendWriter(root: string, request: WriterRequest): Promise<Writer
   }
   return new Promise<WriterResult>((resolve) => {
     let settled = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: WriterResult): void => {
       if (settled) return;
       settled = true;
+      if (deadline !== undefined) clearTimeout(deadline);
       resolve(result);
     };
 
@@ -260,6 +266,10 @@ export function sendWriter(root: string, request: WriterRequest): Promise<Writer
       socket.write(`${frame}\n`);
     });
     let buffer = "";
+    if (options.timeoutMs !== undefined) deadline = setTimeout(() => {
+      finish({ ok: false, error: { code: "writer_unavailable", message: "writer health request timed out" } });
+      socket.destroy();
+    }, options.timeoutMs);
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
       buffer += chunk;

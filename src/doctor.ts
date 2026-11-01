@@ -3,7 +3,7 @@
  * 最近一次上传是什么时候。输出是给人看的；返回 ok=false 时 CLI 以非零退出。
  */
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
 import { dataRoot, installManifestPath } from "./install.js";
@@ -15,6 +15,7 @@ import { readCredentials } from "./agentd/credentials.js";
 import { isAssetsModeSync } from "./sync/client.js";
 import { detectLang, messages, type Lang } from "./i18n.js";
 import { openStore } from "./local/store.js";
+import { inspectRuntime, type RuntimeHealth } from "./runtime-health.js";
 
 export interface DoctorDeps {
   home: string;
@@ -27,6 +28,8 @@ export interface DoctorDeps {
   platform?: NodeJS.Platform;
   /** 用户可见文案的语言；默认按进程的 locale 环境变量判断。 */
   lang?: Lang;
+  inspectRuntime?: (root: string) => Promise<RuntimeHealth>;
+  runtimeWaitMs?: number;
 }
 
 export interface DoctorCheck {
@@ -174,18 +177,40 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     fatal: !node,
   });
 
+  // Observe the actual daemon even when service registration failed and no
+  // service entry was written. A transient CLI writer is not the background job.
+  let health = await (deps.inspectRuntime ?? inspectRuntime)(root);
+  const deadline = Date.now() + (deps.runtimeWaitMs ?? 0);
+  while ((!health.ok || !health.agentd) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    health = await (deps.inspectRuntime ?? inspectRuntime)(root);
+  }
+  const backgroundRunning = health.ok && health.agentd === true;
+  checks.push({ name: "runtime: agentd", ok: backgroundRunning,
+    detail: backgroundRunning ? `responding via IPC (pid ${health.pid})` : `${health.detail ?? "background agentd is not running"} — run \`37soul install\` or start \`37soul agentd\``, fatal: !backgroundRunning });
+
   // 服务文件（装了的话）必须存在、且引用的是固定启动器而不是 npx 缓存。
   if (manifest.entries.some((entry) => entry.kind === "service")) {
     const platform = deps.platform ?? process.platform;
     const serviceFile = platform === "darwin" ? plistPath(deps.home) : systemdPath(deps.home);
     const text = await readTextSafe(serviceFile);
-    const ok = text.includes(launcher ?? "\u0000") && text.length > 0;
+    const configured = text.includes(launcher ?? "\u0000") && text.length > 0;
+    const ok = configured && health.ok && health.agentd === true;
     checks.push({
       name: "runtime: service",
       ok,
-      detail: ok ? serviceFile : text === "" ? `${serviceFile} is missing — rerun \`37soul install\`` : `${serviceFile} does not point at the runtime launcher`,
+      detail: !configured ? text === "" ? `${serviceFile} is missing — rerun \`37soul install\`` : `${serviceFile} does not point at the runtime launcher`
+        : health.ok && health.agentd ? `${serviceFile}; agentd pid ${health.pid}` : `${serviceFile}; ${health.detail ?? "background agentd is not running"} — run \`37soul install\` or start \`37soul agentd\``,
       fatal: !ok,
     });
+  }
+  if (backgroundRunning) {
+    const actual = path.dirname(path.dirname(path.resolve(health.entrypoint!)));
+    const expected = config.runtime_dir ?? (launcher ? path.dirname(path.dirname(launcher)) : "");
+    const canonical = async (dir: string) => realpath(dir).catch(() => path.resolve(dir));
+    const matches = expected !== "" && await canonical(actual) === await canonical(expected);
+    checks.push({ name: "runtime: running version", ok: matches,
+      detail: matches ? `running ${path.basename(actual)} (pid ${health.pid})` : `running ${actual}; expected ${expected} — rerun \`37soul install\` to restart the service`, fatal: !matches });
   }
 
   // v2 §6.2/§6.1：hook 最近一次触发（spool 写入时间）、spool 积压量，以及

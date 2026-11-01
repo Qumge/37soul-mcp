@@ -62,9 +62,9 @@ function openCodeDoctorDetail(inspection: { status: string; declared: string }):
     case "unsupported_generation":
       return `plugin bridge declares an unsupported generation (${inspection.declared || "none"}) — rerun \`37soul install\``;
     case "not_loaded":
-      return "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins";
+      return "plugin file present but OpenCode has not loaded it — review the 37soul plugin in ~/.config/opencode/plugins and enable it through OpenCode's plugin configuration; restart OpenCode. Loading and manual approval allow plugin events; extraction stays off and injection remains unverified. Run `37soul doctor` again";
     case "not_trusted":
-      return "plugin file present but OpenCode has not trusted it — approve it in OpenCode";
+      return "plugin file present but OpenCode has not trusted it — review and approve the 37soul plugin in OpenCode, then start a new session. Approval allows plugin execution/events; extraction stays off and injection remains unverified. Run `37soul doctor` again";
     case "model_refused":
       return "a live probe was refused by the model — no authorized probe yet";
     case "observation_only":

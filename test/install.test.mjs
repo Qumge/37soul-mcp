@@ -113,7 +113,11 @@ function harness(overrides = {}) {
     fetch: overrides.fetch ?? deviceFlowFetch(),
     runCommand: async (argv) => {
       commands.push(argv);
-      return overrides.runCommand ? overrides.runCommand(argv) : { code: 0, stdout: "", stderr: "" };
+      if (overrides.runCommand) return overrides.runCommand(argv);
+      // The fixture has no loaded launchd job; success with an empty print
+      // response would falsely claim another process owns the service label.
+      if (argv[0] === "launchctl" && argv[1] === "print") return { code: 113, stdout: "", stderr: "service not found" };
+      return { code: 0, stdout: "", stderr: "" };
     },
     nodePath: overrides.nodePath ?? "/usr/local/bin/node",
     cliScriptPath: "/opt/37soul/dist/cli.js",
@@ -251,8 +255,8 @@ test("install: writes the macOS LaunchAgent pointing at the fixed runtime launch
   assert.ok(plist.includes(`<string>${launcher}</string>`), "service must run the runtime launcher");
   assert.ok(plist.includes("<string>agentd</string>"));
   assert.ok(plist.includes("<string>/opt/37soul/dist/cli.js</string>") === false, "must not point into the checkout/npx cache");
-  const load = h.commands.find((argv) => argv[0] === "launchctl");
-  assert.deepEqual(load, ["launchctl", "load", "-w", plistPath(h.home)]);
+  const bootstrap = h.commands.find((argv) => argv[0] === "launchctl" && argv[1] === "bootstrap");
+  assert.deepEqual(bootstrap, ["launchctl", "bootstrap", `gui/${process.getuid()}`, plistPath(h.home)]);
 
   // 转义本身单独钉住（路径里可能有 & / < / 空格）。
   const escaped = renderPlist({ home: h.home, nodePath: "/n & n", scriptPath: "/s <x>", launcherPath: "/l & <l>", logPath: "/tmp/l" });
@@ -499,7 +503,9 @@ test("doctor: checks that the runtime launcher, node and service paths still exi
   await install(h.deps, { agents: ["claude-code"] });
 
   const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
-  const doctorDeps = { ...h.deps, fetch: fetchImpl };
+  // Service registration is stubbed above, so this fixture supplies the live
+  // daemon response; runtime-install-feedback tests exercise the real IPC probe.
+  const doctorDeps = { ...h.deps, fetch: fetchImpl, inspectRuntime: async () => ({ ok: true, agentd: true, pid: 123, entrypoint: path.join(runtimeDir(h.home, "0.11.0"), "dist/cli.js") }) };
   const healthy = await runDoctor(doctorDeps);
   const byName = (report) => Object.fromEntries(report.checks.map((c) => [c.name, c]));
   assert.equal(byName(healthy)["runtime: launcher"].ok, true);
@@ -873,7 +879,8 @@ test("doctor: OpenCode plugin bridge reports a specific honest state", async () 
   const check = byName(report)["opencode: plugin bridge"];
   assert.ok(check, "the plugin bridge check is present");
   assert.equal(check.ok, false);
-  assert.equal(check.detail, "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins");
+  assert.match(check.detail, /has not loaded.*enable.*restart OpenCode/);
+  assert.match(check.detail, /extraction stays off/);
 
   h.cleanup();
 });
@@ -890,10 +897,8 @@ test("doctor: Codex hook reports an honest trust state, never a blanket ok", asy
   const check = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
   assert.ok(check, "the codex SessionStart hook check is present");
   assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
-  assert.equal(
-    check.detail,
-    "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — review with /hooks",
-  );
+  assert.match(check.detail, /has not shown.*\/hooks.*approve.*new session/);
+  assert.match(check.detail, /remain unverified/);
 
   // A real hook spool event is evidence of execution, but still not a trust claim.
   mkdirSync(path.join(h.home, ".37soul", "spool", "codex"), { recursive: true });

@@ -92,7 +92,8 @@ export function defaultHookRenderer(io: CliIO, argv: string[]): (text: string) =
 
 export async function main(argv: string[], io: CliIO): Promise<number> {
   const home = process.env.SOUL37_HOME || os.homedir();
-  const apiBase = (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
+  const config = await loadConfig(path.join(home, ".37soul"));
+  const apiBase = (process.env.SOUL37_BASE_URL || config?.api_base_url || "https://37soul.com").replace(/\/+$/, "");
   const cliScriptPath = fileURLToPath(import.meta.url);
   const deps = {
     home,
@@ -135,9 +136,9 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
             "Your Soul still works in them through the remote MCP endpoint (\`37soul login\`).\n",
         );
       }
-      const doctor = await runDoctor(deps);
+      const doctor = await runDoctor({ ...deps, runtimeWaitMs: 2000 });
       for (const check of doctor.checks) io.stdout(`${formatCheck(check)}\n`);
-      io.stdout(`\n${messages(detectLang()).localReady}\n`);
+      io.stdout(`\n${doctor.ok ? messages(detectLang()).localReady : messages(detectLang()).localNeedsAttention}\n`);
       const summary = doctorSummary(doctor.checks);
       if (summary) io.stdout(summary);
       return doctor.ok ? 0 : 1;
@@ -255,7 +256,7 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   // untouched and stay outside the transactional asset snapshot.
   const legacyState = await loadState(root);
   const apiBaseUrl =
-    config?.api_base_url ?? (process.env.SOUL37_BASE_URL || "https://37soul.com").replace(/\/+$/, "");
+    (process.env.SOUL37_BASE_URL || config?.api_base_url || "https://37soul.com").replace(/\/+$/, "");
   const machineId = config?.machine_id ?? legacyState.machine_id;
   // Upgrade gate: in assets mode the legacy transcript upload path must be inert —
   // pre-seeded spool/queue/log_turn/checkpoint/facts/remember/PAT updates produce

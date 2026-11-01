@@ -62,7 +62,7 @@ function hermesDoctorDetail(inspection: { status: string; surface: string }): st
     case "not_installed":
       return "plugin bridge not installed — run `37soul install`";
     case "observation_only":
-      return "events may be observed; no model call authorized (structured extraction stays off)";
+      return "events may be observed; review the managed 37soul pre_llm_call/post_llm_call hooks in ~/.hermes/config.yaml and approve shell-hook execution in Hermes if prompted, then restart Hermes or start a new session. Approval allows hook execution/events only; no model call authorized (structured extraction stays off), and injection remains unverified. Run `37soul doctor` again";
     default:
       return inspection.status;
   }

@@ -114,7 +114,7 @@ async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
 function codexHookDetail(installed: boolean, trust: { trusted: boolean; events_seen: boolean }): string {
   if (!installed) return "not installed — run `37soul install`";
   if (trust.events_seen) return "hook events observed; Codex's persistent trust state is managed in /hooks";
-  return "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — review with /hooks";
+  return "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — open /hooks in Codex, review and approve the 37soul hook, then start a new session. Approval allows hook execution/events; extraction and injection remain unverified. Run `37soul doctor` again";
 }
 
 export const host: HostSpec = {

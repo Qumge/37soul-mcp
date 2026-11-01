@@ -26,24 +26,28 @@ export function detectLang(env: Record<string, string | undefined> = process.env
 export interface Messages {
   /** `37soul install` 完成后的一句总结。 */
   localReady: string;
+  localNeedsAttention: string;
   /** 匿名安装（还没有 scoped credential）时，`37soul doctor` 末尾的一句轻提示。 */
   bindingHint: string;
 }
 
 const MESSAGES: Record<Lang, Messages> = {
   en: {
+    localNeedsAttention: "Local setup needs attention. The background agentd is not ready; review the checks above before using the hooks.",
     localReady:
       "Local use is ready. Raw conversation stays local. To sync long-term Soul assets to 37Soul, run `37soul login`.",
     bindingHint:
       "Tip: `37soul login` keeps this Soul across devices at 37soul.com — nothing is uploaded until you log in.",
   },
   zh: {
+    localNeedsAttention: "本地设置尚未就绪。后台 agentd 还未通过检查，请先处理上面的诊断结果再使用宿主 hook。",
     localReady:
       "本地已经可用。原始对话留在本机；要把长期 Soul 资产同步到 37Soul，运行 `37soul login`。",
     bindingHint:
       "提示：`37soul login` 后这个 Soul 会跨设备同步（37soul.com）；登录前不会上传任何内容。",
   },
   ja: {
+    localNeedsAttention: "ローカル設定を確認してください。バックグラウンドの agentd はまだ準備できていません。上の診断を確認してからフックを使用してください。",
     localReady:
       "ローカルでの利用準備ができました。生の会話は端末内に留まります。長期的な Soul の資産を 37Soul に同期するには `37soul login` を実行してください。",
     bindingHint:
