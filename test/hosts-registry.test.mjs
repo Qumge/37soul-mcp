@@ -145,3 +145,14 @@ test("hosts: install and uninstall delegate host actions and manifest entries", 
   assert.deepEqual(manifest.entries.filter((e) => e.agent), [{ agent: "pi", kind: "registry-entry", file: path.join(home, "registry-entry") }]);
   assert.ok((await uninstall(deps)).includes("registry-cleanup"));
 });
+
+test("hosts: null hook payload keeps the legacy error receipt", async (t) => {
+  const { runHookCommand } = await import("../dist/hook.js");
+  const home = await mkdtemp(path.join(tmpdir(), "37soul-null-payload-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  for (const agentKind of [...KINDS, "unknown"]) {
+    const errors = [];
+    assert.equal(await runHookCommand({ home, agentKind, event: "SessionEnd", stdin: "null", fetch: async () => { throw new Error("no network"); }, stdout: () => assert.fail("no output expected"), stderr: s => errors.push(s) }), 0);
+    assert.deepEqual(errors, ["37soul hook: Cannot read properties of null (reading 'session_id')\n"]);
+  }
+});

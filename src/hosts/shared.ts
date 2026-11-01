@@ -6,10 +6,12 @@ import type { HostDoctorCheck, HostHookPayload } from "./types.js";
 
 /** All current bridges normalize their native fields to this existing hook shape. */
 export function parseHookPayload(payload: Record<string, any>): HostHookPayload {
+  // Read session_id first to preserve the legacy null-payload error receipt.
+  const sessionId = String(payload.session_id ?? payload.sessionId ?? payload.thread_id ?? "unknown");
   const prompt = [payload.prompt, payload.user_prompt, payload.userPrompt, payload.message, payload.text]
     .find((value) => typeof value === "string" && value.trim() !== "");
   return {
-    sessionId: String(payload.session_id ?? payload.sessionId ?? payload.thread_id ?? "unknown"),
+    sessionId,
     cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
     prompt,
     transcriptPath: extractTranscriptPath(payload),
