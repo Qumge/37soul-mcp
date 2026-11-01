@@ -75,7 +75,7 @@ export interface SaveLoginCredentialsInput {
 }
 
 /**
- * Persist the four runtime tokens with their owner/device/profile scope. Existing
+ * Persist the runtime tokens with their owner/device/profile scope. Existing
  * credentials for another owner or device are kept untouched; only the same
  * (profile, owner, device, runtime) slot is replaced.
  */

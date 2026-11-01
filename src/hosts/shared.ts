@@ -35,7 +35,6 @@ export async function manifestSha256(home: string, kind: string): Promise<string
 
 export async function readTextSafe(file: string): Promise<string> {
   try {
-    const { readFile } = await import("node:fs/promises");
     return await readFile(file, "utf8");
   } catch {
     return "";

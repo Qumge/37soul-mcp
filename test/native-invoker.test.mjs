@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Task 10 (ledger GAP): the four runtime adapters plus the spawn-based
+ * Task 10 (ledger GAP): the runtime adapters plus the spawn-based
  * `NativeInvoker` are wired into agentd's assets-mode drain. Until now
  * `extractAdapters` defaulted to `{}` inside `createDaemon`, so no extraction
  * ever ran in production.
  *
  * These tests pin the honest contract:
- *  - `createExtractAdapters(home)` returns all four `RuntimeAdapter`s on one
+ *  - `createExtractAdapters(home)` returns all registered `RuntimeAdapter`s on one
  *    shared `AdapterDeps`.
  *  - `readSource` resolves the opaque event refs through the local path-pointer
  *    index (Task 10c; see source-index.test.mjs for the index itself). With no
@@ -76,7 +76,17 @@ test("native-invoker: a spawn without a stdin pipe is killed, never left running
   assert.equal(killed, true, "no stdin pipe means the process must be killed");
 });
 
-test("extract-adapters: all four runtimes are wired, and extract short-circuits honestly on an empty source", async () => {
+test("native-invoker: an unregistered runtime fails cleanly without spawning", async () => {
+  const { calls, spawn } = recordingSpawn();
+  const invoke = createNativeInvoker(undefined, spawn);
+
+  const result = await invoke("unknown-runtime", [], "", "job-x");
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /no native binary/i);
+  assert.equal(calls.length, 0, "must not spawn an undefined command");
+});
+
+test("extract-adapters: all registered runtimes are wired, and extract short-circuits honestly on an empty source", async () => {
   const adapters = createExtractAdapters("/tmp/37soul-adapters");
   assert.deepEqual(Object.keys(adapters).sort(), [...ALL_KINDS].sort(), "exactly the runtime adapters, no more");
 

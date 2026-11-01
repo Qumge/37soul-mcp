@@ -46,7 +46,7 @@ export interface CliIO {
 /**
  * The assets-mode extract-adapter wiring used by `startAgentd`, extracted so a test
  * can pin the gate without running the resident daemon loop (intervals / fs.watch /
- * signal exit). Assets mode gets the four real runtime adapters + spawn NativeInvoker
+ * signal exit). Assets mode gets the real runtime adapters + spawn NativeInvoker
  * (whose readSource resolves event refs through the local path-pointer index);
  * legacy mode keeps its transcript-upload path unchanged and gets `undefined`.
  */
@@ -280,7 +280,7 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
       log: logger,
       fetch: globalThis.fetch,
       getGitState,
-      // Task 10: wire the four runtime adapters + spawn NativeInvoker into agentd's
+      // Task 10: wire the runtime adapters + spawn NativeInvoker into agentd's
       // assets-mode drain (only assets mode has extraction watermarks). The data
       // root is passed so readSource can resolve event refs through the local
       // path-pointer index (Task 10c).

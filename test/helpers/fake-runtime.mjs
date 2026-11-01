@@ -4,7 +4,7 @@
  * It exercises the exact RuntimeAdapter surface (probe/extract/inject) without
  * touching any real host tool or model, so contract and probe work can run on
  * Node 18/20/24 with no network, no installed agents and no user HOME writes.
- * Task 6–9 replace these fakes with the four real adapters after authorized
+ * Task 6–9 replace these fakes with the real adapters after authorized
  * live probes.
  */
 import { createHash } from "node:crypto";
