@@ -15,6 +15,7 @@ import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
 import { readCredentials } from "./agentd/credentials.js";
 import { isAssetsModeSync } from "./sync/client.js";
+import { detectLang, messages, type Lang } from "./i18n.js";
 import { openStore } from "./local/store.js";
 
 export interface DoctorDeps {
@@ -26,6 +27,8 @@ export interface DoctorDeps {
   cliScriptPath: string;
   /** 和 install 用同一个平台判断（测试里注入 darwin，CI 跑在 Linux 上）。 */
   platform?: NodeJS.Platform;
+  /** 用户可见文案的语言；默认按进程的 locale 环境变量判断。 */
+  lang?: Lang;
 }
 
 export interface DoctorCheck {
@@ -41,20 +44,29 @@ export interface DoctorCheck {
   waiting?: boolean;
 }
 
-export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck[]; ok: boolean }> {
+export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck[]; ok: boolean; notes: string[] }> {
   const checks: DoctorCheck[] = [];
+  const notes: string[] = [];
   const root = dataRoot(deps.home);
   const config = await loadConfig(root);
 
   if (!config) {
     checks.push({ name: "installation", ok: false, detail: "not installed — run `37soul install`", fatal: true });
-    return { checks, ok: false };
+    return { checks, ok: false, notes };
   }
   checks.push({ name: "installation", ok: true, detail: `machine ${config.machine_id}` });
 
   // Soul sync (assets-only mode) status: pending / conflict counts per local profile.
   // Read-only and non-fatal — the legacy capture path still runs alongside it.
   const assetsMode = isAssetsModeSync(root);
+
+  // 匿名安装（assets-only 且还没有 scoped credential）在 doctor 末尾给一句轻提示：
+  // 绑定到 37soul.com 才能跨设备。已登录的人不再被念。
+  const credentials = readCredentials(config);
+  if (assetsMode && credentials.length === 0) {
+    notes.push(messages(deps.lang ?? detectLang()).bindingHint);
+  }
+
   if (assetsMode) {
     try {
       const index = await readAccountsIndex(root);
@@ -70,15 +82,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
           await store.close();
         }
       }
-      const credentials = readCredentials(config);
       checks.push({
         name: "soul sync",
         ok: true,
         detail: credentials.length === 0
           ? "assets_only mode — login required; local assets stay local"
           : `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined`,
-      });
-    } catch {
+      });    } catch {
       checks.push({ name: "soul sync", ok: true, detail: "assets_only mode" });
     }
   }
@@ -256,7 +266,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   }
 
   const ok = checks.filter((check) => check.fatal).every((check) => check.ok);
-  return { checks, ok };
+  return { checks, ok, notes };
 }
 
 async function readTextSafe(file: string): Promise<string> {

@@ -10,8 +10,9 @@ you explicitly log in and authorize a Soul.
 > host adapters have local live smoke evidence for extraction, but full cross-session
 > adoption (website correction → new native Session) is still being independently verified;
 > observed CLI versions are recorded below.
-> Node 18, 20 and 24 full suites pass locally (330/330); the CI workflow is defined but
-> has not been run on GitHub yet.
+> Full suite: 383 tests on Node 24 locally (the Node 18 floor check skips when no Node 18
+> binary is present; the packed-tarball check skips on an unpacked checkout). Tag CI runs
+> the same suite on Node 20 and is green for the latest release.
 
 ## Where the cloud fits
 
@@ -94,7 +95,8 @@ instead of creating a lookalike. Run `37soul sync` once the connection is availa
 - `status` reports the machine, number of scoped credentials, and pending/quarantined
   local changes. `login required` means local use works but nothing syncs yet.
 - `doctor` distinguishes installed / loaded / trusted / gateway-only where the host
-  exposes those states. A local-only outbox is not an error.
+  exposes those states. A local-only outbox is not an error. Its tip lines follow
+  `SOUL37_LANG`, `LC_ALL` or `LANG` (en / zh / ja); the rest of the CLI output is English.
 - `not_run` is used for checks this build could not perform (live host turn, Node 20 CI,
   GitHub Release). It is never reported as a pass.
 
