@@ -14,6 +14,12 @@
 37Soul is not distributed on npm. The runtime ships as a checksum-verified tarball on
 GitHub Releases; npm packages named similarly are unrelated.
 
+## Plans
+
+- 37Soul is free to use. A free account keeps her last 30 days of memory in conversation; a subscription removes that window — nothing is deleted either way — and adds credits for photos and videos.
+- Binding her to your own agent costs nothing extra; Markdown / SOUL.md / MEMORY.md export is free for every account.
+- [Pricing](https://37soul.com/pricing?ref=llms-mcp)
+
 ## What syncs and what does not
 
 - [How memory works](https://37soul.com/agent_soul): identity, relationship assets, experience.

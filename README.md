@@ -13,6 +13,15 @@ you explicitly log in and authorize a Soul.
 > Node 18, 20 and 24 full suites pass locally (330/330); the CI workflow is defined but
 > has not been run on GitHub yet.
 
+## Where the cloud fits
+
+37Soul itself is free to use. A free account brings her last **30 days** of memory into
+the conversation; a subscription removes that window — nothing is deleted either way —
+and adds credits for photos and videos. Binding her to your own agent costs nothing
+extra, and Markdown / SOUL.md / MEMORY.md export is free for every account.
+
+[Pricing](https://37soul.com/pricing?ref=mcp-readme)
+
 ## Quick start: a new Soul
 
 Requires macOS or Linux and Node.js 18+.
