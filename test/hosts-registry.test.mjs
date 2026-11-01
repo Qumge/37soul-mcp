@@ -65,3 +65,83 @@ test("hosts: Claude completed-turn parser preserves fixture refs", async () => {
   const transcript = await readFile(new URL("./fixtures/runtimes/claude-code/stop-turn.jsonl", import.meta.url), "utf8");
   assert.deepEqual(hostSpec("claude-code").hook.completedTurnRefs(transcript), ["c-u6", "c-a5"]);
 });
+
+// Consumer contracts: metadata alone is insufficient; entry points must dispatch
+// through the registry. Each override is restored before the next test.
+test("hosts: planInstall delegates selected file plans in registry order", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "37soul-plan-dispatch-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const host = hostSpec("pi");
+  const original = host.install.plan;
+  t.after(() => { host.install.plan = original; });
+  host.install.plan = ({ home }) => [path.join(home, "registry-plan")];
+  const result = await planInstall({ home, cliScriptPath: "/pkg/dist/cli.js", runtimeVersion: "0.13.2", platform: "darwin" }, { agents: ["pi"] });
+  assert.equal(result.files[0], path.join(home, "registry-plan"));
+});
+
+test("hosts: extraction uses registered adapter factories", () => {
+  const host = hostSpec("pi");
+  const original = host.invoke.createAdapter;
+  const expected = { runtime_kind: "pi", fromRegistry: true };
+  try {
+    host.invoke.createAdapter = () => expected;
+    assert.equal(createExtractAdapters("/unused-host-registry-home").pi, expected);
+  } finally {
+    host.invoke.createAdapter = original;
+  }
+});
+
+test("hosts: hook consumes the registered payload parser", async (t) => {
+  const { runHookCommand } = await import("../dist/hook.js");
+  const { spoolFile } = await import("../dist/agentd/spool.js");
+  const home = await mkdtemp(path.join(tmpdir(), "37soul-hook-dispatch-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const host = hostSpec("pi");
+  const original = host.hook.parsePayload;
+  t.after(() => { host.hook.parsePayload = original; });
+  host.hook.parsePayload = () => ({ sessionId: "registry-session", cwd: "/registry", transcriptPath: null });
+  const errors = [];
+  assert.equal(await runHookCommand({ home, agentKind: "pi", event: "SessionEnd", stdin: '{"session_id":"raw-session"}', fetch: async () => { throw new Error("no network"); }, stdout: () => assert.fail("no output expected"), stderr: (s) => errors.push(s) }), 0);
+  assert.deepEqual(errors, []);
+  const records = (await readFile(spoolFile(path.join(home, ".37soul"), "pi", "registry-session"), "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(records[0].cwd, "/registry");
+});
+
+test("hosts: doctor delegates registered host checks in place", async (t) => {
+  const { runDoctor } = await import("../dist/doctor.js");
+  const { saveConfig } = await import("../dist/agentd/state.js");
+  const home = await mkdtemp(path.join(tmpdir(), "37soul-doctor-dispatch-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await saveConfig(path.join(home, ".37soul"), { api_base_url: "https://app.test", machine_id: "m1", tokens: { pi: "" } });
+  const host = hostSpec("pi");
+  const original = host.doctor;
+  t.after(() => { host.doctor = original; });
+  const expected = { name: "pi: registry check", ok: false, detail: "unchanged dispatch contract" };
+  host.doctor = async () => [expected];
+  const result = await runDoctor({ home, apiBase: "https://app.test", nodePath: process.execPath, cliScriptPath: "/pkg/dist/cli.js", platform: "darwin", fetch: async () => { throw new Error("no network"); }, runCommand: async () => ({ code: 0, stdout: "", stderr: "" }) });
+  assert.deepEqual(result.checks.find((c) => c.name === expected.name), expected);
+});
+
+test("hosts: install and uninstall delegate host actions and manifest entries", async (t) => {
+  const { install, uninstall } = await import("../dist/install.js");
+  const { writeFile } = await import("node:fs/promises");
+  const home = await mkdtemp(path.join(tmpdir(), "37soul-install-dispatch-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const source = path.join(home, "package");
+  await mkdir(path.join(source, "dist/bundle"), { recursive: true });
+  await writeFile(path.join(source, "dist/bundle/cli.js"), "// fake bundled CLI\n");
+  await writeFile(path.join(source, "dist/bundle/index.js"), "// fake bundled server\n");
+  const host = hostSpec("pi");
+  const originalConfigure = host.install.configure;
+  const originalUninstall = host.install.uninstall;
+  t.after(() => { host.install.configure = originalConfigure; host.install.uninstall = originalUninstall; });
+  let configured = 0;
+  host.install.configure = async () => { configured++; return { hook: false, instructions: false, mcp: false, manifestEntries: [{ agent: "pi", kind: "registry-entry", file: path.join(home, "registry-entry") }] }; };
+  host.install.uninstall = async (_deps, removed) => { removed.push("registry-cleanup"); };
+  const deps = { home, apiBase: "https://app.test", nodePath: process.execPath, cliScriptPath: "/pkg/dist/cli.js", agentdScriptPath: "/pkg/dist/cli.js", platform: "darwin", runtimeSourceRoot: source, runtimeVersion: "0.13.2", fetch: async () => { throw new Error("no network"); }, runCommand: async () => ({ code: 0, stdout: "", stderr: "" }) };
+  await install(deps, { agents: ["pi"], installService: false });
+  assert.equal(configured, 1);
+  const manifest = JSON.parse(await readFile(path.join(home, ".37soul/install-manifest.json"), "utf8"));
+  assert.deepEqual(manifest.entries.filter((e) => e.agent), [{ agent: "pi", kind: "registry-entry", file: path.join(home, "registry-entry") }]);
+  assert.ok((await uninstall(deps)).includes("registry-cleanup"));
+});
