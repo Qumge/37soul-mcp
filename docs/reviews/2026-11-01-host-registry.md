@@ -51,18 +51,20 @@ Added:
 - `0484efe` refactor(hook): read host parsing and capabilities from HostSpec
 - `90f9ad9` refactor(doctor): delegate per-host checks to HostSpec
 - `90c4053` refactor(native): derive binaries and adapters from HostSpec
-- Completion documentation is committed separately after verification.
+- `8103aa1` docs(hosts): record Phase 0 parity and full-suite verification
+- `295ff1b` refactor(hook): preserve legacy payload error evaluation order
+- Final evidence update is committed separately after the last full run.
 
 All commits use the required Codex Co-Authored-By trailer.
 
 ## Verification
 
-- Replayed the test-only commit inside an archived source tree in this worktree: after a successful baseline TypeScript build, the new test fails because `dist/hosts/registry.js` is absent. No source commit was reset/reverted and no old tests were changed.
-- Before consumer implementation: `node --test test/hosts-registry.test.mjs` produced **9 tests, 4 pass, 5 fail**. After implementation: all 9 pass.
+- Replayed the test-only commit inside an archived source tree in this worktree: after a successful baseline TypeScript build, the new test fails because `dist/hosts/registry.js` is absent. No source commit was reset/reverted and no old tests were changed. The already-built skeleton initially passed its four original tests, so consumer-dispatch RED tests were added rather than pretending the existing skeleton was absent.
+- Before consumer implementation: `node --test test/hosts-registry.test.mjs` produced **9 tests, 4 pass, 5 fail**. After consumer implementation: all 9 pass. A final null-payload parity check exposed the skeleton's different evaluation order; the added 10th registry test first failed, then all 10 passed after restoring session_id-first evaluation. Hook + registry combined: 33 pass, 0 fail. Named-fix independent source review confirmed normal field precedence and the legacy error receipt.
 - Existing focused install tests: **48 pass, 0 fail**.
 - Existing hook tests: **23 pass, 0 fail**.
 - Native/adapters/assets-contract/registry subset: **57 pass, 0 fail**.
-- Final command: `npm run build && npm test` — **392 tests, 390 pass, 0 fail, 2 skipped**, followed by smoke **all checks passed**, exit 0. No concurrency flags or timeout changes.
+- Final command: `npm run build && npm test` — **393 tests, 391 pass, 0 fail, 2 skipped**, followed by smoke **all checks passed**, exit 0. No concurrency flags or timeout changes.
 - Archived baseline existing tests: **383 tests, 381 pass, 0 fail, 2 skipped**.
 - Both skipped tests are baseline/environment conditions: no local Node 18 binary; no packed `release/` artifacts. The brief anticipated one skip, but this checkout has two; no release was built to hide that difference.
 - First full run: **392 tests, 389 pass, 1 fail, 2 skipped**. Failure: `hook: falls back to the local cache when the API hangs, inside the 300ms budget` at `test/hook.test.mjs:78`, assertion at line 104: `hook must not block startup (took 1189ms)`. Focused hook and the archived full baseline passed; the unchanged final full run passed. This timing failure is disclosed, not removed by modifying a test.
