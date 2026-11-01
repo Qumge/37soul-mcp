@@ -6,10 +6,8 @@
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, loadState } from "./agentd/state.js";
-import { claudeInstructionsPath, claudeSettingsPath, codexInstructionsPath, dataRoot, hookCommand, installManifestPath } from "./install.js";
-import { inspectOpenCodePlugin } from "./adapters/opencode.js";
-import { inspectHermesPlugin } from "./adapters/hermes.js";
-import { codexHookConfigPath, inspectCodexTrust } from "./adapters/codex.js";
+import { dataRoot, installManifestPath } from "./install.js";
+import { hostSpec } from "./hosts/registry.js";
 import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
@@ -130,59 +128,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       });
     }
 
-    // 配置痕迹
-    if (agentKind === "claude-code") {
-      const settings = await readTextSafe(claudeSettingsPath(deps.home));
-      // 显示/比对的是 settings 里**应该**有的那条（指向固定 runtime 的启动器），
-      // 不是当前进程的路径 —— 经 install.sh 安装时当前进程跑在一个马上会被删掉的临时目录里。
-      const expected = hookCommand({ ...deps, launcher: config.launcher }, agentKind);
-      const hookPresent = settings.includes("hook --agent claude-code");
-      const hookCurrent = config.launcher ? settings.includes(JSON.stringify(expected).slice(1, -1)) : hookPresent;
-      checks.push({
-        name: `${agentKind}: SessionStart hook`,
-        ok: hookPresent && hookCurrent,
-        detail: !hookPresent ? "missing" : hookCurrent ? expected : "points at an old path — rerun `37soul install`",
-      });
-      const instructions = await readTextSafe(claudeInstructionsPath(deps.home));
-      checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: claudeInstructionsPath(deps.home) });
-      if (!assetsMode) {
-        checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered — resume/checkpoint over MCP unavailable" });
-      }
-
-      const projects = path.join(deps.home, ".claude", "projects");
-      checks.push(await dirCheck(`${agentKind}: session records`, projects));
-    } else if (agentKind === "codex") {
-      const instructions = await readTextSafe(codexInstructionsPath(deps.home));
-      checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: codexInstructionsPath(deps.home) });
-      // Task 10: honest Codex hook result (replaces the old `ok:true` / "not used
-      // (B tier)" hand-wave). installed / trusted / events_seen /
-      // extraction_capable / injection_capable are the five report states; a write
-      // we performed never makes trusted or events_seen green.
-      let hookInstalled = false;
-      try {
-        hookInstalled = (await stat(codexHookConfigPath(deps.home))).isFile();
-      } catch {
-        hookInstalled = false;
-      }
-      const trust = inspectCodexTrust(deps.home);
-      checks.push({
-        name: `${agentKind}: SessionStart hook`,
-        ok: trust.trusted && trust.events_seen,
-        detail: codexHookDetail(hookInstalled, trust),
-      });
-      const sessions = path.join(deps.home, ".codex", "sessions");
-      checks.push(await dirCheck(`${agentKind}: session records`, sessions));
-    } else if (agentKind === "opencode") {
-      // 插件桥（Task 8）：六个诚实状态，各自不同的 detail；没有一个状态是绿的
-      // （observation_only 是上限，直到有授权的真机 probe）。ok 固定 false 且非 fatal。
-      const inspection = inspectOpenCodePlugin(deps.home);
-      checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: openCodeDoctorDetail(inspection) });
-    } else if (agentKind === "hermes") {
-      // Python 桥（Task 9）：三个诚实状态；gateway-only 配置必须显式说出来，
-      // 绝不冒充 CLI 能力。observation_only 是上限，直到有授权的真机 probe。
-      const inspection = inspectHermesPlugin(deps.home);
-      checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: hermesDoctorDetail(inspection) });
-    }
+    // Host-specific checks stay in this exact place in the per-agent report.
+    const host = hostSpec(agentKind);
+    if (host) checks.push(...await host.doctor({ ...deps, config, assetsMode }));
 
     const state = await loadState(root);
     const lastUpload = Object.entries(state.sessions)
@@ -275,56 +223,6 @@ async function readTextSafe(file: string): Promise<string> {
     return await readFile(file, "utf8");
   } catch {
     return "";
-  }
-}
-
-/** 插件桥六状态 → 人话 detail；每个状态都是诚实的非绿（observation_only 是上限）。 */
-function openCodeDoctorDetail(inspection: { status: string; declared: string }): string {
-  switch (inspection.status) {
-    case "not_installed":
-      return "plugin bridge not installed — run `37soul install`";
-    case "unsupported_generation":
-      return `plugin bridge declares an unsupported generation (${inspection.declared || "none"}) — rerun \`37soul install\``;
-    case "not_loaded":
-      return "plugin file present but OpenCode has not loaded it — add it to OpenCode's plugins";
-    case "not_trusted":
-      return "plugin file present but OpenCode has not trusted it — approve it in OpenCode";
-    case "model_refused":
-      return "a live probe was refused by the model — no authorized probe yet";
-    case "observation_only":
-      return "events may be observed; no model call authorized (structured extraction stays off)";
-    default:
-      return inspection.status;
-  }
-}
-
-/** Hermes Python 桥三状态 → 人话 detail；gateway-only 必须显式说不是 CLI。 */
-function hermesDoctorDetail(inspection: { status: string; surface: string }): string {
-  switch (inspection.status) {
-    case "gateway_only":
-      return "Hermes config declares a gateway-only surface — this is not a CLI model capability, so structured extraction stays off";
-    case "not_installed":
-      return "plugin bridge not installed — run `37soul install`";
-    case "observation_only":
-      return "events may be observed; no model call authorized (structured extraction stays off)";
-    default:
-      return inspection.status;
-  }
-}
-
-/** Codex SessionStart hook 的诚实人话：installed → trusted → events 三步，谁缺谁说。 */
-function codexHookDetail(installed: boolean, trust: { trusted: boolean; events_seen: boolean }): string {
-  if (!installed) return "not installed — run `37soul install`";
-  if (trust.events_seen) return "hook events observed; Codex's persistent trust state is managed in /hooks";
-  return "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — review with /hooks";
-}
-
-async function dirCheck(name: string, dir: string): Promise<DoctorCheck> {
-  try {
-    const info = await stat(dir);
-    return { name, ok: info.isDirectory(), detail: dir };
-  } catch {
-    return { name, ok: false, detail: `${dir} (not found — has this agent run yet?)` };
   }
 }
 

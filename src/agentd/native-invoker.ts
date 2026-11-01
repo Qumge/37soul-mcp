@@ -20,24 +20,14 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import type { RuntimeKind } from "../assets/protocol.js";
 import type { AdapterDeps, NativeInvoker, RuntimeAdapter } from "../adapters/types.js";
-import { createClaudeCodeAdapter } from "../adapters/claude-code.js";
-import { createCodexAdapter } from "../adapters/codex.js";
-import { createOpenCodeAdapter } from "../adapters/opencode.js";
-import { createHermesAdapter } from "../adapters/hermes.js";
-import { createPiAdapter } from "../adapters/pi.js";
+import { HOSTS } from "../hosts/registry.js";
 import { readSourceRefs } from "./source-index.js";
 
 /** Runtime kind -> native CLI binary name. The adapters invoke by runtime kind; this
  *  is the only place the concrete binary spelling lives. */
-const RUNTIME_BINARIES: Record<RuntimeKind, string> = {
-  "claude-code": "claude",
-  codex: "codex",
-  opencode: "opencode",
-  hermes: "hermes",
-  // Pi 的二进制就在它自己的 install/bin 下，PATH 里不一定有；抽取尚未验证，
-  // 这个条目只是为了类型完整与将来启用时不必再改表。
-  pi: "pi",
-};
+const RUNTIME_BINARIES = Object.fromEntries(
+  HOSTS.flatMap((host) => host.invoke ? [[host.kind, host.invoke.binary]] : []),
+) as Record<RuntimeKind, string>;
 
 export interface NativeInvokerLog {
   info(message: string): void;
@@ -105,11 +95,7 @@ export function createExtractAdapters(home: string, log?: NativeInvokerLog, root
   const readSource = async (refs: readonly string[], turnRefs?: readonly string[]) => readSourceRefs(root, refs, turnRefs);
   const emit = async () => {};
   const deps: AdapterDeps = { home, invoke, readSource, emit };
-  return {
-    "claude-code": createClaudeCodeAdapter(deps),
-    codex: createCodexAdapter(deps),
-    opencode: createOpenCodeAdapter(deps),
-    hermes: createHermesAdapter(deps),
-    pi: createPiAdapter(deps),
-  };
+  return Object.fromEntries(
+    HOSTS.flatMap((host) => host.invoke ? [[host.kind, host.invoke.createAdapter(deps)]] : []),
+  );
 }

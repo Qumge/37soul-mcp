@@ -28,11 +28,9 @@ import { openStore, StoreError } from "./local/store.js";
 import { bindingKey } from "./local/bindings.js";
 import { ownerContextInput } from "./sync/client.js";
 import { selectContext } from "./assets/context.js";
-import { extractTranscriptPath, readSourceTailWindow } from "./agentd/source-index.js";
-import { latestCompletedTurnSourceRefs } from "./adapters/claude-code.js";
-import { latestCodexCompletedTurnRefs } from "./adapters/codex.js";
-import { latestOpenCodeCompletedTurnRefs } from "./adapters/opencode.js";
-import { latestHermesCompletedTurnRefs } from "./adapters/hermes.js";
+import { readSourceTailWindow } from "./agentd/source-index.js";
+import { hostSpec } from "./hosts/registry.js";
+import { parseHookPayload } from "./hosts/shared.js";
 
 export interface HookDeps {
   home: string;
@@ -191,17 +189,6 @@ export interface HookCommandDeps extends HookDeps {
   now?: () => number;
 }
 
-/** 注入通道（§6.4）：P1 的两个 Agent 都是 SessionStart。 */
-const INJECTION_CHANNEL: Record<string, "SessionStart" | "UserPromptSubmit" | "none"> = {
-  "claude-code": "SessionStart",
-  codex: "SessionStart",
-  opencode: "SessionStart",
-  hermes: "SessionStart",
-  // Pi 的桥扩展把 SessionStart 的 additionalContext 存进内存，在 before_agent_start
-  // 追进 systemPrompt；通道仍是 SessionStart，与其它桥接运行时一致。
-  pi: "SessionStart",
-};
-
 export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
   try {
     let payload: Record<string, any>;
@@ -218,9 +205,12 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     const state = await loadState(root);
     if (state.paused) return 0;
 
-    const sessionId = String(payload.session_id ?? payload.sessionId ?? payload.thread_id ?? "unknown");
+    const host = hostSpec(deps.agentKind);
+    // Unknown kinds keep the legacy spool payload normalization, without capabilities.
+    const parsed = (host?.hook.parsePayload ?? parseHookPayload)(payload);
+    const sessionId = parsed.sessionId;
     const nowIso = new Date(deps.now?.() ?? Date.now()).toISOString();
-    const cwd = typeof payload.cwd === "string" ? payload.cwd : undefined;
+    const cwd = parsed.cwd;
 
     const record = mapHookEvent(deps.event, payload, nowIso, cwd);
     if (record) {
@@ -233,7 +223,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     // SessionStart is awaited: a first-time session has no binding yet, and the
     // writer creates it while handling this event. Injecting concurrently would
     // read the snapshot before that binding commits (first-session race).
-    const sourcePath = extractTranscriptPath(payload);
+    const sourcePath = parsed.transcriptPath;
     let sourceTurnRefs: string[] | undefined;
     let sourceEndOffset: number | undefined;
     if (deps.event === "Stop" && sourcePath) {
@@ -241,10 +231,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
         const window = await readSourceTailWindow(sourcePath);
         if (window !== null) {
           const transcript = window.text;
-          if (deps.agentKind === "claude-code") sourceTurnRefs = latestCompletedTurnSourceRefs(transcript);
-          else if (deps.agentKind === "codex") sourceTurnRefs = latestCodexCompletedTurnRefs(transcript).refs;
-          else if (deps.agentKind === "opencode") sourceTurnRefs = latestOpenCodeCompletedTurnRefs(transcript).refs;
-          else if (deps.agentKind === "hermes") sourceTurnRefs = latestHermesCompletedTurnRefs(transcript).refs;
+          sourceTurnRefs = host?.hook.completedTurnRefs?.(transcript);
           if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
           // Freeze the endpoint this Stop actually read: the drain may run much
           // later, after the transcript has grown past the 4MiB tail window.
@@ -267,7 +254,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       return 0;
     }
 
-    const channel = INJECTION_CHANNEL[deps.agentKind] ?? "none";
+    const channel = host?.hook.injectionChannel ?? "none";
     if (deps.event === "SessionStart" && channel === "SessionStart") {
       if (payload.source === "compact") await clearReinjectMarker(root, sessionId).catch(() => {});
 
@@ -294,7 +281,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     if (deps.event === "UserPromptSubmit") {
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
-        const prompt = firstString(payload.prompt, payload.user_prompt, payload.userPrompt, payload.message, payload.text) ?? "";
+        const prompt = parsed.prompt ?? "";
         if (prompt.trim() !== "") {
           await withBudget(deps.timeoutMs ?? 300, () =>
             injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout, prompt, "UserPromptSubmit"),
@@ -323,7 +310,6 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
 }
 
 /** hook 事件 → RuntimeEvent 种类（assets 模式才发送）。非四类运行时直接不发。 */
-const RUNTIME_KINDS = new Set<string>(["claude-code", "codex", "opencode", "hermes", "pi"]);
 const RUNTIME_EVENT_KINDS: Record<string, RuntimeEventKind> = {
   SessionStart: "resume",
   Stop: "turn_completed",
@@ -346,7 +332,7 @@ async function emitRuntimeEvent(
   sourceTurnRefs?: string[],
   sourceEndOffset?: number,
 ): Promise<void> {
-  if (sessionId === "unknown" || !RUNTIME_KINDS.has(agentKind)) return;
+  if (sessionId === "unknown" || !hostSpec(agentKind)?.hook.emitsRuntimeEvents) return;
   const kind = RUNTIME_EVENT_KINDS[hookEvent];
   if (!kind) return;
   const assets = resolveLocalAssetsProfileSync(root);

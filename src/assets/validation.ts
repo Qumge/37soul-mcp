@@ -11,6 +11,7 @@
 import type { AssetSource, ProposedAsset } from "./protocol.js";
 import {
   ASSET_TRAITS,
+  RUNTIME_KINDS,
   EVIDENCES,
   LIMITS,
   SENSITIVITIES,
@@ -29,7 +30,7 @@ export class ValidationError extends Error {
 }
 
 /** New client submissions: the four tools plus web; legacy is read-only on the cloud. */
-const SUBMITTABLE_RUNTIME_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi", "web"] as const;
+const SUBMITTABLE_RUNTIME_KINDS = [...RUNTIME_KINDS, "web"] as const;
 const SOURCE_FIELDS = ["runtime_kind", "session_ref", "event_ref", "occurred_at"] as const;
 const PROPOSED_ASSET_FIELDS = [
   "kind",
