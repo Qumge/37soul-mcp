@@ -1,5 +1,7 @@
 # 37Soul
 
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+
 One persistent Soul across **Claude Code, Codex, OpenCode, Hermes and Pi** on your machine,
 and on 37Soul.com. Raw conversations, code and tool logs stay local; only the Soul's
 identity, your long-term relationship preferences and reusable experience sync after
