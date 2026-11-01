@@ -25,7 +25,7 @@ Only this worktree; no pushes, merges, release, version, fixture or existing-tes
 ## Tasks
 
 1. [x] Add `test/hosts-registry.test.mjs`; verify missing registry failure. Baseline Claude fixture returns `["c-u6", "c-a5"]`.
-2. [ ] Add `src/hosts/{types,registry,instructions,hook-command,shared,claude-code,codex,opencode,hermes,pi}.ts`; move existing per-host logic without rewriting it. Define minimal extra dependency fields for existing hook command/doctor fallback paths. Build and run new contract test. Commit.
+2. [x] Add `src/hosts/{types,registry,instructions,hook-command,shared,claude-code,codex,opencode,hermes,pi}.ts`; move existing per-host logic without rewriting it. Define minimal extra dependency fields for existing hook command/doctor fallback paths. Build and run new contract test. Commit.
 3. [ ] Dispatch install plan/configure/manifest/uninstall via HOSTS, re-export old API. Test install plus registry; commit.
 4. [ ] Dispatch hook channel, completed-turn parser and runtime-event eligibility through HostSpec. Test hook plus registry; commit.
 5. [ ] Dispatch per-host doctor checks through HostSpec, preserving Pi's empty checks. Test install/doctor paths; commit.
@@ -37,3 +37,5 @@ Only this worktree; no pushes, merges, release, version, fixture or existing-tes
 - Initial branch: `refactor/host-registry`, base `d8ae477`; clean worktree.
 - RED: `node --test test/hosts-registry.test.mjs` failed with ERR_MODULE_NOT_FOUND for `dist/hosts/registry.js`.
 - No plan approval pause: the user supplied the design, exact execution sequence and authorization to implement it.
+
+- Registry GREEN: build and all four new registry tests pass; no consumer dispatch changed yet.
