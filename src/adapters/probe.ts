@@ -3,7 +3,7 @@
  * probe and sanity-checks that the reported runtime_kind matches the adapter, so
  * a mis-wired adapter cannot silently report evidence for another tool.
  *
- * Task 6–9 supply the four real adapters; the offline probe script only ever uses
+ * Task 6–9 supply the real adapters; the offline probe script only ever uses
  * the fake runtime until a real adapter is in place and an authorized live probe
  * is run. A tool whose probe only observes hooks and cannot call a model must
  * report structured_extraction=false and does not pass P0.

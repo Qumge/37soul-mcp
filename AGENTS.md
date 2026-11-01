@@ -58,6 +58,6 @@ curl -fsSL https://github.com/Qumge/37soul-mcp/releases/latest/download/VERSION
 ```
 
 **新增宿主适配器时**：除了代码与测试，必须同时更新
-`src/install.ts` 的 `SUPPORTED_AGENTS`、`37soul` 仓库 `public/install.sh` 头部注释里的
-宿主列表、以及 `app/services/agent_kind.rb` 的 `INGESTIBLE`（web 仓库）—— 三处不一致
-就会出现「网站说支持、装完没有」的状态。
+`src/hosts/registry.ts` 的 `HOSTS`（`SUPPORTED_AGENTS` 由它派生）、`37soul` 仓库
+`public/install.sh` 头部注释里的宿主列表、以及 `app/services/agent_kind.rb` 的
+`INGESTIBLE`（web 仓库）—— 三处不一致就会出现「网站说支持、装完没有」的状态。

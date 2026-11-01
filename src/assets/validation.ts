@@ -29,7 +29,7 @@ export class ValidationError extends Error {
   }
 }
 
-/** New client submissions: the four tools plus web; legacy is read-only on the cloud. */
+/** New client submissions: the local tools plus web; legacy is read-only on the cloud. */
 const SUBMITTABLE_RUNTIME_KINDS = [...RUNTIME_KINDS, "web"] as const;
 const SOURCE_FIELDS = ["runtime_kind", "session_ref", "event_ref", "occurred_at"] as const;
 const PROPOSED_ASSET_FIELDS = [

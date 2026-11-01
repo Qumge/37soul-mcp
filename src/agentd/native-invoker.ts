@@ -1,5 +1,5 @@
 /**
- * Task 10: the four runtime adapters wired behind agentd's assets-mode drain, with a
+ * Task 10: the runtime adapters wired behind agentd's assets-mode drain, with a
  * spawn-based `NativeInvoker` as the only native model surface.
  *
  * Why the adapters were inert until now: `extractAdapters` in `createDaemon`
@@ -25,9 +25,9 @@ import { readSourceRefs } from "./source-index.js";
 
 /** Runtime kind -> native CLI binary name. The adapters invoke by runtime kind; this
  *  is the only place the concrete binary spelling lives. */
-const RUNTIME_BINARIES = Object.fromEntries(
-  HOSTS.flatMap((host) => host.invoke ? [[host.kind, host.invoke.binary]] : []),
-) as Record<RuntimeKind, string>;
+const RUNTIME_BINARIES: Partial<Record<RuntimeKind, string>> = Object.fromEntries(
+  HOSTS.flatMap((host) => (host.invoke ? [[host.kind, host.invoke.binary]] : [])),
+);
 
 export interface NativeInvokerLog {
   info(message: string): void;
@@ -57,6 +57,11 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
   return (runtime, args, input, internal_job_uid) =>
     new Promise((resolve) => {
       const command = RUNTIME_BINARIES[runtime];
+      if (!command) {
+        log?.error(`native ${runtime} has no registered binary`);
+        resolve({ code: 1, stdout: "", stderr: `no native binary registered for ${runtime}` });
+        return;
+      }
       const child = spawn(
         command,
         args,
@@ -82,10 +87,10 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
 }
 
 /**
- * Build the four real adapters on one shared `AdapterDeps`. `readSource` resolves
+ * Build the real adapters on one shared `AdapterDeps`. `readSource` resolves
  * the opaque event refs through the local path-pointer index (Task 10c) and reads
  * at most one bounded file — it never fabricates source and returns "" when no
- * pointer exists. `emit` is a no-op: none of the four adapters call `deps.emit`
+ * pointer exists. `emit` is a no-op: none of the adapters call `deps.emit`
  * during extract/inject (injection for claude-code goes through the global hook;
  * codex/opencode/hermes inject through their own plugin/bridge and return
  * `delivered:false` unverified).

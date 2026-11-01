@@ -1,6 +1,6 @@
 # Host registry Phase 0 — completion review
 
-Worktree: `/Users/jiangxin/projects/37soul-mcp/.worktrees/host-registry`  
+Worktree: `.worktrees/host-registry` (merged into `main` as `2b0ed77`; removed)  
 Branch: `refactor/host-registry`  
 Behavior baseline: `d8ae477` (the parent of the initial test commit).
 

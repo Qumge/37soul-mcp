@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript ESM, node:test.
 
-**Spec:** `/Users/jiangxin/projects/37soul/docs/superpowers/specs/2026-11-01-multi-host-agent-support-design.md` §5.1 and the user's Phase 0 task.
+**Spec:** 37soul 仓库 `docs/superpowers/specs/2026-11-01-multi-host-agent-support-design.md` §5.1 and the user's Phase 0 task.
 
 ## Constraints
 
