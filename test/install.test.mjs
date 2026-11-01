@@ -27,6 +27,7 @@ import { installRuntime, runtimeDir, runtimeLauncher, binLinkPath, linkBin } fro
 import { loadConfig, saveConfig } from "../dist/agentd/state.js";
 import { openStore } from "../dist/local/store.js";
 import { runDoctor } from "../dist/doctor.js";
+import { main } from "../dist/cli.js";
 import { codexHookConfigPath } from "../dist/adapters/codex.js";
 import { PI_EXTENSION_SOURCE, piExtensionPath } from "../dist/adapters/pi.js";
 import {
@@ -510,6 +511,66 @@ test("doctor: checks that the runtime launcher, node and service paths still exi
   assert.equal(byName(broken)["runtime: launcher"].ok, false);
   assert.equal(byName(broken)["runtime: launcher"].detail.includes("37soul install"), true);
   assert.equal(broken.ok, false, "a broken runtime must fail doctor loudly");
+  h.cleanup();
+});
+
+test("doctor: anonymous install gets the binding hint in the requested language", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+
+  const zh = await runDoctor({ ...h.deps, lang: "zh" });
+  assert.equal(zh.notes.length, 1, "anonymous install gets exactly one note");
+  assert.match(zh.notes[0], /37soul login/);
+  assert.match(zh.notes[0], /登录/);
+
+  const ja = await runDoctor({ ...h.deps, lang: "ja" });
+  assert.match(ja.notes[0], /ログイン/);
+  h.cleanup();
+});
+
+test("doctor: a scoped login silences the binding hint", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+  const root = dataRoot(h.home);
+  const config = await loadConfig(root);
+  config.credentials = [{
+    token: "token-1",
+    owner_id: "owner-1",
+    cloud_device_uid: "cdu-1",
+    runtime_kind: "claude-code",
+    profile_id: "default",
+    obtained_at: "x",
+  }];
+  await saveConfig(root, config);
+
+  const report = await runDoctor({ ...h.deps, lang: "zh" });
+  assert.deepEqual(report.notes, [], "a logged-in install must not be nagged to log in");
+  h.cleanup();
+});
+
+test("cli: doctor prints the binding hint in the detected language", async () => {
+  const h = harness();
+  await install(h.deps, { agents: ["claude-code"] });
+  const out = { stdout: "", stderr: "" };
+  const io = {
+    stdout: (text) => { out.stdout += text; },
+    stderr: (text) => { out.stderr += text; },
+    stdin: async () => "",
+  };
+  const previousHome = process.env.SOUL37_HOME;
+  const previousLang = process.env.SOUL37_LANG;
+  process.env.SOUL37_HOME = h.home;
+  process.env.SOUL37_LANG = "zh_CN.UTF-8";
+  try {
+    await main(["doctor"], io);
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    if (previousLang === undefined) delete process.env.SOUL37_LANG;
+    else process.env.SOUL37_LANG = previousLang;
+  }
+  assert.match(out.stdout, /提示/);
+  assert.match(out.stdout, /37soul login/);
   h.cleanup();
 });
 

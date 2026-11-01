@@ -22,6 +22,7 @@ import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
 import { deviceLogin, install, planInstall, status as statusReport, uninstall, type InstallDeps } from "./install.js";
 import { runDoctor } from "./doctor.js";
+import { detectLang, messages } from "./i18n.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { openStore, profilesDir, snapshotPath } from "./local/store.js";
@@ -136,7 +137,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       }
       const doctor = await runDoctor(deps);
       for (const check of doctor.checks) io.stdout(`${formatCheck(check)}\n`);
-      io.stdout("\nLocal use is ready. Raw conversation stays local. To sync long-term Soul assets to 37Soul, run `37soul login`.\n");
+      io.stdout(`\n${messages(detectLang()).localReady}\n`);
       const summary = doctorSummary(doctor.checks);
       if (summary) io.stdout(summary);
       return doctor.ok ? 0 : 1;
@@ -146,6 +147,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       for (const check of doctor.checks) io.stdout(`${formatCheck(check)}\n`);
       const summary = doctorSummary(doctor.checks);
       if (summary) io.stdout(summary);
+      for (const note of doctor.notes) io.stdout(`\n${note}\n`);
       return doctor.ok ? 0 : 1;
     }
     case "status": {
