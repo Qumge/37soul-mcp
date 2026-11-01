@@ -13,8 +13,8 @@ import { createHash } from "node:crypto";
 // --- Fixed enums -----------------------------------------------------------------
 
 /** The four local install targets. Web/legacy appear only in Asset.source.runtime_kind. */
-export type RuntimeKind = "claude-code" | "codex" | "opencode" | "hermes" | "pi";
 export const RUNTIME_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"] as const;
+export type RuntimeKind = (typeof RUNTIME_KINDS)[number];
 
 /** Readonly runtime_kind values accepted on a cloud Asset.source. */
 export type AssetSourceRuntimeKind = RuntimeKind | "web" | "legacy";
