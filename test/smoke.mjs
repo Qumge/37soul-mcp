@@ -234,6 +234,9 @@ const serverEnv = {
   SOUL37_BASE_URL: `http://127.0.0.1:${port}/`,
   SOUL37_API_TIMEOUT_MS: "1000",
   SOUL37_OPERATION_STATE_PATH: statePath,
+  // Hermetic: without this the server reads the developer's real ~/.37soul and an
+  // assets-only account there blocks every legacy write tool (23 spurious failures).
+  SOUL37_HOME: stateDirectory,
 };
 
 const connectClient = async (name, extraEnv = {}) => {
