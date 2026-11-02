@@ -162,9 +162,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p service-evidence
-          extra=()
-          if [[ "$PUBLIC_RELEASE" == "true" ]]; then extra+=(--public-release); fi
-          node test/service/acceptance.mjs service-inputs/baseline/release service-inputs/candidate/release service-inputs/install.sh service-evidence "${extra[@]}" 2>&1 | tee service-evidence/harness.log
+          set --
+          if [[ "$PUBLIC_RELEASE" == "true" ]]; then set -- --public-release; fi
+          node test/service/acceptance.mjs service-inputs/baseline/release service-inputs/candidate/release service-inputs/install.sh service-evidence "$@" 2>&1 | tee service-evidence/harness.log
       - name: Record job result (absence of PASS is never acceptance)
         if: always()
         env:

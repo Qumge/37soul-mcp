@@ -76,3 +76,24 @@ test('public metadata rejects wrong version, archive digest and manifest drift',
   assert.throws(() => validateReleaseMetadata({ ...files, 'release-manifest.json': Buffer.from(JSON.stringify({ version: '0.13.4', sha256, protocol: 'soul-assets/v1' })) }, '0.14.0'));
   assert.throws(() => validateReleaseMetadata({ ...files, 'release-manifest.json': Buffer.from(JSON.stringify({ version: '0.14.0', sha256: '0'.repeat(64), protocol: 'soul-assets/v1' })) }, '0.14.0'));
 });
+
+test('actual native workflow shell passes optional public flag under system Bash nounset', async t => {
+  const { mkdtemp, mkdir, writeFile, readFile, chmod, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const workflow = await readFile(new URL('../../.github/workflows/release-runtime.yml', import.meta.url), 'utf8');
+  const section = workflow.slice(workflow.indexOf('        id: acceptance\n'));
+  const body = section.match(/        run: \|\n((?:          .*\n)+)/)[1].split('\n').map(line => line.slice(10)).join('\n');
+  const dir = await mkdtemp(path.join(tmpdir(), '37soul-workflow-shell-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, 'bin'); await mkdir(bin);
+  // Argument recorder only: never execute the native harness or any service.
+  const recorder = path.join(bin, 'node');
+  await writeFile(recorder, '#!/bin/sh\nprintf "%s\\n" "$@"\n'); await chmod(recorder, 0o700);
+  for (const mode of ['false', 'true']) {
+    const result = spawnSync('/bin/bash', ['-c', body], { cwd: dir, env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, PUBLIC_RELEASE: mode }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), ['test/service/acceptance.mjs', 'service-inputs/baseline/release', 'service-inputs/candidate/release', 'service-inputs/install.sh', 'service-evidence', ...(mode === 'true' ? ['--public-release'] : [])]);
+  }
+});
