@@ -90,6 +90,7 @@ async function main() {
   const [baseline, candidate, installer, evidence = 'service-evidence'] = process.argv.slice(2).map(p => path.resolve(p));
   assert.ok(baseline && candidate && installer, 'usage: acceptance.mjs BASE_RELEASE CANDIDATE_RELEASE INSTALL_SH EVIDENCE');
   await mkdir(evidence, { recursive: true });
+  if (mac) await writeFile(path.join(evidence, '00-clean-disabled.txt'), run('launchctl', ['print-disabled', `gui/${uid}`]));
   const versions = await Promise.all([baseline, candidate].map(async dir => (await readFile(path.join(dir, 'VERSION'), 'utf8')).trim()));
   assert.notEqual(versions[0], versions[1], 'upgrade must cross versions');
   const server = createServer(async (req, res) => {
@@ -138,6 +139,7 @@ async function main() {
       return currentPid;
     });
     await writeFile(path.join(evidence, `${stage}-service.txt`), inspect());
+    if (mac) await writeFile(path.join(evidence, `${stage}-disabled.txt`), run('launchctl', ['print-disabled', `gui/${uid}`]));
     try { await writeFile(path.join(evidence, `${stage}-agentd.log`), await readFile(path.join(root, 'agentd.log'))); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     records.push({ stage, version, pid: current, entrypoint: path.join(runtime, 'dist/cli.js') });
     console.log(JSON.stringify(records.at(-1)));
@@ -146,8 +148,9 @@ async function main() {
   let retained;
   const preserve = async () => { for (const [file, bytes] of retained) assert.deepEqual(await readFile(path.join(root, file)), bytes, `${file} preserved`); };
   try {
-    await install('candidate', '01-fresh');
-    let previous = await check(versions[1], '01-fresh');
+    // The old release must start on a clean OS, never after candidate uninstall.
+    await install('baseline', '01-baseline-clean');
+    let previous = await check(versions[0], '01-baseline-clean');
     // Snapshot actual profile files as well as archive/queue sentinels.
     const { readdir } = await import('node:fs/promises');
     retained = [];
@@ -165,32 +168,37 @@ async function main() {
       const bytes = Buffer.from('synthetic acceptance user data\n');
       await writeFile(path.join(root, dir, 'acceptance.txt'), bytes); retained.push([`${dir}/acceptance.txt`, bytes]);
     }
-    await install('candidate', '02-repeat');
-    previous = await check(versions[1], '02-repeat', previous); await preserve();
-    await writeFile(path.join(evidence, '02c-uninstall.log'), run(cli, ['uninstall']));
-    await eventually(async () => { assert.throws(() => process.kill(previous, 0)); });
-    await preserve();
-    await install('baseline', '02b-baseline');
-    previous = await check(versions[0], '02b-baseline'); await preserve();
-    await install('candidate', '03-upgrade');
-    previous = await check(versions[1], '03-upgrade', previous); await preserve();
+    await install('candidate', '02-upgrade');
+    previous = await check(versions[1], '02-upgrade', previous); await preserve();
+    await install('candidate', '03-repeat');
+    previous = await check(versions[1], '03-repeat', previous); await preserve();
     if (mac) run('launchctl', ['kickstart', '-k', target]);
     else run('systemctl', ['--user', 'restart', unit]);
     previous = await check(versions[1], '04-restart', previous); await preserve();
-    await writeFile(path.join(evidence, '05-uninstall.log'), run(cli, ['uninstall']));
-    await eventually(async () => {
-      assert.throws(() => process.kill(previous, 0));
-      if (mac) assert.throws(inspect);
-      else {
-        assert.equal(Number(inspect().match(/^MainPID=(\d+)$/m)?.[1] ?? 0), 0);
-        let enabled;
-        try { enabled = run('systemctl', ['--user', 'is-enabled', unit]).trim(); } catch (e) { enabled = String(e.stdout).trim(); }
-        assert.notEqual(enabled, 'enabled');
-      }
-    });
-    await preserve();
-    for (const file of [cli, serviceFile, path.join(root, 'runtime'), path.join(root, 'ipc/writer.sock')]) assert.ok(await absent(file), `${file} removed`);
-    records.push({ stage: '05-uninstall', preservedFiles: retained.map(([file]) => file) });
+    const uninstall = async stage => {
+      await writeFile(path.join(evidence, `${stage}.log`), run(cli, ['uninstall']));
+      await eventually(async () => {
+        assert.throws(() => process.kill(previous, 0));
+        if (mac) assert.throws(inspect);
+        else {
+          assert.equal(Number(inspect().match(/^MainPID=(\d+)$/m)?.[1] ?? 0), 0);
+          let enabled;
+          try { enabled = run('systemctl', ['--user', 'is-enabled', unit]).trim(); } catch (e) { enabled = String(e.stdout).trim(); }
+          assert.notEqual(enabled, 'enabled');
+        }
+      });
+      if (mac) await writeFile(path.join(evidence, `${stage}-disabled.txt`), run('launchctl', ['print-disabled', `gui/${uid}`]));
+      await preserve();
+      for (const file of [cli, serviceFile, path.join(root, 'runtime'), path.join(root, 'ipc/writer.sock')]) assert.ok(await absent(file), `${file} removed`);
+      records.push({ stage, preservedFiles: retained.map(([file]) => file) });
+      console.log(JSON.stringify({ stage, dataPreserved: true, serviceRemoved: true }));
+    };
+    await uninstall('05-uninstall');
+    // Do not enable/reset launchd here: the default candidate installer must
+    // recover any persistent disabled override left by its own uninstall.
+    await install('candidate', '06-reinstall');
+    previous = await check(versions[1], '06-reinstall', previous); await preserve();
+    await uninstall('07-final-uninstall');
     await writeFile(path.join(evidence, 'PASS.json'), JSON.stringify({ platform: process.platform, candidateTarballSha256: createHash('sha256').update(await readFile(path.join(candidate, '37soul-runtime.tgz'))).digest('hex'), records }, null, 2));
     console.log('PASS: native service lifecycle; candidate tarball recorded in PASS.json');
     owned = false;

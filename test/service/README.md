@@ -55,13 +55,22 @@ with 500ms backoff (IPC timeout 1.5s), and each OS job is capped at 15 minutes.
 
 Coverage:
 
-1. Candidate fresh default **no-argument** HTTP installer and checksum download.
-2. Candidate repeated default install replaces the running PID.
-3. Uninstall retaining actual anonymous profile files and synthetic spool/queue data.
-4. Baseline default install followed by candidate default upgrade; old PID exits.
-5. Real manager restart, new PID, healthy writer, data unchanged.
-6. Final uninstall: service disabled/unregistered, PID gone, launcher/runtime/socket
+1. Baseline default **no-argument** HTTP installer on the clean OS, with checksum download.
+2. Candidate default upgrade; baseline PID exits and candidate release bytes run.
+3. Candidate repeated default install replaces the running PID.
+4. Real manager restart, new PID, healthy writer, data unchanged.
+5. Candidate uninstall: service disabled/unregistered, PID gone, launcher/runtime/socket
    removed, profiles and archives retained byte for byte.
+6. Candidate default reinstall on the retained user data, with new healthy PID and
+   exact candidate bytes; no harness `enable` or disabled-state reset is allowed.
+7. Final uninstall repeats all service removal and data preservation checks.
+
+macOS artifacts record `launchctl print-disabled` on the clean OS and after each
+health/uninstall stage. The old release is never installed after candidate uninstall:
+this avoids contaminating the old-version setup with the candidate's disabled
+state. Candidate reinstall must recover that state through its own installer.
+The earlier run `41399296693` remains evidence of the old ordering's failed
+`02b-baseline` stage; it is not ignored or reclassified as PASS.
 
 Every health stage correlates the manager's PID with a real IPC `health` response,
 requires `agentd: true`, verifies its exact installed bundle path and package
@@ -76,7 +85,10 @@ runner data only; profile snapshots and archive contents are never uploaded.
 Only a completely successful run writes `PASS.json`; observations alone are not PASS.
 Failure cleanup attempts the installed CLI's uninstall; the VM is discarded regardless.
 
-Limits: manager restart is tested, **not VM reboot/login persistence**. This does
+Limits: this order tests a clean baseline, real candidate upgrade and candidate
+reinstall with retained data; it does not separately test candidate first install
+on a VM that has never had the baseline. Manager restart is tested, **not VM
+reboot/login persistence**. This does
 not test host hooks/model extraction, authenticated cloud sync, revoked credentials,
 or public GitHub Release/CDN delivery. The HTTP server serves local packed release
 bytes; parent must separately verify the published `curl` path after publication.
