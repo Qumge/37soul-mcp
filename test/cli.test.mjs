@@ -6,9 +6,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { AVATAR_PNG, writeAvatar } from "./helpers/avatar.mjs";
 
 import { main, agentdExtractAdapters } from "../dist/cli.js";
 import { openStore } from "../dist/local/store.js";
@@ -165,7 +167,7 @@ test("cli: agentdExtractAdapters gates the runtime adapters on assets mode", () 
 
 // R2: local creation is not cloud authorization; the real CLI entry must produce
 // a legal register operation only after an explicit Soul/category choice.
-test("profile: local create requires name/sex/age and a 50-character character", async () => {
+test("profile: local create requires complete fields and a managed real photo", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
   await seed(root, "p1", "dev-1");
@@ -176,33 +178,39 @@ test("profile: local create requires name/sex/age and a 50-character character",
     assert.equal(await main(["soul", "create", "--profile", "p1"], missing.io), 2);
     assert.match(missing.out.stderr, /name.*sex.*age.*character/);
     const young = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "15", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证年龄两端。"] , young.io), 2);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", "--sex", "female", "--age", "15", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证年龄两端。"] , young.io), 2);
     assert.match(young.out.stderr, /age/);
     const short = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "short"], short.io), 2);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "short"], short.io), 2);
     assert.match(short.out.stderr, /character/);
     const repetitive = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "啊".repeat(60)], repetitive.io), 2);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", "--sex", "female", "--age", "24", "--character", "啊".repeat(60)], repetitive.io), 2);
     assert.match(repetitive.out.stderr, /character/);
     const decimal = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "female", "--age", "26.9", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证小数年龄会被拒绝。"] , decimal.io), 2);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", "--sex", "female", "--age", "26.9", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证小数年龄会被拒绝。"] , decimal.io), 2);
     assert.match(decimal.out.stderr, /age/);
     const badSex = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", "--sex", "robot", "--age", "24", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证非法性别会被拒绝。"] , badSex.io), 2);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", "--sex", "robot", "--age", "24", "--character", "这是一个足够长的人设描述，包含性格、表达方式和长期边界，用于验证非法性别会被拒绝。"] , badSex.io), 2);
     assert.match(badSex.out.stderr, /sex/);
 
     const created = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], created.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", ...PROFILE_ARGS], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     let store = await openStore(root, "p1");
     let soul = (await store.read()).souls[uid];
     await store.close();
-    assert.match(soul.avatar_url, new RegExp(`seed=soul-${uid}`));
+    const managedAvatar = path.join(realpathSync(root), "profiles", "p1", "avatars", createHash("sha256").update(AVATAR_PNG).digest("hex") + ".png");
+    assert.equal(realpathSync(soul.local_avatar_path), managedAvatar);
+    assert.equal(soul.avatar_url, undefined, "new local Souls have no default cloud avatar");
+    rmSync(path.join(home, "synthetic-avatar.png"));
+    assert.deepEqual(readFileSync(managedAvatar), AVATAR_PNG, "managed photo survives deletion of the original");
     assert.equal(soul.publish_profile, true);
-    const avatarBefore = soul.avatar_url;
+    const avatarBefore = soul.local_avatar_path;
     assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--name", "Renamed"], makeIo().io), 0);
     store = await openStore(root, "p1"); soul = (await store.read()).souls[uid]; await store.close();
-    assert.equal(soul.avatar_url, avatarBefore, "default avatar seed follows soul UID, not nickname");
+    assert.equal(soul.local_avatar_path, avatarBefore, "renaming does not change the managed photo");
+    assert.deepEqual(readFileSync(soul.local_avatar_path), AVATAR_PNG);
+    assert.equal(soul.avatar_url, undefined);
   } finally {
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
     else process.env.SOUL37_HOME = previousHome;
@@ -215,7 +223,7 @@ test("profile: --avatar stays local and authorize carries the public intent", as
   const root = path.join(home, ".37soul");
   await seed(root, "p1", "dev-1");
   const avatar = path.join(home, "avatar.png");
-  writeFileSync(avatar, Buffer.from("not-a-real-png"));
+  writeAvatar(home, "avatar.png");
   const previousHome = process.env.SOUL37_HOME;
   process.env.SOUL37_HOME = home;
   try {
@@ -223,7 +231,8 @@ test("profile: --avatar stays local and authorize carries the public intent", as
     assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS, "--avatar", avatar], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     let store = await openStore(root, "p1"); let snap = await store.read(); await store.close();
-    assert.equal(snap.souls[uid].local_avatar_path, avatar);
+    assert.notEqual(snap.souls[uid].local_avatar_path, avatar);
+    assert.deepEqual(readFileSync(snap.souls[uid].local_avatar_path), AVATAR_PNG);
     assert.equal(Object.keys(snap.outbox).length, 0, "anonymous create performs no upload");
     assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
     store = await openStore(root, "p1"); snap = await store.read(); await store.close();
@@ -231,6 +240,10 @@ test("profile: --avatar stays local and authorize carries the public intent", as
     assert.equal(op.request.publish_profile, true);
     assert.equal(op.request.identity.sex, "female");
     assert.equal(op.request.identity.age, 24);
+    assert.deepEqual(op.request.avatar, { filename: "avatar.png", content_type: "image/png", data_base64: AVATAR_PNG.toString("base64") });
+    rmSync(avatar);
+    rmSync(snap.souls[uid].local_avatar_path);
+    assert.deepEqual((await readSnap(root)).outbox[op.operation_id].request.avatar, op.request.avatar, "registration bytes are frozen rather than re-read from a mutable file");
   } finally {
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
     else process.env.SOUL37_HOME = previousHome;
@@ -261,6 +274,11 @@ test("profile: an old local Soul cannot publish until its missing fields are fil
     assert.equal(Object.keys(snap.outbox).length, 0, "refused authorization must not enqueue a public registration");
 
     assert.equal(await main(["soul", "edit", legacyUid, "--profile", "p1", "--name", "Legacy", "--sex", "female", "--age", "30", "--character", "补齐后的完整人设，包含稳定的性格、说话方式、兴趣背景和长期相处边界，并沿用原来的本地 UUID，不影响其他 Soul。"], refused.io), 0);
+    const noPhoto = makeIo();
+    assert.equal(await main(["soul", "authorize", legacyUid, "--profile", "p1", "--categories", "identity,relationship"], noPhoto.io), 1);
+    assert.match(noPhoto.out.stderr, /photo|avatar/i);
+    assert.equal(Object.keys((await readSnap(root)).outbox).length, 0, "complete fields alone cannot publish without a photo");
+    assert.equal(await main(["soul", "edit", legacyUid, "--profile", "p1", "--avatar", writeAvatar(home)], makeIo().io), 0);
     assert.equal(await main(["soul", "authorize", legacyUid, "--profile", "p1", "--categories", "identity,relationship"], refused.io), 0);
     store = await openStore(root, "p1"); snap = await store.read(); await store.close();
     const op = Object.values(snap.outbox).find((entry) => entry.operation_kind === "register_soul");
@@ -294,6 +312,7 @@ test("profile: an already queued legacy register body is never mutated", async (
   const previousHome = process.env.SOUL37_HOME;
   process.env.SOUL37_HOME = home;
   try {
+    assert.equal(await main(["soul", "edit", uid, "--profile", "p1", "--avatar", writeAvatar(home)], makeIo().io), 0);
     assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity"], makeIo().io), 0);
     const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
     assert.equal(snap.outbox["legacy-register"], undefined, "the old operation is removed from the active outbox");
@@ -307,12 +326,12 @@ test("profile: an already queued legacy register body is never mutated", async (
   }
 });
 
-test("profile: --avatar relative paths are frozen absolute at command time", async () => {
+test("profile: --avatar relative paths become an absolute managed copy", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
   const work = path.join(home, "work");
   mkdirSync(work, { recursive: true });
-  writeFileSync(path.join(work, "avatar.png"), Buffer.from("relative-bytes"));
+  writeAvatar(work, "avatar.png");
   const previousHome = process.env.SOUL37_HOME;
   const previousCwd = process.cwd();
   process.env.SOUL37_HOME = home;
@@ -323,7 +342,10 @@ test("profile: --avatar relative paths are frozen absolute at command time", asy
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     process.chdir(previousCwd);
     const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
-    assert.equal(snap.souls[uid].local_avatar_path, path.join(realpathSync(work), "avatar.png"));
+    assert.ok(path.isAbsolute(snap.souls[uid].local_avatar_path));
+    assert.equal(realpathSync(path.dirname(snap.souls[uid].local_avatar_path)), path.join(realpathSync(root), "profiles", "p1", "avatars"));
+    rmSync(path.join(work, "avatar.png"));
+    assert.deepEqual(readFileSync(snap.souls[uid].local_avatar_path), AVATAR_PNG);
   } finally {
     process.chdir(previousCwd);
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
@@ -404,11 +426,11 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
   }
 });
 
-test("profile: create --avatar uploads after explicit registration on the sync path", async () => {
+test("profile: create --avatar registers the exact photo atomically without a redundant PUT", async () => {
   const home = tempDir();
   const root = path.join(home, ".37soul");
   const avatar = path.join(home, "chosen.png");
-  writeFileSync(avatar, Buffer.from("LOCAL-AVATAR-BYTES"));
+  writeAvatar(home, "chosen.png");
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
     d.cloud_issuer = "https://fake.test";
@@ -431,18 +453,15 @@ test("profile: create --avatar uploads after explicit registration on the sync p
     const body = typeof init.body === "string" ? JSON.parse(init.body) : null;
     calls.push(`${init.method ?? "GET"} ${pathname}`);
     if (init.method === "GET" && pathname.endsWith("/capabilities")) {
-      return reply(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+      return reply(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1", "soul_registration_photo"] });
     }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
+      assert.deepEqual(body.avatar, { filename: "avatar.png", content_type: "image/png", data_base64: AVATAR_PNG.toString("base64") }, "registration saves the exact chosen photo with the profile");
       return reply(201, {
         protocol: "soul-assets/v1",
-        soul: { soul_uid: body.soul_uid, legacy_host_id: 99, identity_revision: 1, identity: body.identity, public: true, avatar_url: "https://cdn.example/default.webp", state: "active" },
+        soul: { soul_uid: body.soul_uid, legacy_host_id: 99, identity_revision: 1, identity: body.identity, public: true, avatar_url: "https://cdn.example/chosen.webp", state: "active" },
         consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
       });
-    }
-    if (init.method === "PUT" && pathname.endsWith("/avatar")) {
-      calls.push("AVATAR_BODY:" + (typeof init.body?.get === "function" ? init.body.get("file")?.name : "not-formdata"));
-      return reply(200, { protocol: "soul-assets/v1", avatar_url: "https://cdn.example/chosen.webp" });
     }
     if (init.method === "GET" && pathname.endsWith("/pull")) return reply(200, { protocol: "soul-assets/v1", events: [], next_cursor: "0", has_more: false });
     return reply(500, { error: { code: "unexpected" } });
@@ -452,14 +471,17 @@ test("profile: create --avatar uploads after explicit registration on the sync p
     assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Avatar Sync", "--sex", "female", "--age", "24", "--character", "这是创建时选择头像并写入同步主链的完整人设，包含性格、表达方式、兴趣背景和长期边界，长度明确超过五十个字符的要求。", "--avatar", avatar], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid);
+    assert.equal(calls.length, 0, "local creation performs no cloud calls");
+    rmSync(avatar);
     assert.equal(await main(["soul", "authorize", uid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
+    assert.equal(calls.length, 0, "authorization freezes bytes locally without making a cloud request");
     const sync = makeIo();
     assert.equal(await main(["sync", "--profile", "p1"], sync.io), 0, sync.out.stderr);
     const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
     assert.equal(snap.souls[uid].avatar_uploaded, true);
     assert.equal(snap.souls[uid].avatar_url, "https://cdn.example/chosen.webp");
-    assert.ok(calls.some((call) => call.startsWith("PUT /api/v1/me/soul_sync/souls/") && call.endsWith("/avatar")), "sync must upload the chosen image after registration");
-    assert.ok(calls.includes("AVATAR_BODY:chosen.png"), "the multipart body carries the image bytes, not the local path");
+    assert.equal(calls.filter((call) => call === "POST /api/v1/me/soul_sync/souls").length, 1, "profile and photo are registered in one POST");
+    assert.ok(!calls.some((call) => call.startsWith("PUT ") && call.endsWith("/avatar")), "the saved registration photo must not be uploaded again");
   } finally {
     globalThis.fetch = previousFetch;
     if (previousHome === undefined) delete process.env.SOUL37_HOME;
@@ -511,7 +533,7 @@ test("profile: a slow manual avatar ACK cannot overwrite a concurrent CLI create
     const avatarRun = main(["soul", "avatar", oldUid, "--profile", "p1", "--file", file], makeIo().io);
     await entered;
     const create = makeIo();
-    const createRun = main(["soul", "create", "--profile", "p1", "--name", "Concurrent", "--sex", "male", "--age", "25", "--character", "并发创建的新 Soul，包含稳定的性格、表达方式、兴趣背景、说话习惯和长期边界，长度明确超过五十个字符。"], create.io);
+    const createRun = main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "Concurrent", "--sex", "male", "--age", "25", "--character", "并发创建的新 Soul，包含稳定的性格、表达方式、兴趣背景、说话习惯和长期边界，长度明确超过五十个字符。"], create.io);
     releaseUpload();
     assert.equal(await avatarRun, 0);
     assert.equal(await createRun, 0, create.out.stderr);
@@ -571,7 +593,7 @@ test("R2: soul create stays local and soul authorize enqueues explicit consent",
   process.env.SOUL37_HOME = home;
   try {
     const created = makeIo();
-    const code = await main(["soul", "create", "--profile", "p1", "--name", "Growth", ...PROFILE_ARGS], created.io);
+    const code = await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "Growth", ...PROFILE_ARGS], created.io);
     assert.equal(code, 0, created.out.stderr);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid, "the CLI printed the local Soul uid");
@@ -608,7 +630,7 @@ test("F3: local soul create -> edit -> injection uses the edited identity", asyn
   process.env.SOUL37_HOME = home;
   try {
     const created = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "Growth", "--sex", "female", "--age", "24", "--character", "ORIGINAL_CANARY 这是一个足够长的人设描述，包含性格、表达方式和长期相处边界，用于测试编辑后的注入版本。"], created.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "Growth", "--sex", "female", "--age", "24", "--character", "ORIGINAL_CANARY 这是一个足够长的人设描述，包含性格、表达方式和长期相处边界，用于测试编辑后的注入版本。"], created.io), 0);
     const uid = /created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1];
     assert.ok(uid);
     const edited = makeIo();
@@ -675,12 +697,13 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
     const pathname = new URL(String(url)).pathname;
     const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
     if (init.method === "GET" && pathname.endsWith("/capabilities")) {
-      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1", "soul_registration_photo"] });
     }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
+      assert.deepEqual(body.avatar, { filename: "avatar.png", content_type: "image/png", data_base64: AVATAR_PNG.toString("base64") }, "registration saves the exact chosen photo with the profile");
       return response(201, {
         protocol: "soul-assets/v1",
-        soul: { soul_uid: body.soul_uid, legacy_host_id: 88, identity_revision: 1, identity: body.identity, state: "active" },
+        soul: { soul_uid: body.soul_uid, legacy_host_id: 88, identity_revision: 1, identity: body.identity, avatar_url: "https://cdn.example/chosen.webp", state: "active" },
         consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
       });
     }
@@ -708,12 +731,12 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);
 
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity"], makeIo().io), 0);
 
@@ -790,14 +813,15 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
     const pathname = new URL(String(url)).pathname;
     calls.push(`${init.method ?? "GET"} ${pathname}`);
     if (init.method === "GET" && pathname.endsWith("/capabilities")) {
-      return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] }) };
+      return { status: 200, ok: true, headers: { get: () => null }, json: async () => ({ protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1", "soul_registration_photo"] }) };
     }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
       const body = JSON.parse(String(init.body));
+      assert.deepEqual(body.avatar, { filename: "avatar.png", content_type: "image/png", data_base64: AVATAR_PNG.toString("base64") }, "registration saves the exact chosen photo with the profile");
       return {
         status: 201, ok: true, headers: { get: () => null }, json: async () => ({
           protocol: "soul-assets/v1",
-          soul: { soul_uid: body.soul_uid, legacy_host_id: 77, identity_revision: 1, identity: body.identity, state: "active" },
+          soul: { soul_uid: body.soul_uid, legacy_host_id: 77, identity_revision: 1, identity: body.identity, avatar_url: "https://cdn.example/chosen.webp", state: "active" },
           consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
         }),
       };
@@ -817,11 +841,11 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-A", "--agent", "hermes"], makeIo().io), 0);
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     assert.equal(await main(["soul", "authorize", bUid, "--profile", "p1", "--categories", "identity,relationship"], makeIo().io), 0);
     assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-B", "--agent", "hermes"], makeIo().io), 0);
@@ -875,12 +899,13 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
     const pathname = new URL(String(url)).pathname;
     const body = typeof init.body === "string" ? JSON.parse(init.body) : {};
     if (init.method === "GET" && pathname.endsWith("/capabilities")) {
-      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1"] });
+      return response(200, { protocol: "soul-assets/v1", capabilities: ["soul_profile_public_v1", "soul_registration_photo"] });
     }
     if (init.method === "POST" && pathname.endsWith("/souls")) {
+      assert.deepEqual(body.avatar, { filename: "avatar.png", content_type: "image/png", data_base64: AVATAR_PNG.toString("base64") }, "registration saves the exact chosen photo with the profile");
       return response(201, {
         protocol: "soul-assets/v1",
-        soul: { soul_uid: body.soul_uid, legacy_host_id: 91, identity_revision: 1, identity: body.identity, state: "active" },
+        soul: { soul_uid: body.soul_uid, legacy_host_id: 91, identity_revision: 1, identity: body.identity, avatar_url: "https://cdn.example/chosen.webp", state: "active" },
         consent: { cloud_device_uid: "cdu-1", soul_uid: body.soul_uid, revision: 1, categories: body.consent_categories, enabled: true },
       });
     }
@@ -906,12 +931,12 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
 
   try {
     const a = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "A", ...PROFILE_ARGS], a.io), 0);
     const aUid = /created soul ([0-9a-f-]{36})/.exec(a.out.stdout)?.[1];
     assert.equal(await main(["bind", "--profile", "p1", "--soul", aUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);
 
     const b = makeIo();
-    assert.equal(await main(["soul", "create", "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
+    assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", "B", ...PROFILE_ARGS], b.io), 0);
     const bUid = /created soul ([0-9a-f-]{36})/.exec(b.out.stdout)?.[1];
     // Both are unauthorized: the local switch is allowed and leaves A(base0)+B(base1).
     assert.equal(await main(["bind", "--profile", "p1", "--soul", bUid, "--session", "ns-shared", "--agent", "hermes"], makeIo().io), 0);

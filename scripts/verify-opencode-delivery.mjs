@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Real managed OpenCode flow, synthetic content only. No model calls on import.
 import { spawn } from 'node:child_process';
+import { writeAvatar } from '../test/helpers/avatar.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, cpSync, chmodSync } from 'node:fs';
 import path from 'node:path';
@@ -130,7 +131,7 @@ async function prepare(root){
   const daemon=spawn(s.launcher,['agentd'],{env:daemonEnv,cwd:home+'/work',detached:true,stdio:'ignore'});daemon.unref();s.daemon_pid=daemon.pid;save(root,s);
   const {sendWriter}=await import('../dist/local/writer.js');
   await until(async()=>{try{return (await sendWriter(home+'/.37soul',{request_uid:randomUUID(),profile_id:PROFILE,command:'health',payload:{}})).ok;}catch{return false;}},15000);
-  const created=checked(await cli(s,['soul','create','--name','Native-OpenCode-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character','This synthetic acceptance character is concise, honest and careful with provenance. They remember durable preferences about delivery summaries and keep all unrelated data private. This is an independent test Soul.','--profile',PROFILE]),'soul_create_failed');
+  const created=checked(await cli(s,['soul','create','--avatar',writeAvatar(home),'--name','Native-OpenCode-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character','This synthetic acceptance character is concise, honest and careful with provenance. They remember durable preferences about delivery summaries and keep all unrelated data private. This is an independent test Soul.','--profile',PROFILE]),'soul_create_failed');
   const uid=/created soul ([a-f0-9-]{36})/i.exec(created.stdout)?.[1];if(!uid)throw new Error('soul_uid_missing');s.soul_uid=uid;save(root,s);
   checked(await cli(s,['soul','authorize',uid,'--categories','identity,relationship,experience','--profile',PROFILE]),'soul_authorize_failed');
   checked(await cli(s,['sync','--profile',PROFILE]),'registration_sync_failed');

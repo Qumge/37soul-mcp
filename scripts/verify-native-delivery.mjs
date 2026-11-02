@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Bounded native baseline/extraction probes. Never a default-install E2E claim.
 import { spawn } from 'node:child_process';
+import { writeAvatar } from '../test/helpers/avatar.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, cpSync } from 'node:fs';
 import os from 'node:os';
@@ -285,7 +286,7 @@ async function productLoop(host,root){
   let soul=Object.values(before.souls)[0];
   if(process.argv.includes('--new-soul')){
    const character=`This is a synthetic ${host} delivery acceptance character. They are concise, honest, careful with provenance, and remember explicit durable delivery-format preferences while keeping test content local except for authorized asset sync.`;
-   const created=await run(launcher,['soul','create','--name','Native-'+host+'-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character',character,'--profile',profile],env,home+'/work');
+   const created=await run(launcher,['soul','create','--avatar',writeAvatar(home),'--name','Native-'+host+'-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character',character,'--profile',profile],env,home+'/work');
    const uid=/created soul ([a-f0-9-]{36})/i.exec(created.stdout)?.[1];if(created.code!==0||!uid)throw new Error('new_soul_create_failed');
    const authorized=await run(launcher,['soul','authorize',uid,'--categories','identity,relationship,experience','--profile',profile],env,home+'/work');if(authorized.code!==0)throw new Error('new_soul_authorize_failed');
    const registered=await run(launcher,['sync','--profile',profile],env,home+'/work','',60000);if(registered.code!==0)throw new Error('new_soul_registration_failed');

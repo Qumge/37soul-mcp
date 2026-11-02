@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Dedicated Claude product acceptance; imports and --plan make no native/API calls.
 import { spawn } from 'node:child_process';
+import { writeAvatar } from '../test/helpers/avatar.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, cpSync, chmodSync, renameSync, realpathSync } from 'node:fs';
 import os from 'node:os';
@@ -125,7 +126,7 @@ async function acceptance(){
   progress('create-select-authorize-independent-soul');
   const oldSouls=new Set(Object.keys(snapshot().souls));
   const name='Claude Delivery '+randomUUID().slice(0,8);
-  await cli(['soul','create','--name',name,'--sex','female','--age','24','--character','A synthetic acceptance character dedicated to Claude delivery summaries, who records explicit format preferences, explains outcomes clearly, and respects private conversations.']);
+  await cli(['soul','create','--avatar',writeAvatar(home),'--name',name,'--sex','female','--age','24','--character','A synthetic acceptance character dedicated to Claude delivery summaries, who records explicit format preferences, explains outcomes clearly, and respects private conversations.']);
   const soul=Object.values(snapshot().souls).find(s=>!oldSouls.has(s.soul_uid));if(!soul)throw new Error('synthetic_soul_missing');report.soul_uid=soul.soul_uid;
   await cli(['soul','select',soul.soul_uid,'--agent','claude-code']);
   await cli(['soul','authorize',soul.soul_uid,'--categories','identity,relationship,experience']);await cli(['sync']);

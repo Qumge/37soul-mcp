@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Synthetic local acceptance only. Import is pure; live stages require explicit arguments.
 import {spawn} from 'node:child_process';
+import { writeAvatar } from '../test/helpers/avatar.mjs';
 import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync,writeFileSync,mkdirSync,existsSync,rmSync,chmodSync,appendFileSync} from 'node:fs';
 import path from 'node:path';
@@ -72,7 +73,7 @@ async function start(s){
  const daemon=spawn(s.launcher,['agentd'],{env:environment(s),cwd:s.home+'/work',detached:true,stdio:'ignore'});daemon.unref();s.daemon_pid=daemon.pid;save(s);
  const {sendWriter}=await import(BUILD+'/dist/local/writer.js');
  await until(async()=>{try{return (await sendWriter(s.home+'/.37soul',{request_uid:randomUUID(),profile_id:PROFILE,command:'health',payload:{}})).ok;}catch{return false;}},15000);
- const created=await cli(s,['soul','create','--name','Hermes-Final-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character','An independent synthetic acceptance assistant. Calm and concise, careful with evidence, remembers enduring delivery preferences. No real person or private data.']);
+ const created=await cli(s,['soul','create','--avatar',writeAvatar(s.home),'--name','Hermes-Final-'+randomUUID().slice(0,6),'--sex','other','--age','24','--character','An independent synthetic acceptance assistant. Calm and concise, careful with evidence, remembers enduring delivery preferences. No real person or private data.']);
  s.soul_uid=/created soul ([a-f0-9-]{36})/i.exec(created.stdout)?.[1];if(!s.soul_uid)throw Error('soul_create_failed');
  await cli(s,['soul','authorize',s.soul_uid,'--categories','identity,relationship,experience']);await cli(s,['sync']);await cli(s,['soul','select',s.soul_uid]);
  s.stage='prepared';s.old_ids=Object.keys(snap(s).assets);save(s);console.log(JSON.stringify({stage:s.stage,soul_uid:s.soul_uid,model_entries:0,service:false}));
