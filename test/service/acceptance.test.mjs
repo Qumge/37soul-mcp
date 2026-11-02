@@ -7,9 +7,9 @@ test('refuses service operations outside a hosted disposable runner', () => {
   requireHostedRunner({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' });
 });
 test('requires live daemon writer matching the system manager PID and installed entrypoint', () => {
-  const health = { ok: true, result: { writer_pid: 42, agentd: true, entrypoint: '/home/u/.37soul/runtime/0.14.0/dist/bundle/cli.js' } };
+  const health = { ok: true, result: { writer_pid: 42, agentd: true, entrypoint: '/home/u/.37soul/runtime/0.14.0/dist/cli.js' } };
   assert.equal(validateHealth(health, 42, '/home/u/.37soul/runtime/0.14.0'), 42);
-  for (const reply of [{ ...health, ok: false }, { ok: true, result: { ...health.result, agentd: false } }, { ok: true, result: { ...health.result, writer_pid: 41 } }, { ok: true, result: { ...health.result, entrypoint: '/tmp/cli.js' } }])
+  for (const reply of [{ ok: true, result: { ...health.result, entrypoint: '/home/u/.37soul/runtime/0.14.0/dist/bundle/cli.js' } }, { ...health, ok: false }, { ok: true, result: { ...health.result, agentd: false } }, { ok: true, result: { ...health.result, writer_pid: 41 } }, { ok: true, result: { ...health.result, entrypoint: '/tmp/cli.js' } }])
     assert.throws(() => validateHealth(reply, 42, '/home/u/.37soul/runtime/0.14.0'));
 });
 

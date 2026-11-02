@@ -24,7 +24,7 @@ export function validateHealth(reply, pid, runtime) {
   assert.equal(reply.result?.agentd, true);
   assert.ok(Number.isInteger(pid) && pid > 0);
   assert.equal(reply.result.writer_pid, pid);
-  assert.equal(reply.result.entrypoint, path.join(runtime, 'dist/bundle/cli.js'));
+  assert.equal(reply.result.entrypoint, path.join(runtime, 'dist/cli.js'));
   return pid;
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -125,7 +125,7 @@ async function main() {
       if (previous) { assert.notEqual(currentPid, previous); assert.throws(() => process.kill(previous, 0)); }
       assert.match(inspect(), new RegExp(runtime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.equal(JSON.parse(await readFile(path.join(runtime, 'package.json'))).version, version);
-      assert.equal(hash(await readFile(path.join(runtime, 'dist/bundle/cli.js'))), hash(expectedBundle), 'installed bytes match downloaded release');
+      assert.equal(hash(await readFile(path.join(runtime, 'dist/cli.js'))), hash(expectedBundle), 'installed bytes match downloaded release');
       await delay(1000);
       assert.equal(pid(), currentPid, 'service remains stable');
       validateHealth(await health(root), currentPid, runtime);
@@ -133,7 +133,7 @@ async function main() {
     });
     await writeFile(path.join(evidence, `${stage}-service.txt`), inspect());
     try { await writeFile(path.join(evidence, `${stage}-agentd.log`), await readFile(path.join(root, 'agentd.log'))); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    records.push({ stage, version, pid: current, entrypoint: path.join(runtime, 'dist/bundle/cli.js') });
+    records.push({ stage, version, pid: current, entrypoint: path.join(runtime, 'dist/cli.js') });
     console.log(JSON.stringify(records.at(-1)));
     return current;
   };
