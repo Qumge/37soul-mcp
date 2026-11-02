@@ -43,7 +43,7 @@ test('sanitized report hashes only the assistant result and never includes raw p
 });
 
 for(const canonicalPresent of [false,true])test(`budget gate wins against node-bin and existing canonical executable (canonical=${canonicalPresent})`,async()=>{
- const home=mkdtempSync('/private/tmp/37soul-claude-gate-test-');
+ const home=mkdtempSync(path.join(tmpdir(),'37soul-claude-gate-test-'));
  try{
   const fake=relative=>{const file=path.join(home,relative);mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,'#!/bin/sh\nexit 99\n');chmodSync(file,0o700);return file;};
   const node=fake('node-bin/node');fake('node-bin/claude');

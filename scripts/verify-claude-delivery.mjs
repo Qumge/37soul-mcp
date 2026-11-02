@@ -2,7 +2,7 @@
 // Dedicated Claude product acceptance; imports and --plan make no native/API calls.
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, cpSync, chmodSync, renameSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, appendFileSync, existsSync, rmSync, cpSync, chmodSync, renameSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,7 +21,9 @@ export function buildClaudeSessionPlan(stage){
   :'Give a short Claude delivery summary for a fictional project whose work is finished and has no blockers. Do not call tools.'};
 }
 export function installClaudeBudgetGate(home,real){
- if(!path.isAbsolute(home)||!home.startsWith('/private/tmp/37soul-claude-')||home===os.homedir())throw new Error('gate_home_not_isolated');
+ const allowedRoots=[os.tmpdir(),'/tmp'].flatMap(root=>{try{return [realpathSync(root)];}catch{return [];}});
+ let resolved;try{resolved=realpathSync(home);}catch{throw new Error('gate_home_not_isolated');}
+ if(!path.isAbsolute(home)||!allowedRoots.includes(path.dirname(resolved))||!path.basename(resolved).startsWith('37soul-claude-')||resolved===realpathSync(os.homedir()))throw new Error('gate_home_not_isolated');
  // Canonical HOME launcher must be the gate: the runtime resolves it before PATH.
  const gatePath=path.join(home,'.local/bin/claude'),script=fileURLToPath(import.meta.url);
  const q=s=>"'"+s.replace(/'/g,"'\\''")+"'";

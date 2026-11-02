@@ -45,3 +45,21 @@ test('OpenCode gate uses saved real binary under isolated HOME and rejects recur
  assert.throws(()=>runner.gateBinary({binary:'/isolated-home/.opencode/bin/opencode',home:'/isolated-home'}),/gate_binary_refused/);
  assert.throws(()=>runner.gateBinary({binary:'opencode',home:'/isolated-home'}),/gate_binary_refused/);
 });
+
+test('OpenCode live plans accept an explicitly verified existing provider without changing the default fixture',()=>{
+ const p=runner.managedPlan('synthetic prompt',{home:'/isolated-test-user',model:'deepseek/deepseek-flash'});
+ assert.equal(p.args[p.args.indexOf('--model')+1],'deepseek/deepseek-flash');
+ assert.throws(()=>runner.managedPlan('x',{model:'https://secret.example/key'}),/invalid_model/);
+ assert.equal(runner.managedPlan('x').args[5],'opencode/deepseek-v4.1-flash-free');
+});
+
+test('existing DeepSeek acceptance config references an environment credential without storing its value',()=>{
+ assert.equal(typeof runner.existingProviderConfig,'function');
+ const c=runner.existingProviderConfig('deepseek/deepseek-flash');
+ assert.equal(c.model,'deepseek/deepseek-flash');
+ assert.equal(c.provider.deepseek.options.apiKey,'{env:DEEPSEEK_API_KEY}');
+ assert.equal(c.provider.deepseek.options.baseURL,'https://api.deepseek.com/v1');
+ assert.equal(c.agent['delivery-acceptance'].steps,1);
+ assert.deepEqual(c.agent['delivery-acceptance'].permission,{'*':'deny'});
+ assert.throws(()=>runner.existingProviderConfig('unapproved/model'),/unapproved_provider/);
+});
