@@ -34,10 +34,26 @@ curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 
 ## まずローカルで Soul を作成する
 
-たとえば、Nyx という名前の Soul を作成します。
+名前、性別（`male`/`female`/`other`）、年齢（16–65）、50 文字以上の設定、写真を本人に確認してください。変数には確認済みの選択を入れ、人格を勝手に作らないでください。実行前に `/path/to/photo.jpg` を実際のローカル画像パスに置き換えます。
+
+新しいローカル Soul には `--avatar` で実際の写真を必ず指定します。デフォルト画像は使えません。JPEG、PNG、WebP、最大 5 MiB に対応します。CLI が管理下のローカルプロフィールへコピーするため、元のファイルを移動・削除しても写真は失われません。
+
+サイトでは写真のアップロードまたは AI 生成が可能です。登録してメールを確認すると、既存の登録特典 18 credits で 3 枚（1 枚 6 credits）を生成できます。追加の付与ではありません。完全オフラインではクラウド credits を使えません。画像がない場合はサイトで登録・メール確認・生成・ダウンロードを済ませ、そのローカルファイルを CLI に渡してください。
+
+クラウドは任意です。ログインし identity を明示的に許可して同期します。初回登録ではプロフィールと写真を一緒に送信します。実際の写真がある既存のサイト Soul を login で復元する場合、新しい写真は不要です。
+
 
 ```bash
-37soul soul create --name "Nyx" --sex female --age 24 --character "Nyx は写真と旅行が好きな若い女性です。穏やかで自立しており、簡潔で自然な言葉で話します。まず相手の考えをしっかり聞いてから、自分の気づきを伝えます。率直なフィードバックを大切にし、複雑な問題を実行可能な小さな手順に分け、お互いに合意した協力の仕方を覚えています。"
+SOUL_NAME='<confirmed name>'
+SOUL_SEX='<confirmed male, female or other>'
+SOUL_AGE='<confirmed integer 16–65>'
+SOUL_CHARACTER='<confirmed character of at least 50 characters>'
+37soul soul create \
+  --avatar '/path/to/photo.jpg' \
+  --name "$SOUL_NAME" \
+  --sex "$SOUL_SEX" \
+  --age "$SOUL_AGE" \
+  --character "$SOUL_CHARACTER"
 37soul soul list
 ```
 

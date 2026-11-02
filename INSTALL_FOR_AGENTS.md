@@ -38,14 +38,32 @@ If the command is not found, use `~/.local/bin/37soul` and add `~/.local/bin` to
 Local use does not require login or sync. Ask the human to confirm the required
 name, sex, age (16–65), and character (at least 50 characters). Sex must be `male`,
 `female` or `other`. Do not invent a persona or execute unfilled placeholders.
+Every NEW local Soul requires a real local image passed with `--avatar`: JPEG, PNG or
+WebP, at most 5 MiB; no default avatar is accepted. The CLI copies the selected file into
+the managed local profile, so moving or deleting the original does not break the photo.
+On the website, upload your own photo or generate an AI photo. Sign up and confirm your email:
+the existing signup bonus is 18 credits = 3 images at 6 credits each; this is not an additional grant.
+Fully offline creation cannot spend cloud credits. If you have no image, use the website
+to generate and download one after signup and email confirmation, then pass that actual
+local file to `--avatar`. Ask the human to confirm the image and all profile choices.
+Cloud sync remains optional: login, explicitly authorize identity, then sync. Initial
+registration sends the profile and photo together. Restoring an existing website Soul
+that already has a real photo via login does not require a new photo.
+
 Fill these values only with the human's confirmed choices:
 
 ```bash
+SOUL_AVATAR='/actual/local/path/to/chosen-photo.jpg'
 SOUL_NAME='<confirmed name>'
 SOUL_SEX='<confirmed male, female or other>'
 SOUL_AGE='<confirmed integer from 16 to 65>'
 SOUL_CHARACTER='<confirmed character of at least 50 characters>'
-37soul soul create --name "$SOUL_NAME" --sex "$SOUL_SEX" --age "$SOUL_AGE" --character "$SOUL_CHARACTER"
+37soul soul create \
+  --avatar "$SOUL_AVATAR" \
+  --name "$SOUL_NAME" \
+  --sex "$SOUL_SEX" \
+  --age "$SOUL_AGE" \
+  --character "$SOUL_CHARACTER"
 37soul soul list
 SOUL_UID='<actual Soul UID from the creation result>'
 37soul soul select "$SOUL_UID"
@@ -92,6 +110,7 @@ For a locally created Soul, only after the human agrees to publication and sync:
 
 Use the actual UID of the local Soul. During browser approval, do not select a different
 website Soul when the intent is to sync this local Soul.
+Identity authorization registers the profile and photo together.
 Authorization publishes the Soul's public character profile; private chats and personal
 memories stay private. `--categories` replaces the complete authorization set for this
 device and Soul, not an incremental addition. Confirm the full desired set with the

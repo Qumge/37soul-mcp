@@ -34,10 +34,26 @@ curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 
 ## 先在本机创建 Soul
 
-例如，创建一个名为 Nyx 的 Soul：
+请先让用户确认名字、性别（`male`/`female`/`other`）、年龄（16–65）、至少 50 字的人设和照片。变量必须填写用户确认的真实选择，不要编造人设；运行前把 `/path/to/photo.jpg` 换成实际本地文件路径：
+
+每个新建的本地 Soul 都必须通过 `--avatar` 提供实际照片，不接受默认头像。支持 JPEG、PNG、WebP，最大 5 MiB。CLI 会复制到托管本地档案，因此移动或删除原文件不会破坏照片。
+
+网站支持上传照片或生成 AI 照片。注册并确认邮箱后的既有奖励为 18 credits，可生成 3 张图片（每张 6 credits），不会额外发放奖励。完全离线不能消费云端 credits；没有图片时，先在网站注册、确认邮箱、生成并下载，再把实际本地文件传给 CLI。
+
+云端可选：登录、明确授权 identity 后再同步；首次登记将资料和照片一起上传。已有真实照片的网站 Soul 通过 login 恢复，无需新照片。
+
 
 ```bash
-37soul soul create --name "Nyx" --sex female --age 24 --character "Nyx 是一位喜欢摄影与旅行的年轻女性，性格温和而独立，说话简洁自然。她喜欢先听清对方的想法，再分享自己的观察。她重视真实的反馈，习惯把复杂问题拆成可以执行的小步骤，并记住彼此约定的协作方式。"
+SOUL_NAME='<confirmed name>'
+SOUL_SEX='<confirmed male, female or other>'
+SOUL_AGE='<confirmed integer 16–65>'
+SOUL_CHARACTER='<confirmed character of at least 50 characters>'
+37soul soul create \
+  --avatar '/path/to/photo.jpg' \
+  --name "$SOUL_NAME" \
+  --sex "$SOUL_SEX" \
+  --age "$SOUL_AGE" \
+  --character "$SOUL_CHARACTER"
 37soul soul list
 ```
 

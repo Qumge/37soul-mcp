@@ -34,10 +34,32 @@ If you did not select a character, logging in does not mean a Soul has been rest
 
 ## Create a Soul locally first
 
-For example, create a Soul named Nyx:
+Confirm the name, sex (`male`/`female`/`other`), age (16–65), character (at least 50 characters) and photo with the human. Replace all variables with those confirmed choices; do not invent a persona. Replace `/path/to/photo.jpg` with the actual local image path before running:
+
+Every NEW local Soul requires a real local image passed with `--avatar`: JPEG, PNG or
+WebP, at most 5 MiB; no default avatar is accepted. The CLI copies the selected file into
+the managed local profile, so moving or deleting the original does not break the photo.
+On the website, upload your own photo or generate an AI photo. Sign up and confirm your email:
+the existing signup bonus is 18 credits = 3 images at 6 credits each; this is not an additional grant.
+Fully offline creation cannot spend cloud credits. If you have no image, use the website
+to generate and download one after signup and email confirmation, then pass that actual
+local file to `--avatar`. Ask the human to confirm the image and all profile choices.
+Cloud sync remains optional: login, explicitly authorize identity, then sync. Initial
+registration sends the profile and photo together. Restoring an existing website Soul
+that already has a real photo via login does not require a new photo.
+
 
 ```bash
-37soul soul create --name "Nyx" --sex female --age 24 --character "Nyx is a young woman who enjoys photography and travel. She is gentle and independent, and speaks clearly and naturally. She listens carefully before sharing her observations. She values honest feedback, breaks complex problems into practical steps, and remembers the ways you have agreed to work together."
+SOUL_NAME='<confirmed name>'
+SOUL_SEX='<confirmed male, female or other>'
+SOUL_AGE='<confirmed integer 16–65>'
+SOUL_CHARACTER='<confirmed character of at least 50 characters>'
+37soul soul create \
+  --avatar '/path/to/photo.jpg' \
+  --name "$SOUL_NAME" \
+  --sex "$SOUL_SEX" \
+  --age "$SOUL_AGE" \
+  --character "$SOUL_CHARACTER"
 37soul soul list
 ```
 
