@@ -145,3 +145,400 @@ Runner tests: initial 3 RED then 3 GREEN; review follow-up exposed 3 RED (portab
 Official `opencode auth list --standalone` completed with exit 0; account labels and raw output were suppressed. Read-only credential metadata confirms one active OAuth integration (`opencode`) and no other authorized provider. The authenticated catalog lists other model IDs, but their presence does not establish quota or subscription entitlement. No alternative model request was made, no credits were purchased, and no new authorization was created.
 
 The external `provider_quota_exceeded` blocker remains. Evidence ends at one matching managed binding and two injected receipts, not model consumption, extraction, synced learned assets or fresh-session recall. Product PASS is not asserted. Cumulative invocation count remains 2/6. Independent runner pure tests were rerun: 5/5 passed, zero skipped; runner and test files remain frozen.
+
+## Authorized continuation: complete managed loop and website correction — PASS
+
+The following sanitized records replace the historical quota blocker. The existing DeepSeek provider authorization was used only in the isolated managed configuration. Four new entries (learn, extraction, corrected fresh session, extraction) brought the cumulative counter to six. The correction was saved through the actual website editor; the fresh human prompt contained no expected headings. Parent stopped the owned daemon and removed the temporary HOME; exact synthetic server-resource cleanup is recorded in the final Hermes report.
+
+```json
+{
+  "timestamp": "2026-11-02T06:02:00.206Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "prepared",
+  "pass": false,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 2,
+  "events": [],
+  "error_class": null,
+  "evidence": null,
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:02:37.433Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "learn_finished",
+  "pass": false,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 3,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    }
+  ],
+  "error_class": null,
+  "evidence": null,
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:03:09.806Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "extracted",
+  "pass": false,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 4,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    },
+    {
+      "stage": "observe",
+      "bindings": 1,
+      "receipts": 2,
+      "watermarks": [
+        {
+          "completed": true,
+          "attempts": 1,
+          "error": null,
+          "refs": 2
+        }
+      ]
+    }
+  ],
+  "error_class": null,
+  "evidence": null,
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:04:07.975Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "synced",
+  "pass": false,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 4,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    },
+    {
+      "stage": "observe",
+      "bindings": 1,
+      "receipts": 2,
+      "watermarks": [
+        {
+          "completed": true,
+          "attempts": 1,
+          "error": null,
+          "refs": 2
+        }
+      ]
+    },
+    {
+      "stage": "sync",
+      "asset_uid": "817aa846-ee8c-439b-b2b1-cf3f7c248138",
+      "cloud_revision": 1,
+      "sync_state": "synced"
+    }
+  ],
+  "error_class": null,
+  "evidence": null,
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:04:58.872Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "synced",
+  "pass": false,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 4,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    },
+    {
+      "stage": "observe",
+      "bindings": 1,
+      "receipts": 2,
+      "watermarks": [
+        {
+          "completed": true,
+          "attempts": 1,
+          "error": null,
+          "refs": 2
+        }
+      ]
+    },
+    {
+      "stage": "sync",
+      "asset_uid": "817aa846-ee8c-439b-b2b1-cf3f7c248138",
+      "cloud_revision": 1,
+      "sync_state": "synced"
+    },
+    {
+      "stage": "correction_pulled",
+      "asset_uid": "ceba65b5-db49-44ad-a930-0a9081d51c1b",
+      "old_asset_active": false
+    }
+  ],
+  "error_class": null,
+  "evidence": null,
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:05:15.074Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "recall_finished",
+  "pass": true,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 5,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    },
+    {
+      "stage": "observe",
+      "bindings": 1,
+      "receipts": 2,
+      "watermarks": [
+        {
+          "completed": true,
+          "attempts": 1,
+          "error": null,
+          "refs": 2
+        }
+      ]
+    },
+    {
+      "stage": "sync",
+      "asset_uid": "817aa846-ee8c-439b-b2b1-cf3f7c248138",
+      "cloud_revision": 1,
+      "sync_state": "synced"
+    },
+    {
+      "stage": "correction_pulled",
+      "asset_uid": "ceba65b5-db49-44ad-a930-0a9081d51c1b",
+      "old_asset_active": false
+    },
+    {
+      "stage": "recall",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1138,
+      "assistant_chars": 573,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "455aa653ef0bb11c9f3ca209eec5fd71d1cced61cb2222e5a90d2f636dc171a5"
+    }
+  ],
+  "error_class": null,
+  "evidence": {
+    "pass": true,
+    "injected": true,
+    "extracted": true,
+    "recalled": true,
+    "uploaded": true,
+    "answer_not_in_prompt": true,
+    "old_asset_excluded": true
+  },
+  "cleanup": false
+}
+```
+
+```json
+{
+  "timestamp": "2026-11-02T06:06:29.566Z",
+  "runtime_version": "0.14.0",
+  "opencode_version": "2.0.32",
+  "stage": "recall_finished",
+  "pass": true,
+  "managed_install": true,
+  "foreground_agentd": true,
+  "soul_uid": "30996532-0816-47bc-9137-04c300e437b6",
+  "service_installation": false,
+  "default_install_closed": false,
+  "model": "deepseek/deepseek-flash",
+  "attempts": 6,
+  "events": [
+    {
+      "stage": "learn",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1368,
+      "assistant_chars": 804,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "970b232ad66721d4eb1a6ce07fd466f9741e8095aa1b16b606f1a1b68e3403d4"
+    },
+    {
+      "stage": "observe",
+      "bindings": 1,
+      "receipts": 2,
+      "watermarks": [
+        {
+          "completed": true,
+          "attempts": 1,
+          "error": null,
+          "refs": 2
+        }
+      ]
+    },
+    {
+      "stage": "sync",
+      "asset_uid": "817aa846-ee8c-439b-b2b1-cf3f7c248138",
+      "cloud_revision": 1,
+      "sync_state": "synced"
+    },
+    {
+      "stage": "correction_pulled",
+      "asset_uid": "ceba65b5-db49-44ad-a930-0a9081d51c1b",
+      "old_asset_active": false
+    },
+    {
+      "stage": "recall",
+      "exit": 0,
+      "timeout": false,
+      "stdout_bytes": 1138,
+      "assistant_chars": 573,
+      "error_class": null,
+      "auth_error": false,
+      "model_error": false,
+      "plugin_error": false,
+      "permission_error": false,
+      "readiness_error": false,
+      "cli_error": false,
+      "answer_sha256": "455aa653ef0bb11c9f3ca209eec5fd71d1cced61cb2222e5a90d2f636dc171a5"
+    }
+  ],
+  "error_class": null,
+  "evidence": {
+    "pass": true,
+    "injected": true,
+    "extracted": true,
+    "recalled": true,
+    "uploaded": true,
+    "answer_not_in_prompt": true,
+    "old_asset_excluded": true
+  },
+  "cleanup": true
+}
+```
