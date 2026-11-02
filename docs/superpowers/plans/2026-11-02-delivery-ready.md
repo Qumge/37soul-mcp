@@ -27,24 +27,24 @@
 ### Task 1: Eliminate runtime legacy raw egress
 Files: src/cli.ts, src/agentd/daemon.ts, src/index.ts; focused test files test/raw-egress-retirement.test.mjs, test/agentd.test.mjs, test/assets-mode.test.mjs, test/smoke.mjs, plus new acceptance tests selected after reading their harness.
 Interfaces: agentd always receives no legacy tokens and no transcript fallback; local source-index/extraction remains functional; stdio tool list no longer advertises raw writeback.
-- [ ] Add failing probes: missing/damaged accounts metadata with populated legacy config must never send transcript/turn/facts/checkpoint bodies.
-- [ ] Run each probe RED and identify the real failure.
-- [ ] Remove raw-egress entry paths and deprecated stdio tools rather than adding mode fallbacks; preserve current hosted account actions.
-- [ ] Update old-protocol tests only to reflect explicitly retired behavior; retain equivalent coverage for current contract. Run focused tests then full npm test.
-- [ ] Independent diff review; record exact evidence and commit.
+- [x] Add failing probes: missing/damaged accounts metadata with populated legacy config must never send transcript/turn/facts/checkpoint bodies.
+- [x] Run each probe RED and identify the real failure.
+- [x] Remove raw-egress entry paths and deprecated stdio tools rather than adding mode fallbacks; preserve current hosted account actions.
+- [x] Update old-protocol tests only to reflect explicitly retired behavior; retain equivalent coverage for current contract. Run focused tests then full npm test.
+- [x] Independent diff review; record exact evidence and commit.
 
 ### Task 2: Issuer-bound credentials and account state
 Runtime files: src/agentd/credentials.ts, src/install.ts, src/sync/client.ts, src/agentd/state.ts and their focused tests. Website files chosen in separate website plan/worktree after source audit.
 Interfaces: selectCredentials must enforce normalized issuing endpoint equality; all consumers share this check.
-- [ ] RED: server A credential cannot be selected/sent to server B, including install endpoint switch; same issuer remains usable; malformed endpoint fails closed.
-- [ ] Bind issuer at login, preserve credentials on same-server reinstall, reject cross-server reuse with actionable login requirement.
-- [ ] RED then GREEN account ban authentication across PAT, MCP, soul sync and mobile using isolated website tests; do not redefine removed-account lifecycle silently.
-- [ ] Run focused checks and independent review; commit per repository.
+- [x] RED: server A credential cannot be selected/sent to server B, including install endpoint switch; same issuer remains usable; malformed endpoint fails closed.
+- [x] Bind issuer at login, preserve credentials on same-server reinstall, reject cross-server reuse with actionable login requirement.
+- [x] RED then GREEN account ban authentication across PAT, MCP, soul sync and mobile using isolated website tests; do not redefine removed-account lifecycle silently.
+- [x] Run focused checks and independent review; commit per repository.
 
 ### Task 3: Five native hosts
 Files: src/adapters/pi.ts, src/adapters/plugins/*, src/hosts/*, src/agentd/native-invoker.ts and focused adapter/native tests as evidenced by audit.
 Interfaces: extract returns validated ExtractionResult; bridge delivery is recorded only on actual supported delivery, capability probes reflect observed host versions.
-- [ ] Add failing Pi native extraction contract with current documented CLI; implement validated structured output and recursion guards.
+- [x] Add failing Pi native extraction contract with current documented CLI; implement validated structured output and recursion guards.
 - [ ] Pin one current tested host API per host; remove old-generation branches only with replacement coverage.
 - [ ] Run hook/context/extraction acceptance separately for all five hosts; complete receive/consume receipt semantics where host APIs allow.
 - [ ] Run native tests with synthetic context and isolated HOME, no user transcripts. Any paid or host trust actions require existing authorization or explicit consent.
@@ -53,13 +53,17 @@ Interfaces: extract returns validated ExtractionResult; bridge delivery is recor
 Files: new reproducible acceptance runner/test with server+native fixtures, docs/reviews evidence; website changes require coordinated plan if exposed.
 - [ ] Fresh local Soul -> native context -> synthetic stable preference -> extraction -> asset persistence -> authorized push.
 - [ ] Website correction -> pull -> fresh session observes corrected identity/asset for every supported host.
-- [ ] Revoke device -> subsequent session cannot use cached private assets; local-only unconsented assets stay local.
-- [ ] Preserve versions, artifact digest and privacy-negative observations; no skips count as release passes.
+- [x] Revoke device -> subsequent session cannot use cached private assets; local-only unconsented assets stay local.
+- [x] Preserve versions, artifact digest and privacy-negative observations; no skips count as release passes.
 
 ### Task 5: Public documentation and release gates
 Files: README.md, README.zh-CN.md, README.ja.md; release verification scripts/workflow tests only where actual omissions require changes.
 - [ ] Execute literal onboarding commands in isolated HOME from packed artifact, including copy/paste syntax and approval instructions.
 - [ ] Replace obsolete 383-test/historical caveats with user actions after capabilities actually pass; move internal evidence into docs/reviews.
 - [ ] Verify Node floor and tarball tests in appropriate CI; no environment skips substitute for support-floor checks.
-- [ ] Full npm test, packed executable and installer checksum/layout tests; independent final review.
-- [ ] Report implemented/committed/tested/real-host-verified/released status separately. Publish only under explicit release authorization for this change.
+- [x] Full npm test, packed executable and installer checksum/layout tests; independent final review.
+- [x] Report implemented/committed/tested/real-host-verified/released status separately. Publish only under explicit release authorization for this change.
+
+## Execution closeout — 2026-11-02
+
+Local implementation and regression are saved; final required-pack npm test575/575, website named specs407/407. Bounded real generation entry caps were respected (Claude5/Codex6/OpenCode2/Hermes6/Pi5). Four core native loops passed; Pi/Claude/Codex correction adoption passed. Remaining gates: OpenCode usable quota, Hermes correction under a new bounded budget, clean-OS default background install/upgrade and remote CI. Public README promotion and publication remain unperformed. See docs/reviews/2026-11-02-delivery-acceptance.md.
