@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { inspectPiExtension, piExtensionPath, removePiExtension, writePiExtension, createPiAdapter, latestPiCompletedTurnRefs } from "../adapters/pi.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
 import { parseHookPayload, manifestSha256 } from "./shared.js";
@@ -51,18 +52,16 @@ async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { w
   if (inspection.detail) {
     return [{ name, ok: false, detail: `Cannot read extension at ${inspection.path}: ${inspection.detail}. ${recovery}` }];
   }
-  // Our managed file proves installation only. No Pi-authored load/trust marker
-  // is available here; generic hook activity alone cannot prove this file loaded
-  // or that native extraction succeeded. Never promote a file write to green.
+  const evidence = await readRuntimeEvidence(deps.home, "pi");
+  const observed = evidence.hook_output_observed || evidence.extraction_completed;
   return [{
     name,
-    ok: false,
-    waiting: true,
-    detail: `Extension present at ${inspection.path} (${inspection.generation}); waiting for runtime evidence. ` +
-      "Restart Pi and open a new session to load the extension and emit native events. " +
-      "Loading and trust are not verified; injection and extraction are not verified. " +
-      "A managed file alone does not prove that Pi loaded or executed it.",
-  }];
+    ok: observed,
+    waiting: !observed,
+    detail: `Extension present at ${inspection.path} (${inspection.generation}); ` + (observed
+      ? "local runtime evidence observed. Loading and trust are not verified by these observations; model adoption is not verified."
+      : "waiting for runtime evidence. Restart Pi and open a new session to load the extension and emit native events. Loading and trust are not verified; injection and extraction are not verified. A managed file alone does not prove that Pi loaded or executed it."),
+  }, ...runtimeEvidenceChecks("pi", evidence)];
 }
 
 export const host: HostSpec = {
@@ -82,5 +81,5 @@ export const host: HostSpec = {
     uninstall,
   },
   doctor,
-  invoke: { binary: "pi", createAdapter: createPiAdapter },
+  invoke: { binary: "pi", userLaunchers: [".local/bin/pi", ".npm-global/bin/pi"], createAdapter: createPiAdapter },
 };

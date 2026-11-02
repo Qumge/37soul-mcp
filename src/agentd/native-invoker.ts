@@ -18,16 +18,12 @@
  */
 import { execFile } from "node:child_process";
 import path from "node:path";
+import os from "node:os";
+import { buildExecutionPath, resolveNativeExecutable } from "./native-executable.js";
 import type { RuntimeKind } from "../assets/protocol.js";
 import type { AdapterDeps, NativeInvoker, RuntimeAdapter } from "../adapters/types.js";
 import { HOSTS } from "../hosts/registry.js";
 import { readSourceRefs } from "./source-index.js";
-
-/** Runtime kind -> native CLI binary name. The adapters invoke by runtime kind; this
- *  is the only place the concrete binary spelling lives. */
-const RUNTIME_BINARIES: Partial<Record<RuntimeKind, string>> = Object.fromEntries(
-  HOSTS.flatMap((host) => (host.invoke ? [[host.kind, host.invoke.binary]] : [])),
-);
 
 export interface NativeInvokerLog {
   info(message: string): void;
@@ -53,37 +49,50 @@ const defaultSpawn: SpawnFn = (command, args, options, callback) =>
  * A fixed timeout bounds the wait; a killed process still resolves (code 124-style)
  * rather than hanging the drain. `spawn` is injectable for tests.
  */
-export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = defaultSpawn): NativeInvoker {
-  return (runtime, args, input, internal_job_uid) =>
-    new Promise((resolve) => {
-      const command = RUNTIME_BINARIES[runtime];
-      if (!command) {
-        log?.error(`native ${runtime} has no registered binary`);
-        resolve({ code: 1, stdout: "", stderr: `no native binary registered for ${runtime}` });
-        return;
-      }
-      const child = spawn(
-        command,
-        args,
-        { timeout: 60_000, env: { ...process.env, SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
+export interface NativeExecutionOptions {
+  home?: string;
+  nodePath?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = defaultSpawn, options?: NativeExecutionOptions): NativeInvoker {
+  // Existing injected spawns are virtual commands. Explicit options opt them into
+  // real path resolution; production always resolves before executing.
+  const resolvePaths = spawn === defaultSpawn || options !== undefined;
+  const home = options?.home ?? os.homedir();
+  const inherited = options?.env ?? process.env;
+  const executionPath = buildExecutionPath(home, options?.nodePath ?? process.execPath, inherited.PATH);
+  const env = { ...inherited, PATH: executionPath };
+  return async (runtime, args, input, internal_job_uid) => {
+    const spec = HOSTS.find(host => host.kind === runtime)?.invoke;
+    if (!spec) {
+      return { code: 1, stdout: "", stderr: `no native binary registered for ${runtime}` };
+    }
+    const command = resolvePaths ? await resolveNativeExecutable(spec, home, executionPath) : spec.binary;
+    if (!command) return { code: 1, stdout: "", stderr: `native ${runtime} executable unavailable; install the current host CLI` };
+    const run = (argv: readonly string[], stdin: string) => new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn(command, argv,
+        { timeout: 60_000, env: { ...env, SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
         (error, stdout, stderr) => {
-          let code = 0;
-          if (error) {
-            const maybeCode = (error as { code?: unknown }).code;
-            code = typeof maybeCode === "number" ? maybeCode : 1;
-            log?.error(`native ${runtime} exited ${code}: ${String((error as { message?: string }).message ?? error)}`);
-          }
+          const exitCode = (error as { code?: unknown } | null)?.code;
+          const code = error ? (typeof exitCode === "number" ? exitCode : 1) : 0;
+          // execFile errors can embed stderr, arguments or provider credentials.
+          if (error) log?.error(`native ${runtime} exited ${code}`);
           resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
-        },
-      );
-      if (child.stdin) {
-        child.stdin.write(input);
-        child.stdin.end();
-      } else {
-        log?.error(`native ${runtime} spawn produced no stdin pipe`);
-        child.kill();
-      }
+        });
+      if (child.stdin) { child.stdin.write(stdin); child.stdin.end(); }
+      else { log?.error(`native ${runtime} spawn produced no stdin pipe`); child.kill(); }
     });
+    if (resolvePaths && spec.requiredMajor !== undefined) {
+      const version = await run(["--version"], "");
+      const major = version.stdout.trim().match(/^(?:opencode\s+)?v?(\d+)\./i)?.[1];
+      if (version.code !== 0 || Number(major) !== spec.requiredMajor) {
+        return { code: 1, stdout: "", stderr: `native ${runtime} requires CLI generation ${spec.requiredMajor}; version check failed (no extraction attempted)` };
+      }
+    }
+    // Never retry a failed canonical launcher via another PATH installation.
+    return run(args, input);
+  };
 }
 
 /**
@@ -96,7 +105,7 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
  * `delivered:false` unverified).
  */
 export function createExtractAdapters(home: string, log?: NativeInvokerLog, root = path.join(home, ".37soul")): Partial<Record<RuntimeKind, RuntimeAdapter>> {
-  const invoke = createNativeInvoker(log);
+  const invoke = createNativeInvoker(log, undefined, { home });
   const readSource = async (refs: readonly string[], turnRefs?: readonly string[]) => readSourceRefs(root, refs, turnRefs);
   const emit = async () => {};
   const deps: AdapterDeps = { home, invoke, readSource, emit };

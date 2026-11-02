@@ -135,5 +135,5 @@ export const host: HostSpec = {
     mcpRemoveCommands: [["codex", "mcp", "remove", "37soul"]],
   },
   doctor,
-  invoke: { binary: "codex", createAdapter: createCodexAdapter },
+  invoke: { binary: "codex", userLaunchers: [".local/bin/codex", ".npm-global/bin/codex"], createAdapter: createCodexAdapter },
 };

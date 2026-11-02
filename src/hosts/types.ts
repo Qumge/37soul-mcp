@@ -108,6 +108,10 @@ export interface HostInstallSpec {
 
 export interface HostInvokeSpec {
   binary: string;
+  /** Ordered stable launcher paths relative to the user home; never version-directory scans. */
+  userLaunchers: readonly string[];
+  /** Reject another CLI generation before passing extraction arguments. */
+  requiredMajor?: number;
   createAdapter(deps: AdapterDeps): RuntimeAdapter;
 }
 

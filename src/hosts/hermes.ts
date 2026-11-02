@@ -85,5 +85,5 @@ export const host: HostSpec = {
     uninstall,
   },
   doctor,
-  invoke: { binary: "hermes", createAdapter: createHermesAdapter },
+  invoke: { binary: "hermes", userLaunchers: [".local/bin/hermes", ".hermes/venv/bin/hermes"], createAdapter: createHermesAdapter },
 };

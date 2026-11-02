@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { editJsonFile, editManagedFragment, removeManagedFragment } from "../config-editor.js";
 import { CLAUDE_CODE_HOOK_EVENTS, createClaudeCodeAdapter, latestCompletedTurnSourceRefs } from "../adapters/claude-code.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
@@ -120,8 +121,16 @@ async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
   // 显示/比对的是 settings 里**应该**有的那条（指向固定 runtime 的启动器），
   // 不是当前进程的路径 —— 经 install.sh 安装时当前进程跑在一个马上会被删掉的临时目录里。
   const expected = hookCommand({ ...deps, launcher: config.launcher }, agentKind);
-  const hookPresent = settings.includes("hook --agent claude-code");
-  const hookCurrent = config.launcher ? settings.includes(JSON.stringify(expected).slice(1, -1)) : hookPresent;
+  let commands: string[] = [];
+  try {
+    const document = JSON.parse(settings);
+    const entries = document?.hooks?.SessionStart;
+    if (Array.isArray(entries)) commands = entries.flatMap(entry => Array.isArray(entry?.hooks)
+      ? entry.hooks.filter((hook: any) => hook?.type === "command" && typeof hook.command === "string").map((hook: any) => hook.command)
+      : []);
+  } catch { /* Malformed configuration is not an installed SessionStart hook. */ }
+  const hookPresent = commands.some(command => command.includes("hook --agent claude-code"));
+  const hookCurrent = commands.some(command => command === expected);
   checks.push({
     name: `${agentKind}: SessionStart hook`,
     ok: hookPresent && hookCurrent,
@@ -135,6 +144,7 @@ async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
 
   const projects = path.join(deps.home, ".claude", "projects");
   checks.push(await dirCheck(`${agentKind}: session records`, projects));
+  checks.push(...runtimeEvidenceChecks("claude-code", await readRuntimeEvidence(deps.home, "claude-code")));
   return checks;
 }
 
@@ -156,5 +166,5 @@ export const host: HostSpec = {
     mcpRemoveCommands: [["claude", "mcp", "remove", "--scope", "user", "37soul"]],
   },
   doctor,
-  invoke: { binary: "claude", createAdapter: createClaudeCodeAdapter },
+  invoke: { binary: "claude", userLaunchers: [".local/bin/claude"], createAdapter: createClaudeCodeAdapter },
 };

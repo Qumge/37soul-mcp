@@ -17,6 +17,8 @@ export interface ServiceSpec {
   nodePath: string;
   scriptPath: string;
   logPath: string;
+  /** Explicit PATH only; never serialize the parent environment or secrets. */
+  executionPath?: string;
   platform?: NodeJS.Platform;
   uid?: number;
   /** Backoff clock for transient launchd registration errors. */
@@ -62,7 +64,12 @@ export function renderPlist(spec: ServiceSpec): string {
     <array>
 ${args}
     </array>
-    <key>RunAtLoad</key>
+${spec.executionPath === undefined ? "" : `    <key>EnvironmentVariables</key>
+    <dict>
+      <key>PATH</key>
+      <string>${escapeXml(spec.executionPath)}</string>
+    </dict>
+`}    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
@@ -78,12 +85,13 @@ ${args}
 export function renderSystemdUnit(spec: ServiceSpec): string {
   // systemd 的引用规则：ExecStart 按 shell 风格分词，带空格/引号的参数要用双引号包住。
   const quote = (value: string) => `"${value.replace(/[\\"]/g, "\\$&")}"`;
+  const environment = spec.executionPath === undefined ? "" : `Environment="PATH=${spec.executionPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t")}"\n`;
   return `[Unit]
 Description=37Soul local agent capture (agentd)
 After=network-online.target
 
 [Service]
-ExecStart=${serviceArgs(spec).map(quote).join(" ")}
+${environment}ExecStart=${serviceArgs(spec).map(quote).join(" ")}
 Restart=always
 RestartSec=5
 

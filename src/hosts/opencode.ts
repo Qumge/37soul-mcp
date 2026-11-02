@@ -91,5 +91,5 @@ export const host: HostSpec = {
     uninstall,
   },
   doctor,
-  invoke: { binary: "opencode", createAdapter: createOpenCodeAdapter },
+  invoke: { binary: "opencode", userLaunchers: [".opencode/bin/opencode", ".local/bin/opencode"], requiredMajor: 2, createAdapter: createOpenCodeAdapter },
 };

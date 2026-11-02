@@ -116,3 +116,15 @@ test("extract-adapters: all registered runtimes are wired, and extract short-cir
     );
   }
 });
+
+ test("native-invoker: failure logging excludes raw child diagnostics and credential canaries", async () => {
+  const logs = [];
+  const invoke = createNativeInvoker({info: value => logs.push(value), error: value => logs.push(value)}, (_command, _args, _options, callback) => {
+    callback(Object.assign(new Error("provider failed: SECRET_CANARY"), {code: 7}), "", "PRIVATE_STDERR_CANARY");
+    return {stdin: {write() {}, end() {}}, kill() {}};
+  });
+  const result = await invoke("codex", ["exec"], "PRIVATE_INPUT_CANARY", "job-log");
+  assert.equal(result.code, 7);
+  assert.match(logs.join("\n"), /native codex exited 7/);
+  assert.doesNotMatch(logs.join("\n"), /SECRET_CANARY|PRIVATE_STDERR_CANARY|PRIVATE_INPUT_CANARY/);
+ });

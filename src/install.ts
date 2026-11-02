@@ -11,6 +11,7 @@ import { readJsonFile, writeJsonFile } from "./config-editor.js";
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
 import { sendWriter, startWriter } from "./local/writer.js";
+import { buildExecutionPath } from "./agentd/native-executable.js";
 import { normalizeServerIssuer, sameServerIssuer } from "./agentd/server-identity.js";
 import { readCredentials } from "./agentd/credentials.js";
 import { readAccountsIndex } from "./local/profiles.js";
@@ -592,6 +593,7 @@ export async function install(
     const spec: ServiceSpec = {
       home: deps.home,
       nodePath: deps.nodePath,
+      executionPath: buildExecutionPath(deps.home, deps.nodePath, process.env.PATH),
       scriptPath: runtime.launcher,
       launcherPath: runtime.launcher,
       logPath: path.join(root, "agentd.log"),
