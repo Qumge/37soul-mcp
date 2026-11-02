@@ -62,7 +62,7 @@ test('invalid issuer login fails before persistence or device HTTP', async () =>
 async function seed(root) {
   await saveConfig(root, config());
   const store = await openStore(root, 'p1');
-  await store.transact(d => { d.owner_id = 'owner'; d.cloud_device_uid = 'device'; });
+  await store.transact(d => { d.owner_id = 'owner'; d.cloud_device_uid = 'device'; d.cloud_issuer = A; });
   await store.close();
 }
 
@@ -91,6 +91,9 @@ test('localhost HTTP explicit issuer is usable; malformed sync target makes zero
   const root = temp();
   try {
     await seed(root);
+    const localStore = await openStore(root, 'p1');
+    await localStore.transact(d => { d.cloud_issuer = 'http://localhost:4312/base'; });
+    await localStore.close();
     let calls = 0;
     const http = async () => { calls++; return reply(); };
     await syncOnce('p1', http, { root, baseUrl: 'http://localhost:4312/base/', token: 'LOCAL-FAKE', tokenIssuer: 'http://LOCALHOST:4312/base' });
@@ -120,8 +123,8 @@ test('manual avatar writer entry rejects a target mismatch before HTTP', async (
     configureSyncHttp(async () => { calls++; return reply(); });
     writer = await startWriter(root);
     const result = await sendWriter(root, { request_uid: 'avatar-issuer-test', command: 'upload_avatar', profile_id: 'p1', payload: { soul_uid: 's1' } });
-    assert.equal(result.ok, true);
-    assert.equal(result.result.status, 'not_logged_in');
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'profile_issuer_mismatch');
     assert.equal(calls, 0);
   } finally { await writer?.close(); rmSync(root, { recursive: true, force: true }); }
 });

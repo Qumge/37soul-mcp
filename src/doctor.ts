@@ -10,6 +10,8 @@ import { dataRoot, installManifestPath } from "./install.js";
 import { hostSpec } from "./hosts/registry.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
+import { assertProfileCloudIssuer } from "./local/profile-issuer.js";
+import { sameServerIssuer } from "./agentd/server-identity.js";
 import { readCredentials, selectCredentials } from "./agentd/credentials.js";
 import { detectLang, messages, type Lang } from "./i18n.js";
 import { openStore } from "./local/store.js";
@@ -72,9 +74,10 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       const store = await openStore(root, entry.profile_id);
       try {
         const snap = await store.read();
+        assertProfileCloudIssuer(snap, config.api_base_url, index);
         pending += Object.keys(snap.outbox).length;
         conflicts += Object.keys(snap.quarantine).length;
-        const scoped = snap.owner_id === ownerId
+        const scoped = snap.owner_id === ownerId && sameServerIssuer(entry.cloud_issuer, config.api_base_url)
           ? selectCredentials(config, entry.profile_id, ownerId, snap.cloud_device_uid, config.api_base_url)
           : [];
         credentials.push(...scoped);

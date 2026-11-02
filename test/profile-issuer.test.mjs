@@ -19,7 +19,7 @@ async function seed(root, id, issuer, owned = true) {
     d.owner_id = owned ? '123' : null;
     d.cloud_device_uid = owned ? 'device' : null;
     if (issuer !== undefined) d.cloud_issuer = issuer;
-    d.souls[id] = soul(id);
+    d.souls[id] = { ...soul(id), ...(owned ? {} : { legacy_host_id: null, origin: "local" }) };
   });
   await store.close();
 }

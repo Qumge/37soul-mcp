@@ -340,6 +340,7 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
   writeFileSync(avatar, Buffer.from("PNG-BYTES"));
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
     d.souls[uid] = {
       soul_uid: uid, legacy_host_id: 77, identity_revision: 1,
@@ -410,10 +411,11 @@ test("profile: create --avatar uploads after explicit registration on the sync p
   writeFileSync(avatar, Buffer.from("LOCAL-AVATAR-BYTES"));
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
   });
   writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
-    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+    "owner-1": { profile_id: "p1", default_soul_uid: null, cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
@@ -474,6 +476,7 @@ test("profile: a slow manual avatar ACK cannot overwrite a concurrent CLI create
   writeFileSync(file, Buffer.from("OLD-BYTES"));
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
     d.souls[oldUid] = {
       soul_uid: oldUid, legacy_host_id: 77, identity_revision: 1, public: true,
@@ -645,10 +648,11 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
   const root = path.join(home, ".37soul");
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
   });
   writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
-    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+    "owner-1": { profile_id: "p1", default_soul_uid: null, cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
@@ -766,10 +770,11 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
   const root = path.join(home, ".37soul");
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
   });
   writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
-    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+    "owner-1": { profile_id: "p1", default_soul_uid: null, cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
@@ -843,10 +848,11 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
   const root = path.join(home, ".37soul");
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu-1";
   });
   writeFileSync(path.join(root, "accounts.json"), `${JSON.stringify({
-    "owner-1": { profile_id: "p1", default_soul_uid: null, soul_sync_mode: "assets_only" },
+    "owner-1": { profile_id: "p1", default_soul_uid: null, cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},

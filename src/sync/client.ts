@@ -17,6 +17,7 @@ import { basename, extname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BindingSnapshot, HttpFetch, ProfileId } from "../adapters/types.js";
 import { normalizeServerIssuer, sameServerIssuer } from "../agentd/server-identity.js";
+import { assertProfileCloudIssuer } from "../local/profile-issuer.js";
 import { loadConfig } from "../agentd/state.js";
 import { clearDeviceCredentials, credentialForRuntime, selectCredentials, type StoredCredential } from "../agentd/credentials.js";
 import {
@@ -45,7 +46,7 @@ import {
   type StoreFs,
   type StoreSnapshot,
 } from "../local/store.js";
-import { accountsIndexPath, resolveRoot } from "../local/profiles.js";
+import { accountsIndexPath, readAccountsIndex, resolveRoot } from "../local/profiles.js";
 import { registerWriterCommand } from "../local/writer.js";
 import { batchAssetOps, orderOutboxOps } from "./outbox.js";
 
@@ -212,6 +213,7 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
   const report: SyncReport = { accepted: 0, conflicts: 0, pending: 0 };
   try {
     const snap = await store.read();
+    assertProfileCloudIssuer(snap, baseUrl, await readAccountsIndex(root));
     // Credentials are scoped to this exact profile + owner + cloud device. The
     // legacy config.tokens map is intentionally not a fallback: it cannot prove
     // ownership, and using it is how account A used to pull account B's Soul.
@@ -669,7 +671,7 @@ async function flushPendingAvatars(
 async function uploadPendingAvatar(
   profileId: ProfileId,
   http: HttpFetch,
-  options: SyncOptions & { soulUid?: string } = {},
+  options: SyncOptions & { soulUid?: string; localAvatarPath?: string } = {},
 ): Promise<AvatarUploadResult> {
   const root = resolveRoot(options.root);
   const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
@@ -678,6 +680,17 @@ async function uploadPendingAvatar(
   const store = await openStore(root, profileId, { fs });
   try {
     const snap = await store.read();
+    assertProfileCloudIssuer(snap, baseUrl, await readAccountsIndex(root));
+    if (options.localAvatarPath) {
+      await store.transact(draft => {
+        const soul = options.soulUid ? draft.souls[options.soulUid] : undefined;
+        if (!soul) throw new StoreError("unknown_soul", `no local soul ${options.soulUid ?? ""}`);
+        soul.local_avatar_path = options.localAvatarPath;
+        soul.avatar_uploaded = false;
+        delete soul.avatar_upload_error;
+      });
+    }
+
     const credentials: StoredCredential[] = options.token
       ? (sameServerIssuer(options.tokenIssuer, baseUrl) ? [{
           issuer: baseUrl,
@@ -1872,23 +1885,10 @@ registerWriterCommand("upload_avatar", async ({ root, request }) => {
   }
   const soulUid = typeof request.payload?.soul_uid === "string" ? request.payload.soul_uid : undefined;
   const localPath = typeof request.payload?.local_avatar_path === "string" ? request.payload.local_avatar_path : undefined;
-  if (localPath) {
-    const store = await openStore(root, request.profile_id);
-    try {
-      await store.transact((draft) => {
-        const soul = soulUid ? draft.souls[soulUid] : undefined;
-        if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid ?? ""}`);
-        soul.local_avatar_path = localPath;
-        soul.avatar_uploaded = false;
-        delete soul.avatar_upload_error;
-      });
-    } finally {
-      await store.close();
-    }
-  }
   return uploadPendingAvatar(request.profile_id, withTimeout(syncHttp, clampSyncTimeoutMs(request.payload?.timeout_ms)), {
     root,
     ...(soulUid ? { soulUid } : {}),
+    ...(localPath ? { localAvatarPath: localPath } : {}),
   });
 });
 

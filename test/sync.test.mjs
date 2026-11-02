@@ -66,6 +66,7 @@ function bindingKeyOf() {
 /** Seed owner/cloud_device, one Soul, full consent and one bound binding. */
 function baseChange(d, overrides = {}) {
   d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
   d.cloud_device_uid = IDS.cloudDevice;
   d.souls[IDS.soul] = {
     soul_uid: IDS.soul,
@@ -779,6 +780,7 @@ test("sync: bootstrap preserves binding history dependencies", async () => {
   const stale = "stale-asset";
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,
@@ -1037,6 +1039,7 @@ test("sync: publishing a soul never widens device consent", async () => {
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1094,6 +1097,7 @@ test("sync: same-length consent category swap revokes the removed category immed
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1173,6 +1177,7 @@ test("sync: enabling consent enqueues still-valid local_only assets exactly once
   const consentRev2 = { cloud_device_uid: IDS.cloudDevice, soul_uid: IDS.soul, revision: 2, categories: ["identity", "relationship"], enabled: true };
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1524,6 +1529,7 @@ test("sync: stale consent replay never re-enqueues a revoked category asset", as
   const assetUid = "40000000-0000-4000-8000-000000000099";
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1570,6 +1576,7 @@ test("sync: consent enable never enqueues a cloud-dismissed digest", async () =>
   const DISMISSED = "the person deleted this fact elsewhere";
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1621,6 +1628,7 @@ test("sync: first-sight consent replay_from resets the cursor once", async () =>
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1929,6 +1937,7 @@ test("R6: re-authorization never sends an asset whose frozen binding is gone", a
   const assetUid = "40000000-0000-4000-8000-000000000098";
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: 7, identity_revision: 1,
@@ -1973,6 +1982,7 @@ test("R2: registration carries explicit categories; an old empty registration is
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,
@@ -2021,6 +2031,7 @@ test("R2: registration carries explicit categories; an old empty registration is
   const oldRoot = tempDir();
   await seedProfile(oldRoot, "p1", "dev-1", (d) => {
     d.owner_id = IDS.owner;
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = IDS.cloudDevice;
     d.souls[IDS.soul] = {
       soul_uid: IDS.soul, legacy_host_id: null, identity_revision: 1,

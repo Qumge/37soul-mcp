@@ -261,6 +261,7 @@ test("privacy: native ids, raw prompts and rendered text never reach HTTP", asyn
 
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = "123";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu";
     d.souls["s1"] = {
       soul_uid: "s1",
@@ -376,6 +377,7 @@ test("privacy: owner pull uses private identity without other users assets", asy
 
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = "123";
+    d.cloud_issuer = "https://fake.test";
     d.cloud_device_uid = "cdu";
     d.souls["s1"] = {
       soul_uid: "s1", legacy_host_id: 7, identity_revision: 1,

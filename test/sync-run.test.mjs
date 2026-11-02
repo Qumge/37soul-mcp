@@ -103,6 +103,7 @@ async function seedEmptyStore(root, profileId, ownerId = "owner-1", cloudDeviceU
   const store = await openStore(root, profileId);
   await store.transact((draft) => {
     draft.owner_id = ownerId;
+    draft.cloud_issuer = "https://fake.test";
     draft.cloud_device_uid = cloudDeviceUid;
   });
   await store.close();
@@ -115,7 +116,7 @@ async function seedEmptyStore(root, profileId, ownerId = "owner-1", cloudDeviceU
 test("H1: sync_once uses the injected transport and never calls globalThis.fetch", async () => {
   const root = tempDir();
   seedAssetsProfile(root);
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
 
@@ -149,7 +150,7 @@ test("H1: sync_once uses the injected transport and never calls globalThis.fetch
 test("H1: an unconfigured writer fails sync_once with the typed http_not_configured error", async () => {
   const root = tempDir();
   seedAssetsProfile(root);
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
 
   configureSyncHttp(null);
   const writer = await startWriter(root);
@@ -193,7 +194,7 @@ test("C1: sync_once refuses in legacy mode with 'assets mode is not enabled'", a
 test("C1: runSync dispatches through the writer (starts a transient writer when none is listening)", async () => {
   const root = tempDir();
   seedAssetsProfile(root);
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
 
@@ -213,7 +214,7 @@ test("C1: runSync dispatches through the writer (starts a transient writer when 
 test("C1: runSync never bypasses the writer — a held lock surfaces writer_unavailable", async () => {
   const root = tempDir();
   seedAssetsProfile(root);
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
 
@@ -237,9 +238,9 @@ test("C1: runSyncProfiles syncs only assets-mode profiles, sequentially", async 
   seedAssetsProfile(root, "p2");
   seedAssetsProfile(root, "p3");
   seedAccounts(root, {
-    "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" },
+    "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
     "owner-2": { profile_id: "p2", default_soul_uid: null, soul_sync_mode: null },
-    "owner-3": { profile_id: "p3", default_soul_uid: "s3", soul_sync_mode: "assets_only" },
+    "owner-3": { profile_id: "p3", default_soul_uid: "s3", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
@@ -296,7 +297,7 @@ function neverResolvingHttp() {
 test("sync_once bounds a hung transport with the writer-side timeout (payload timeout_ms aborts)", async () => {
   const root = tempDir();
   seedAssetsProfile(root);
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "s1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedConfig(root);
   await seedEmptyStore(root, "p1");
 
@@ -354,6 +355,7 @@ async function seedOwnedStore(root, profileId, deviceId, ownerId, cloudDeviceUid
   const store = await openStore(root, profileId);
   await store.transact((draft) => {
     draft.owner_id = ownerId;
+    draft.cloud_issuer = "https://fake.test";
     draft.cloud_device_uid = cloudDeviceUid;
     change?.(draft);
   });
@@ -370,8 +372,8 @@ test("R1: syncing all profiles never sends profile A with profile B's token", as
   });
   await seedOwnedStore(root, "pB", "dev-B", "owner-B", "cdu-B");
   seedAccounts(root, {
-    "owner-A": { profile_id: "pA", default_soul_uid: "soul-A", soul_sync_mode: "assets_only" },
-    "owner-B": { profile_id: "pB", default_soul_uid: null, soul_sync_mode: "assets_only" },
+    "owner-A": { profile_id: "pA", default_soul_uid: "soul-A", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
+    "owner-B": { profile_id: "pB", default_soul_uid: null, cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" },
   });
   seedScopedConfig(root, [
     { issuer: "https://fake.test", token: "token-A", owner_id: "owner-A", cloud_device_uid: "cdu-A", runtime_kind: "hermes", profile_id: "pA", obtained_at: "x" },
@@ -458,7 +460,7 @@ test("R3: bindings use the token of their own runtime", async () => {
       };
     });
   });
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedScopedConfig(root, runtimes.map((runtime) => ({
     issuer: "https://fake.test", token: `token-${runtime}`, owner_id: "owner-1", cloud_device_uid: "cdu-1",
     runtime_kind: runtime, profile_id: "p1", obtained_at: "x",
@@ -543,7 +545,7 @@ test("R5: headers-then-stalled-body is bounded and the writer recovers", async (
       predecessor_operation_ids: [],
     };
   });
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   seedScopedConfig(root, [{
     issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
     runtime_kind: "claude-code", profile_id: "p1", obtained_at: "x",
@@ -580,6 +582,10 @@ test("R5: headers-then-stalled-body is bounded and the writer recovers", async (
     { mode: 0o600 },
   );
 
+  const serverStore = await openStore(root, "p1");
+  await serverStore.transact(draft => { draft.cloud_issuer = `http://127.0.0.1:${port}`; });
+  await serverStore.close();
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", cloud_issuer: `http://127.0.0.1:${port}`, soul_sync_mode: "assets_only" } });
   configureSyncHttp(globalThis.fetch);
   const writer = await startWriter(root);
   try {
@@ -634,7 +640,7 @@ test("R1: a legacy global token is not guessed into a scoped profile", async () 
       identity: { name: "A", description: "", character: "", greeting: "" }, state: "active",
     };
   });
-  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
+  seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", cloud_issuer: "https://fake.test", soul_sync_mode: "assets_only" } });
   writeFileSync(
     path.join(root, "config.json"),
     `${JSON.stringify({ api_base_url: "https://fake.test", machine_id: "m1", tokens: { "claude-code": "legacy-unbound" } })}\n`,

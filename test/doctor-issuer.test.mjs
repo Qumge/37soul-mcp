@@ -19,9 +19,9 @@ async function fixture(run) {
   try { await run({ root, deps, calls: () => calls }); } finally { rmSync(home, { recursive: true, force: true }); }
 }
 async function profile(root, { owner = 'owner', device = 'device', mode = 'assets_only' } = {}) {
-  writeFileSync(path.join(root, 'accounts.json'), JSON.stringify({ owner: { profile_id: 'p1', default_soul_uid: null, soul_sync_mode: mode } }));
+  writeFileSync(path.join(root, 'accounts.json'), JSON.stringify({ owner: { profile_id: 'p1', cloud_issuer: B, default_soul_uid: null, soul_sync_mode: mode } }));
   const store = await openStore(root, 'p1');
-  await store.transact(d => { d.owner_id = owner; d.cloud_device_uid = device; });
+  await store.transact(d => { d.owner_id = owner; d.cloud_device_uid = device; d.cloud_issuer = B; });
   await store.close();
 }
 const syncCredential = report => report.checks.find(c => c.name === 'claude-code: sync credential');
@@ -32,7 +32,7 @@ test('doctor missing or corrupt mode metadata never sends legacy A token to B or
     state.sessions['claude-code:old-session'] = { last_upload_at: '2026-11-02T00:00:00Z' };
     await saveState(root, state);
     const before = readFileSync(path.join(root, 'config.json'), 'utf8');
-    for (const metadata of [null, '{broken', JSON.stringify({ owner: { profile_id: 'p1', soul_sync_mode: 'unknown' } })]) {
+    for (const metadata of [null, '{broken', JSON.stringify({ owner: { profile_id: 'p1', cloud_issuer: B, soul_sync_mode: 'unknown' } })]) {
       if (metadata !== null) writeFileSync(path.join(root, 'accounts.json'), metadata);
       const report = await runDoctor(deps);
       assert.equal(calls(), 0, 'doctor has no authorized network probe, regardless of metadata');
