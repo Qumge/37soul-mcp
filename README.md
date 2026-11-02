@@ -2,91 +2,76 @@
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-One persistent Soul across **Claude Code, Codex, OpenCode, Hermes and Pi** on your machine,
-and on 37Soul.com. Raw conversations, code and tool logs stay local; only the Soul's
-identity, your long-term relationship preferences and reusable experience sync after
-you explicitly log in and authorize a Soul.
+Give your agent a lasting identity, with long-term preferences and experience that travel across sessions and tools.
 
-> **Status honesty.** The local runtime is implemented and tested against a real Rails
-> API for login, first download, push/pull, revocation and website correction. The five
-> host adapters have local live smoke evidence for extraction, but full cross-session
-> adoption (website correction → new native Session) is still being independently verified;
-> observed CLI versions are recorded below.
-> Full suite: 383 tests on Node 24 locally (the Node 18 floor check skips when no Node 18
-> binary is present; the packed-tarball check skips on an unpacked checkout). Tag CI runs
-> the same suite on Node 20 and is green for the latest release.
+The local runtime connects Claude Code, Codex, OpenCode, Hermes, and Pi. You can start using a Soul on your machine alone. Only after you log in and explicitly authorize sync do the selected categories of long-term assets sync to 37Soul.
 
-## Where the cloud fits
+## Install
 
-37Soul itself is free to use. A free account brings her last **30 days** of memory into
-the conversation; a subscription removes that window — nothing is deleted either way —
-and adds credits for photos and videos. Binding her to your own agent costs nothing
-extra, and Markdown / SOUL.md / MEMORY.md export is free for every account.
-
-[Pricing](https://37soul.com/pricing?ref=mcp-readme)
-
-## Quick start: a new Soul
-
-Requires macOS or Linux and Node.js 18+.
+You need macOS or Linux, Node.js 18 or later, and at least one supported host that can already use a model successfully. Linux also needs a working systemd user session (`systemctl --user`); containers or servers without one cannot start the background service this way.
 
 ```bash
 curl -fsSL https://37soul.com/install.sh | bash
 ```
 
-Install is anonymous-first: it makes **zero HTTP requests**, writes hooks for the agents
-it detects, starts the local runtime, and creates a local `assets_only` profile. Nothing
-is uploaded yet.
-
-Create a local Soul with name, sex, age (16–65) and a character of at least 50 characters, then use it in your agent:
+The installer downloads and verifies the runtime, installs managed configuration for detected hosts, configures and attempts to start the background service, and creates a local profile. Run `37soul doctor` to confirm that the service started successfully. Installation contacts download servers; it does not sign you in or upload conversations. To preview the changes first, run:
 
 ```bash
-37soul soul create --name "Nyx" --sex female --age 24 \
-  --character "小七是一位喜欢摄影与旅行的年轻女性，性格温和而独立，说话简洁自然。她喜欢先听清对方的想法，再分享自己的观察。" [--avatar ./avatar.png]
-37soul soul select <soul_uid>
-37soul status
+curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 ```
 
-Restart the agent. New sessions load that Soul. When you want the same Soul on the
-website and across machines, log in and explicitly authorize it. The profile you filled
-in becomes public; private chats and personal memories do not:
+## Already have a Soul on the website?
 
 ```bash
 37soul login
-37soul soul authorize <soul_uid> --categories identity,relationship,experience
+```
+
+1. Open the authorization link shown in your terminal and sign in to your own account.
+2. Check the short code, select an existing Soul, then approve the device.
+3. Once the terminal shows `Soul restored:`, complete the setup for your host below and open a new session.
+
+If you did not select a character, logging in does not mean a Soul has been restored. Select your own Soul and run `37soul login` again.
+
+## Create a Soul locally first
+
+For example, create a Soul named Nyx:
+
+```bash
+37soul soul create --name "Nyx" --sex female --age 24 --character "Nyx is a young woman who enjoys photography and travel. She is gentle and independent, and speaks clearly and naturally. She listens carefully before sharing her observations. She values honest feedback, breaks complex problems into practical steps, and remembers the ways you have agreed to work together."
+37soul soul list
+```
+
+Copy the Soul UID from the creation result and replace the variable value below:
+
+```bash
+SOUL_UID='paste the actual Soul UID here'
+37soul soul select "$SOUL_UID"
+```
+
+Complete your host's setup and open a new session to start using the Soul locally. When you want to sync to the website or another machine:
+
+```bash
+37soul login
+37soul soul select "$SOUL_UID"
+37soul soul authorize "$SOUL_UID" --categories identity,relationship,experience
 37soul sync
 ```
 
-`37soul login` opens the approval page; the first sync registers the Soul and opens a
-per-device Consent. Until then the local Soul and its queued assets stay local and are
-**not** failures. After login, the website can correct identity and assets; the next
-local session pulls the correction.
+Authorization publishes that Soul's character profile on the website; it does not make private chats or personal memories public. `--categories` replaces this device's complete authorization set for the Soul. It does not add categories incrementally.
 
-## Quick start: restore an existing website Soul
+## Complete your host's setup
 
-This is the path for someone who already has a Soul on 37Soul.com.
+| Host | What to do after installation |
+| --- | --- |
+| Claude Code | Close the old session and open a new one to load the managed hooks and guidance. |
+| Codex | Open `/hooks` in Codex, review and approve 37Soul's hook, then open a new session. The installer cannot approve it for you. |
+| OpenCode | Restart OpenCode to load the managed plugin. Check that the host reports no plugin loading errors. |
+| Hermes | Use the hooks integration in your local Hermes CLI. Approve loading when prompted by the host, then open a new session. A gateway-only configuration cannot replace the CLI. |
+| Pi | Restart Pi to discover and load the managed extension, then open a new session. If the host restricts extensions, approve it in the host first. |
 
-1. Install the runtime with the command above.
-2. Run:
+Each host still needs working model authentication or configuration. 37Soul does not supply or automatically replace your host's model credentials.
 
-   ```bash
-   37soul login
-   ```
-
-3. On the approval page choose **the existing Soul**, then approve.
-4. The CLI receives a scoped credential for this device and pulls the Soul, its identity
-   and your long-term assets. It becomes the account default automatically:
-
-   ```
-   Soul restored: <name> (<soul_uid>), <n> asset(s)
-   ```
-
-5. Restart the agent and keep working. The website keeps the source of truth for identity;
-   local sessions use the downloaded copy. Raw conversation is never uploaded.
-
-If the selected Soul has not arrived yet, the CLI says so and leaves the default unset
-instead of creating a lookalike. Run `37soul sync` once the connection is available.
-
-## Verify
+## Check that it is working
 
 ```bash
 37soul status
@@ -94,126 +79,54 @@ instead of creating a lookalike. Run `37soul sync` once the connection is availa
 37soul soul list
 ```
 
-- `status` reports the machine, number of scoped credentials, and pending/quarantined
-  local changes. `login required` means local use works but nothing syncs yet.
-- `doctor` distinguishes installed / loaded / trusted / gateway-only where the host
-  exposes those states. A local-only outbox is not an error. Its tip lines follow
-  `SOUL37_LANG`, `LC_ALL` or `LANG` (en / zh / ja); the rest of the CLI output is English.
-- `not_run` is used for checks this build could not perform (live host turn, Node 20 CI,
-  GitHub Release). It is never reported as a pass.
-
-## What syncs — and what does not
-
-| Data | Where it lives | Sync |
-| --- | --- | --- |
-| Soul identity (name, description, character, greeting) | local + 37Soul | after login + Consent; website corrections win |
-| Relationship assets (stable preferences, goals, agreed ways of working) | local + 37Soul | only authorized categories |
-| Experience assets (reusable methods) | local + 37Soul | only authorized categories |
-| Raw conversation, prompts, code, tool logs | local only | **never uploaded** |
-| Legacy briefs / transcript writeback (`log_turn`, `remember`, `resume`, `checkpoint`) | legacy integration | stopped in assets mode, fail closed |
-
-Consent is per device and per Soul. `--categories` is a full replacement, not a merge.
-Local creation is not authorization: run `soul authorize` once for a locally created
-Soul. A Soul left unauthorized stays in the local outbox and never blocks Pull for an
-authorized Soul.
-
-## Five hosts
-
-| Host | Observed locally | Status |
-| --- | --- | --- |
-| Claude Code | 2.1.305 | real CLI extraction and hook path observed; full adoption pending |
-| Codex | 0.163.0 | official `hooks.json`; trust is Codex-owned `/hooks`; one-off bypass observed |
-| OpenCode | 2.0.32 | v2 plugin loads; live extraction/trace observed; full injection pending |
-| Hermes | 0.21.0 CLI | official shell hooks load; live extraction/trace observed; full injection pending |
-| Pi | 1.4.0 | managed extension loads and all four bridged events fire (session_start / prompt / settled / shutdown observed 2026-10-30); structured extraction **unverified** |
-
-A gateway-only Hermes configuration is not CLI support and is reported as such.
-`37soul install --plan` lists files without writing. The installer backs up every user
-file it edits; `37soul uninstall` removes only managed files and keeps
-`~/.37soul/profiles/`, raw spool and unsynced queues.
-
-## Local runtime details
-
-- One writer process serializes every local mutation. Hooks deliver events over a local
-  socket; they never write the snapshot directly and never block the host.
-- Install preserves an existing profile, Soul UUIDs and assets on repeat installs.
-  Scoped credentials survive reinstall; a global legacy token is never reused for a
-  different profile.
-- Offline bind/detach is preserved when an earlier bind ACK arrives. A Binding ACK only
-  advances `cloud_revision`; a newer local detach or switch remains the intent until its
-  own operation is acknowledged.
-- Revocation (including a Rails `token_invalid` response on a revoked device) clears
-  downloaded cloud cache and scoped credentials, but keeps local originals and unsynced
-  assets.
-- The runtime handles Node 18 ESM; the tarball has no native modules and no WASM.
-
-## Releasing the runtime
-
-`install.sh` (served by the Rails app from `public/install.sh`) fetches
-`releases/latest/download/37soul-runtime.tgz` plus its `.sha256`. To ship a new runtime,
-bump `package.json`, then push a matching tag. `.github/workflows/release-runtime.yml`
-runs `npm test`, packs with `scripts/pack-runtime.sh`, and verifies the layout and digest;
-it can also be triggered manually with **Run workflow**. The workflow builds and verifies
-only — publishing the tarball, `.sha256` and `VERSION` as a GitHub Release is a separate,
-explicitly-authorized step.
+In a new session, explicitly state a stable collaboration preference, such as “In future, when giving me implementation advice, list actionable steps before explaining the reasons.” The runtime extracts long-term assets after a completed turn. Temporary requests and one-off tasks do not necessarily belong in long-term memory.
 
 ```bash
-git tag v0.11.6 && git push origin v0.11.6
+37soul recall "collaboration"
 ```
 
-The tarball root is `37soul/` and carries `package.json`, `dist/bundle/{cli,index}.js`,
-the managed OpenCode bridge, and the Hermes bridge source. `release/VERSION` must equal
-the `package.json` version; the `.sha256` is over the actual tar bytes.
+Local use does not require sync. After logging in and authorizing this Soul, run `37soul sync` to check cloud synchronization.
 
-## Hosted/remote MCP (separate from the local runtime)
+Extraction uses the host model and may retry after a failure, consuming additional host quota. Completion time also depends on the model and network. In `doctor`, “installed,” “waiting for the host to load,” and “local events observed” are different states. Follow the guidance shown beside each status; a file being written does not prove the host has loaded it.
 
-The hosted server remains available for clients that cannot run the local runtime:
-
-```
-https://37soul.com/mcp
-```
-
-It is listed in the MCP Registry as `io.github.Qumge/37soul-mcp`.
-
-## How the runtime is distributed (npm is not a channel)
-
-The local runtime ships **only** as a verified tarball on GitHub Releases, fetched by
-`https://37soul.com/install.sh`. We deliberately do not publish it to npm:
-
-- npm adds an ecosystem we do not control (install scripts, registry policy, mirror
-  drift, audit noise) on top of a binary we can already checksum ourselves.
-- The installer verifies SHA-256 and can be pinned per release; a package registry
-  cannot give the user that audit trail.
-- npm's tarball limits and lifecycle hooks push us toward packaging decisions that
-  would weaken the "raw conversation stays local" story.
-
-So `npm install -g 37soul-mcp` is not a supported way to get the runtime, and the npm
-package has not been published since 2026-10-06 (`npx 37soul-mcp` still runs 0.9.0 and is
-kept for history only). The MCP Registry entry lists the **hosted** server
-(`https://37soul.com/mcp`) only; it does not point at an npm package. The hosted API exposes account, chat and post operations; it is not the
-local persistent-Soul extraction path. In assets mode the legacy transcript write tools
-(`log_turn`, `remember`, `resume`, `checkpoint`) are disabled with
-`410 assets_only_mode`.
-
-## Shared contract fixtures (two-repo sync)
-
-The `soul-assets/v1` contract tests read golden data from a vendored fixture, never from
-per-test hand-written expectations:
-
-- authoritative source: `docs/superpowers/specs/2026-10-20-persistent-soul-fixtures.json`
-  in the adjacent **37soul** (Rails) repo;
-- vendored copy: `test/fixtures/contracts/soul-assets-v1.json`;
-- provenance + digest: `test/fixtures/contracts/source.json`.
-
-`test/helpers/contract-fixture.mjs` verifies bytes against the declared protocol and
-SHA-256 on every load. CI depends only on in-repo fixtures. For coordinated updates:
+After changing an identity or long-term asset on the website, run this first if you want the correction available in your next session immediately:
 
 ```bash
-SOUL37_CONTRACT_FIXTURE=/path/to/37soul/docs/.../2026-10-20-persistent-soul-fixtures.json npm test
+37soul sync
 ```
 
-Bump the vendored copy and declared hash together.
+Confirm there are no sync errors, then open a new host session. Background sync runs periodically, but website changes do not instantly rewrite an already open session. Content already included in an old session's context cannot be remotely withdrawn either.
 
-## License
+## Data and authorization
 
-MIT
+- **The local runtime does not upload raw sessions, code, or tool logs to 37Soul's cloud.** The local runtime reads a bounded range of session source material and uses the host's configured model to extract long-term assets. Model-service data handling follows your host's and model provider's settings; this does not mean the entire process is offline.
+- Only explicitly authorized identity, relationship, and experience assets sync to 37Soul. Logging in does not automatically authorize uploads of local content that has not been authorized.
+- Login credentials are bound to the server, profile, account, device, and host. Changing servers requires a fresh login and a separate profile. Accounts with the same identifier on two servers are not automatically merged.
+- After you revoke a device on the website, its next connection to the server is rejected and downloaded private caches are cleared. Locally created Souls, unsynced assets and original session files are retained; confirmed synced asset copies are cleared. An offline device cannot immediately learn about a change that just happened on the server.
+
+## Troubleshooting
+
+| Symptom | Next step |
+| --- | --- |
+| Command not found | Try `~/.local/bin/37soul status`, then add `~/.local/bin` to PATH. |
+| Background process is not running, or is running another version | Run the installation command again, then run `37soul doctor`. |
+| Host has not loaded or trusted the integration | Complete the host steps in the table above, then open a new session. Do not use startup flags that bypass approval. |
+| Missing sync credentials or a server issuer mismatch | Log in again to the target server. An existing cloud profile cannot be reused across servers. For a separate profile, use `37soul login --profile new-profile-name`. |
+| Network temporarily unavailable | Local content is retained. Run `37soul sync` when the network returns. Do not delete profiles or queues to “reset” them. |
+| No long-term assets yet | Check that a full conversation turn has completed, the host model is available, and the background service is running. One-off content may not produce long-term assets. |
+
+```bash
+37soul pause
+37soul resume
+37soul uninstall
+```
+
+These commands pause, resume, and uninstall the local runtime. Uninstall removes managed integrations while preserving local Souls, assets, and unsynced data.
+
+## Remote MCP
+
+Clients that cannot run the local runtime can connect to `https://37soul.com/mcp` to operate their own platform account. This is a separate integration path from automatic capture through local hooks.
+
+## Development and distribution
+
+User installation is distributed only through GitHub Releases and the website's `install.sh`, not npm. See the [developer documentation](docs/reviews/) for build, test, version, and release evidence. Release checks do not automatically publish a release.
