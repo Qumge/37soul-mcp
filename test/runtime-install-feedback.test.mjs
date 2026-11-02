@@ -15,7 +15,7 @@ test('upgrade reloads the cached launchd job with bootout then bootstrap',async 
  const home=await homeFor(t),commands=[];const launcher=path.join(home,'.37soul/runtime/0.13.2/bin/37soul');
  await mkdir(path.dirname(plistPath(home)),{recursive:true});await writeFile(plistPath(home),'<plist>old configuration</plist>');
  await installService({home,nodePath:process.execPath,scriptPath:launcher,launcherPath:launcher,logPath:path.join(home,'agentd.log'),platform:'darwin',uid:501},async argv=>{commands.push(argv);return argv[1]==='print'?{code:0,stdout:`program = ${home}/.37soul/runtime/0.13.0/bin/37soul\npid = 123`,stderr:''}:good();});
- assert.deepEqual(commands,[['launchctl','print',`gui/501/${SERVICE_LABEL}`],['launchctl','bootout',`gui/501/${SERVICE_LABEL}`],['launchctl','bootstrap','gui/501',plistPath(home)]]);
+ assert.deepEqual(commands,[['launchctl','print',`gui/501/${SERVICE_LABEL}`],['launchctl','enable',`gui/501/${SERVICE_LABEL}`],['launchctl','bootout',`gui/501/${SERVICE_LABEL}`],['launchctl','bootstrap','gui/501',plistPath(home)]]);
  assert.ok((await readFile(plistPath(home),'utf8')).includes(launcher));
 });
 

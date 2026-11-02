@@ -140,6 +140,12 @@ export async function installService(spec: ServiceSpec, run: RunCommand): Promis
     try {
       await mkdir(path.dirname(file), { recursive: true });
       await writePlist(file, renderPlist(spec));
+      // `unload -w` persists a disabled override even after its plist is gone.
+      // Explicit installation must re-enable our verified label before loading.
+      const enable = ["launchctl", "enable", target];
+      commands.push(enable);
+      const enabled = await run(enable);
+      if (enabled.code !== 0) throw new Error(`launchctl enable failed: ${enabled.stderr || enabled.stdout}`);
       if (current.code === 0) {
         const stop = ["launchctl", "bootout", target];
         commands.push(stop);
