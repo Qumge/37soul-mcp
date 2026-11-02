@@ -15,8 +15,8 @@ on:
         type: boolean
         default: true
       baseline_ref:
-        description: Runtime baseline commit
-        default: '632f606'
+        description: Runtime baseline full 40-character commit SHA (not abbreviated)
+        default: '632f60695d4d65583d17c45db663a1c8eabef672'
         required: true
 
 permissions:
@@ -26,6 +26,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [18, 20, 24]
     steps:

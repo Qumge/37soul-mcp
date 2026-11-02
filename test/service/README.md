@@ -15,7 +15,7 @@ Parent integration/CI commands after pushing the combined candidate branch:
 
 ```sh
 gh workflow run release-runtime.yml --ref <ci-branch> \
-  -f service_acceptance=true -f baseline_ref=632f606
+  -f service_acceptance=true -f baseline_ref=632f60695d4d65583d17c45db663a1c8eabef672
 gh run list --workflow release-runtime.yml
 gh run watch <run-id> --exit-status
 gh run download <run-id> --dir service-results
@@ -23,6 +23,8 @@ gh run download <run-id> --dir service-results
 
 This extends the existing registered release workflow: parent can dispatch the
 combined branch with `--ref` without first merging product changes to main.
+For `baseline_ref`, pass the complete 40-character commit SHA: checkout treats an
+abbreviated SHA as a branch/tag name, so `632f606` fails before packing.
 The existing verification matrix remains; native acceptance only runs on manual
 dispatch when `service_acceptance` is true (default). No push/tag native-service
 trigger, merge, publication, paid VM or model call is added.
