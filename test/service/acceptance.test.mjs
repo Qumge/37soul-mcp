@@ -47,3 +47,32 @@ test('installed dist/cli.js must equal packed dist/bundle/cli.js bytes, not a de
   await writeFile(path.join(runtime, 'dist/cli.js'), 'tampered installed bytes');
   await assert.rejects(validateInstalledCli(runtime, expected), /installed bytes match downloaded release/);
 });
+
+test('public candidate runs literal curl with no release override; baseline stays local', async () => {
+  const { installerInvocation } = await import('./acceptance.mjs');
+  const inherited = { PATH: '/bin', SOUL37_RELEASE_BASE: 'https://wrong.invalid', SOUL37_BASE_URL: 'https://wrong.invalid' };
+  const spec = installerInvocation('candidate', true, '/fixture/install.sh', 'http://127.0.0.1:9', inherited);
+  assert.equal(spec.command, 'bash');
+  assert.deepEqual(spec.args, ['-o', 'pipefail', '-c', 'curl -fsSL https://37soul.com/install.sh | bash']);
+  assert.equal(spec.env.SOUL37_RELEASE_BASE, undefined);
+  assert.equal(spec.env.SOUL37_BASE_URL, undefined);
+  assert.equal(inherited.SOUL37_RELEASE_BASE, 'https://wrong.invalid');
+  for (const [which, publicMode] of [['baseline', true], ['candidate', false]]) {
+    const local = installerInvocation(which, publicMode, '/fixture/install.sh', 'http://127.0.0.1:9', inherited);
+    assert.deepEqual(local.args, ['/fixture/install.sh']);
+    assert.equal(local.env.SOUL37_RELEASE_BASE, `http://127.0.0.1:9/${which}`);
+  }
+});
+
+test('public metadata rejects wrong version, archive digest and manifest drift', async () => {
+  const { validateReleaseMetadata } = await import('./public-release.mjs');
+  const { createHash } = await import('node:crypto');
+  const archive = Buffer.from('synthetic archive');
+  const sha256 = createHash('sha256').update(archive).digest('hex');
+  const files = { '37soul-runtime.tgz': archive, '37soul-runtime.tgz.sha256': Buffer.from(`${sha256}  37soul-runtime.tgz\n`), VERSION: Buffer.from('0.14.0\n'), 'release-manifest.json': Buffer.from(JSON.stringify({ version: '0.14.0', sha256, protocol: 'soul-assets/v1' })) };
+  assert.deepEqual(validateReleaseMetadata(files, '0.14.0'), { version: '0.14.0', sha256 });
+  assert.throws(() => validateReleaseMetadata(files, '0.14.1'));
+  assert.throws(() => validateReleaseMetadata({ ...files, '37soul-runtime.tgz': Buffer.from('tampered') }, '0.14.0'));
+  assert.throws(() => validateReleaseMetadata({ ...files, 'release-manifest.json': Buffer.from(JSON.stringify({ version: '0.13.4', sha256, protocol: 'soul-assets/v1' })) }, '0.14.0'));
+  assert.throws(() => validateReleaseMetadata({ ...files, 'release-manifest.json': Buffer.from(JSON.stringify({ version: '0.14.0', sha256: '0'.repeat(64), protocol: 'soul-assets/v1' })) }, '0.14.0'));
+});

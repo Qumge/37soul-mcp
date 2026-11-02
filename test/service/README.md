@@ -15,7 +15,7 @@ Parent integration/CI commands after pushing the combined candidate branch:
 
 ```sh
 gh workflow run release-runtime.yml --ref <ci-branch> \
-  -f service_acceptance=true -f baseline_ref=632f60695d4d65583d17c45db663a1c8eabef672
+  -f service_acceptance=true -f public_release=false -f baseline_ref=632f60695d4d65583d17c45db663a1c8eabef672
 gh run list --workflow release-runtime.yml
 gh run watch <run-id> --exit-status
 gh run download <run-id> --dir service-results
@@ -34,7 +34,8 @@ and SHA-256; the build job verifies that checksum. This avoids cross-private-rep
 tokens and leaves the product installer untouched. Parent must update this fixture
 and provenance if the intended installer changes. This is not live website delivery.
 
-The workflow packs baseline and candidate once in one Linux build job, then both
+With `public_release=false` (default), the workflow packs baseline and candidate
+once in one Linux build job, then both
 OS jobs download the identical `service-runtime-inputs` artifact. It contains all
 four candidate release files, baseline release files, installer and exact source
 SHAs. After both native jobs pass, parent must publish those candidate files
@@ -90,7 +91,47 @@ reinstall with retained data; it does not separately test candidate first instal
 on a VM that has never had the baseline. Manager restart is tested, **not VM
 reboot/login persistence**. This does
 not test host hooks/model extraction, authenticated cloud sync, revoked credentials,
-or public GitHub Release/CDN delivery. The HTTP server serves local packed release
-bytes; parent must separately verify the published `curl` path after publication.
+or host authenticated cloud delivery. In default mode the HTTP server serves
+local packed release bytes; public GitHub Release/CDN delivery is only tested by
+the explicit post-publication mode below.
 Local pure checks do not establish either OS integration result. Both native jobs
 must pass before reporting clean-OS service acceptance.
+
+## Post-publication public curl acceptance
+
+After publication, parent dispatches the same registered workflow on the intended
+release/harness branch:
+
+```sh
+gh workflow run release-runtime.yml --ref <ci-branch> \
+  -f service_acceptance=true -f public_release=true \
+  -f baseline_ref=632f60695d4d65583d17c45db663a1c8eabef672
+```
+
+`service-pack` then downloads official `releases/latest/download` assets
+`37soul-runtime.tgz`, `.tgz.sha256`, `release-manifest.json`, and `VERSION`.
+It does not repack the candidate. It rejects a VERSION differing from the checked
+out package.json, archive SHA-256 mismatch, manifest version/protocol/digest drift,
+or packed package version mismatch. Baseline 0.13.4 is still packed locally.
+
+Every candidate upgrade/repeat/reinstall stage in the hosted VM actually runs:
+
+```sh
+curl -fsSL https://37soul.com/install.sh | bash
+```
+
+The harness runs the literal pipeline with `pipefail` and removes inherited
+`SOUL37_RELEASE_BASE` and `SOUL37_BASE_URL` from that subprocess. It does not
+substitute a downloaded installer fixture for the public command. All existing
+manager PID, IPC writer, exact installed path, package version, tarball byte hash,
+restart, uninstall/reinstall and retained-data assertions remain mandatory.
+If latest changes between evidence download and installation, the strict byte
+binding fails instead of accepting different release bytes.
+
+`service-runtime-inputs/candidate/release/public-release.json` and each native
+result artifact record public installer URL, release asset URLs, version and
+archive SHA-256; `PASS.json` embeds this provenance. All four downloaded assets
+are retained in `service-runtime-inputs`. The candidate checkout SHA identifies
+the harness/expected version, not proof of the public tarball's source commit.
+Successful local pure checks do not establish public delivery. Parent must inspect
+both native PASS results for the same archive hash. Never run this mode locally.

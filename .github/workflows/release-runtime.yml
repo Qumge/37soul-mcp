@@ -14,6 +14,10 @@ on:
         description: Run real clean OS default installer lifecycle (hosted VMs only)
         type: boolean
         default: true
+      public_release:
+        description: Verify published latest with literal public curl (after release only)
+        type: boolean
+        default: false
       baseline_ref:
         description: Runtime baseline full 40-character commit SHA (not abbreviated)
         default: '632f60695d4d65583d17c45db663a1c8eabef672'
@@ -93,17 +97,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Pack once; both operating systems verify these exact bytes
+      - name: Prepare exact release evidence for both operating systems
+        env:
+          PUBLIC_RELEASE: ${{ inputs.public_release }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p service-inputs
           for repo in candidate baseline; do
             git -C "$repo" rev-parse HEAD > "service-inputs/$repo-sha.txt"
-            (cd "$repo" && npm ci && ./scripts/pack-runtime.sh)
-            mkdir -p "service-inputs/$repo"
-            cp -R "$repo/release" "service-inputs/$repo/"
           done
+          (cd baseline && npm ci && ./scripts/pack-runtime.sh)
+          mkdir -p service-inputs/baseline service-inputs/candidate
+          cp -R baseline/release service-inputs/baseline/
+          if [[ "$PUBLIC_RELEASE" == "true" ]]; then
+            node candidate/test/service/public-release.mjs service-inputs/candidate/release candidate/package.json
+          else
+            (cd candidate && npm ci && ./scripts/pack-runtime.sh)
+            cp -R candidate/release service-inputs/candidate/
+          fi
           cp candidate/test/service/fixtures/install.sh service-inputs/install.sh
           cp candidate/test/service/fixtures/provenance.json service-inputs/installer-provenance.json
           node --test candidate/test/service/acceptance.test.mjs
@@ -144,11 +156,15 @@ jobs:
           XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" systemctl --user show-environment
       - name: Default HTTP installer and native service lifecycle
         id: acceptance
+        env:
+          PUBLIC_RELEASE: ${{ inputs.public_release }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p service-evidence
-          node test/service/acceptance.mjs service-inputs/baseline/release service-inputs/candidate/release service-inputs/install.sh service-evidence 2>&1 | tee service-evidence/harness.log
+          extra=()
+          if [[ "$PUBLIC_RELEASE" == "true" ]]; then extra+=(--public-release); fi
+          node test/service/acceptance.mjs service-inputs/baseline/release service-inputs/candidate/release service-inputs/install.sh service-evidence "${extra[@]}" 2>&1 | tee service-evidence/harness.log
       - name: Record job result (absence of PASS is never acceptance)
         if: always()
         env:

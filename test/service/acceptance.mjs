@@ -27,6 +27,15 @@ export function validateHealth(reply, pid, runtime) {
   assert.equal(reply.result.entrypoint, path.join(runtime, 'dist/cli.js'));
   return pid;
 }
+export function installerInvocation(which, publicMode, installer, base, inherited) {
+  const env = { ...inherited };
+  if (publicMode && which === 'candidate') {
+    delete env.SOUL37_RELEASE_BASE;
+    delete env.SOUL37_BASE_URL;
+    return { command: 'bash', args: ['-o', 'pipefail', '-c', 'curl -fsSL https://37soul.com/install.sh | bash'], env };
+  }
+  return { command: 'bash', args: [installer], env: { ...env, SOUL37_RELEASE_BASE: `${base}/${which}`, SOUL37_BASE_URL: base } };
+}
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function run(command, args = [], options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', timeout: 90_000, stdio: ['ignore', 'pipe', 'pipe'], ...options });
@@ -87,12 +96,15 @@ async function main() {
   try { initialState = inspect(); } catch {}
   assertManagerAbsent(initialState, process.platform);
 
-  const [baseline, candidate, installer, evidence = 'service-evidence'] = process.argv.slice(2).map(p => path.resolve(p));
+  const publicMode = process.argv.includes('--public-release');
+  const [baseline, candidate, installer, evidence = 'service-evidence'] = process.argv.slice(2).filter(arg => arg !== '--public-release').map(p => path.resolve(p));
   assert.ok(baseline && candidate && installer, 'usage: acceptance.mjs BASE_RELEASE CANDIDATE_RELEASE INSTALL_SH EVIDENCE');
   await mkdir(evidence, { recursive: true });
   if (mac) await writeFile(path.join(evidence, '00-clean-disabled.txt'), run('launchctl', ['print-disabled', `gui/${uid}`]));
   const versions = await Promise.all([baseline, candidate].map(async dir => (await readFile(path.join(dir, 'VERSION'), 'utf8')).trim()));
   assert.notEqual(versions[0], versions[1], 'upgrade must cross versions');
+  const publicRelease = publicMode ? JSON.parse(await readFile(path.join(candidate, 'public-release.json'), 'utf8')) : null;
+  if (publicMode) await writeFile(path.join(evidence, 'public-release.json'), JSON.stringify(publicRelease, null, 2));
   const server = createServer(async (req, res) => {
     const match = req.url?.match(/^\/(baseline|candidate)\/(37soul-runtime\.tgz(?:\.sha256)?)$/);
     if (!match) { res.writeHead(404).end(); return; }
@@ -110,7 +122,9 @@ async function main() {
     // Async subprocess: the local HTTP server must keep servicing downloads.
     const { spawn } = await import('node:child_process');
     await new Promise((resolve, reject) => {
-      const child = spawn('bash', [installer], { env: { ...process.env, SOUL37_RELEASE_BASE: `${base}/${which}`, SOUL37_BASE_URL: base }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const spec = installerInvocation(which, publicMode, installer, base, process.env);
+      console.log(JSON.stringify({ stage, delivery: publicMode && which === 'candidate' ? 'curl -fsSL https://37soul.com/install.sh | bash' : 'local HTTP release' }));
+      const child = spawn(spec.command, spec.args, { env: spec.env, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '';
       child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
       const timer = setTimeout(() => child.kill('SIGKILL'), 90_000);
@@ -199,7 +213,7 @@ async function main() {
     await install('candidate', '06-reinstall');
     previous = await check(versions[1], '06-reinstall', previous); await preserve();
     await uninstall('07-final-uninstall');
-    await writeFile(path.join(evidence, 'PASS.json'), JSON.stringify({ platform: process.platform, candidateTarballSha256: createHash('sha256').update(await readFile(path.join(candidate, '37soul-runtime.tgz'))).digest('hex'), records }, null, 2));
+    await writeFile(path.join(evidence, 'PASS.json'), JSON.stringify({ platform: process.platform, publicRelease, candidateTarballSha256: createHash('sha256').update(await readFile(path.join(candidate, '37soul-runtime.tgz'))).digest('hex'), records }, null, 2));
     console.log('PASS: native service lifecycle; candidate tarball recorded in PASS.json');
     owned = false;
   } finally {
