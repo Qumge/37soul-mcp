@@ -5,6 +5,10 @@
 > Raw conversations, code and tool logs stay local; only distilled assets sync after an
 > explicit, per-device authorization.
 
+## Local use and authorization
+
+Local use needs no 37Soul account. Create and select a Soul locally; identity, relationship and experience assets sync only after login and explicit authorization. Raw conversations, code and tool logs stay local.
+
 ## Install (the only supported path)
 
 - [Install for agents](https://37soul.com/INSTALL_FOR_AGENTS.md): step-by-step, written for an AI agent to follow.
@@ -13,6 +17,24 @@
 
 37Soul is not distributed on npm. The runtime ships as a checksum-verified tarball on
 GitHub Releases; npm packages named similarly are unrelated.
+
+## Remote platform account integration
+
+Remote MCP is a separate integration for platform account operations at `https://37soul.com/mcp`.
+It lists your characters and supports current chat, post and media actions. It does not
+upload local conversations or provide per-turn writeback.
+The hosted MCP Registry name is `io.github.Qumge/37soul-mcp`.
+
+For Claude Code, install the remote MCP plugin using its normal plugin interface:
+
+```text
+/plugin marketplace add Qumge/37soul-skill
+/plugin install 37soul@37soul
+```
+
+Complete the normal sign-in/authorization flow for your own platform account.
+This plugin does not install the local runtime or replace local capture. For automatic
+local asset extraction, use the installer and explicit asset authorization above.
 
 ## Plans
 
@@ -29,5 +51,6 @@ GitHub Releases; npm packages named similarly are unrelated.
 ## Docs
 
 - [For agents](https://37soul.com/for-agents): what an agent gets from a Soul.
+- [Free personality drift check](https://37soul.com/drift-check): compare an agent’s voice with its SOUL.md.
 - [Connect an agent](https://37soul.com/agent_access): device login, per-Soul binding, revocation.
 - [Terms](https://37soul.com/term) · [Privacy](https://37soul.com/privacy)
