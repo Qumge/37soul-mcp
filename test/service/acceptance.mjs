@@ -31,6 +31,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function run(command, args = [], options = {}) {
   return execFileSync(command, args, { encoding: 'utf8', timeout: 90_000, stdio: ['ignore', 'pipe', 'pipe'], ...options });
 }
+export function packedCliBytes(archive) {
+  return run('tar', ['-xOzf', archive, '37soul/dist/bundle/cli.js'], { encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 });
+}
+export async function validateInstalledCli(runtime, expectedBundle) {
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  assert.equal(hash(await readFile(path.join(runtime, 'dist/cli.js'))), hash(expectedBundle), 'installed bytes match downloaded release');
+}
 async function absent(file) { try { await access(file); return false; } catch (e) { if (e.code === 'ENOENT') return true; throw e; } }
 async function health(root) {
   return new Promise((resolve, reject) => {
@@ -117,15 +124,14 @@ async function main() {
   const check = async (version, stage, previous) => {
     const runtime = path.join(root, 'runtime', version);
     const archive = path.join(version === versions[0] ? baseline : candidate, '37soul-runtime.tgz');
-    const expectedBundle = run('tar', ['-xOzf', archive, '37soul/dist/bundle/cli.js'], { encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 });
-    const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+    const expectedBundle = packedCliBytes(archive);
     const current = await eventually(async () => {
       const currentPid = pid();
       validateHealth(await health(root), currentPid, runtime);
       if (previous) { assert.notEqual(currentPid, previous); assert.throws(() => process.kill(previous, 0)); }
       assert.match(inspect(), new RegExp(runtime.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       assert.equal(JSON.parse(await readFile(path.join(runtime, 'package.json'))).version, version);
-      assert.equal(hash(await readFile(path.join(runtime, 'dist/cli.js'))), hash(expectedBundle), 'installed bytes match downloaded release');
+      await validateInstalledCli(runtime, expectedBundle);
       await delay(1000);
       assert.equal(pid(), currentPid, 'service remains stable');
       validateHealth(await health(root), currentPid, runtime);
