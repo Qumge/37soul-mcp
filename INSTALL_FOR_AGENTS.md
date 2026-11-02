@@ -1,106 +1,132 @@
-# Install 37Soul for an existing agent (agent-facing instructions)
+# Install 37Soul for an existing agent
 
-You are an AI coding agent. A human asked you to give yourself (or this machine's agents)
-a persistent Soul from 37Soul: one identity, what she has learned about the human, and
-reusable experience — the same in every agent they use, across machines.
+Read this guide before acting. Use the human's choices, never invented credentials or a
+persona. Raw conversations, code and tool logs stay local; only explicitly authorized
+identity, relationship and experience assets sync to 37Soul. The host's configured model
+processes bounded local source material, so extraction is not an entirely offline process.
+37Soul is **not** distributed on npm. Use the GitHub Release installer below.
 
-Read this whole file before acting. Ask before anything destructive. Never invent
-credentials, Soul names, or "success" — verify with the commands below.
-
-## What you are installing
-
-- A local runtime (`37soul`) that connects the agents installed on this machine.
-- Raw conversations, code and tool logs stay local. Only distilled assets (identity,
-  relationship preferences, experience) sync — and only after the human logs in and
-  explicitly authorizes a Soul.
-- 37Soul is **not** distributed on npm. Do not run `npm install -g 37soul-mcp`,
-  `bun add -g`, or any registry install. The only supported path is the installer below.
-
-## Supported harnesses
+## Supported hosts and prerequisites
 
 `claude-code`, `codex`, `opencode`, `hermes`, `pi`.
-Detected but not yet capturable: `gemini-cli` (the installer prints
-`detected but not capturable yet: …`; that is expected, not a failure).
+`gemini-cli` may be detected but is not capturable yet; report that limitation honestly.
 
-## Step 1 — preview, then install
+- macOS or Linux, Node.js 18+, curl and tar.
+- At least one supported host with working model authentication. 37Soul does not supply
+  or replace the host's model credentials.
+- Linux needs a working systemd user session (`systemctl --user`). Containers or servers
+  without one cannot start this background service; stop and report the prerequisite.
 
-```bash
-curl -fsSL https://37soul.com/install.sh | bash -s -- --plan   # writes nothing
-curl -fsSL https://37soul.com/install.sh | bash               # install
-```
-
-Requires macOS or Linux and Node.js 18+. The installer:
-
-1. downloads the runtime from the GitHub Release and verifies its SHA-256;
-2. writes each detected harness's adapter (hooks / plugin / extension);
-3. starts a background capture service;
-4. creates a local anonymous profile. **No HTTP request, no login, no upload.**
-
-If the plan lists a harness you do not want touched, pass `--agents claude-code,codex`
-(exact kinds only).
-
-## Step 2 — verify what happened
+## 1. Preview and install
 
 ```bash
-37soul doctor     # ✓ works · ✗ needs an action · … waits on the host agent (normal until first use)
-37soul status     # machine id, credentials, sync state
+curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
+curl -fsSL https://37soul.com/install.sh | bash
 ```
 
-`…` lines are not failures: they turn into `✓` the first time that agent actually runs a
-session. `✗ … sync credential` is expected before Step 3.
+The plan writes nothing. Installation contacts download servers over HTTP(S), verifies
+the Release SHA-256, writes managed host configuration and a local profile, and attempts
+to start the background service. It does not automatically log in or sync. Run
+`37soul doctor` to verify service startup, rather than assuming success.
+To restrict host changes, pass `--agents claude-code,codex` after `bash -s --`.
+If the command is not found, use `~/.local/bin/37soul` and add `~/.local/bin` to PATH.
 
-## Step 3 — the human must authorize (you cannot do this alone)
+## 2. Choose one starting path
+
+### A. Create and use a Soul locally, without an account
+
+Local use does not require login or sync. Ask the human to confirm the required
+name, sex, age (16–65), and character (at least 50 characters). Sex must be `male`,
+`female` or `other`. Do not invent a persona or execute unfilled placeholders.
+Fill these values only with the human's confirmed choices:
+
+```bash
+SOUL_NAME='<confirmed name>'
+SOUL_SEX='<confirmed male, female or other>'
+SOUL_AGE='<confirmed integer from 16 to 65>'
+SOUL_CHARACTER='<confirmed character of at least 50 characters>'
+37soul soul create --name "$SOUL_NAME" --sex "$SOUL_SEX" --age "$SOUL_AGE" --character "$SOUL_CHARACTER"
+37soul soul list
+SOUL_UID='<actual Soul UID from the creation result>'
+37soul soul select "$SOUL_UID"
+```
+
+Complete the host steps below and open a new session. Cloud setup is optional;
+continue to section 4 only when the human requests it.
+
+### B. Existing website Soul: login and restore
 
 ```bash
 37soul login
 ```
 
-It prints an `https://37soul.com/cli/approve?code=XXXX-XXXX` URL and a short code.
-**Hand that URL to the human** and wait. In the browser they confirm the code and
-optionally pick which Soul this device speaks as. Nothing is uploaded before this.
+Give the displayed approval URL and short code privately to the human. They sign in,
+verify the code, select their existing Soul and approve the device. Selecting an existing
+Soul grants the initial sync consent described by the approval page; review it before
+approving. Wait for `Soul restored:` in the terminal. If no Soul was selected, login
+alone does not restore one: repeat login and select the intended Soul. Do not create a
+replacement persona. Complete the host steps and open a new session.
 
-Then, only if they want assets synced:
+## 3. Complete normal host approval
+
+Do not bypass host approval or fabricate trust records.
+
+| Host | Required action |
+| --- | --- |
+| Claude Code | Close the old session and open a new one to load managed hooks and guidance. |
+| Codex | Open `/hooks`, review and approve 37Soul's hook, then open a new session. The installer cannot approve it. |
+| OpenCode | Restart to load the managed plugin; resolve any reported plugin loading error. |
+| Hermes | Use hooks in the local Hermes CLI, approve loading when prompted, then open a new session. A gateway-only setup is not a substitute. |
+| Pi | Restart to load the managed extension; approve it if the host restricts extensions, then open a new session. |
+
+## 4. Optional cloud sync and website corrections
+
+For a locally created Soul, only after the human agrees to publication and sync:
 
 ```bash
-37soul soul authorize <soul_uid> --categories identity,relationship,experience
+37soul login
+37soul soul select "$SOUL_UID"
+37soul soul authorize "$SOUL_UID" --categories identity,relationship,experience
 37soul sync
 ```
 
-`37soul soul list` prints the Soul uid(s). Authorizing makes the Soul's public profile
-public; private chats and personal memories stay private.
+Use the actual UID of the local Soul. During browser approval, do not select a different
+website Soul when the intent is to sync this local Soul.
+Authorization publishes the Soul's public character profile; private chats and personal
+memories stay private. `--categories` replaces the complete authorization set for this
+device and Soul, not an incremental addition. Confirm the full desired set with the
+human before each authorization; choose only the categories they approve.
 
-## Step 4 — make the agent actually use it
+After a website correction, run `37soul sync`, confirm there are no sync errors, then
+open a new session. Background sync is periodic: it does not rewrite an already open
+session or withdraw content already loaded into its context.
 
-Restart the agent(s) you connected. New sessions receive the Soul context
-(`[Soul]` identity plus `[Relationship]` / `[Experience]` assets) through the harness's
-own injection point. To point one harness at a specific Soul:
+## 5. Verify and report precisely
 
 ```bash
-37soul soul select <soul_uid> --agent codex
+37soul status
+37soul doctor
+37soul soul list
+37soul recall "collaboration"
 ```
 
-## What success looks like
+Installed files do not prove host loading; local extraction does not prove cloud sync.
+Distinguish service startup, host approval/loading, observed local events, extracted
+assets and confirmed sync. Follow each doctor action; a waiting state is not a completed
+host check. A full real conversation turn and a useful long-term preference may be
+needed before an asset appears. Extraction and retries consume host model quota.
+Only a logged-in, authorized device should be expected on the website's Connections page.
+Remote MCP is a separate platform account integration, not local automatic capture.
 
-- `37soul doctor` shows `✓` for the harness you care about (or `…` before its first use).
-- After a real session, `~/.37soul/spool/<agent-kind>/` contains a `.jsonl` event file.
-- `37soul status` reports `soul sync: assets_only — N pending` (pending is normal until sync).
-- The website shows this device under Settings → Connections, one row per agent.
+If troubleshooting is needed, share only a sanitized command, status and error summary:
+redact tokens, authorization codes, account identifiers, local paths and raw session content.
+Never paste credentials, private source files or complete session/spool files. Do not
+claim success from a fixture or repeat a model call without the human's authorization.
 
 ## Operations
 
-| need | command |
-|---|---|
-| pause capture (everything, or one repo) | `37soul pause` / `37soul pause --repo <path>` |
-| resume | `37soul resume` |
-| re-check health | `37soul doctor` |
-| remove everything we wrote (keeps local profiles and archives) | `37soul uninstall` |
-| export the Soul as files | `37soul soul export` |
-
-## Hard rules while you work
-
-- Do not edit the human's agent instruction files beyond what the installer wrote
-  (managed blocks are marked; the installer is idempotent).
-- Do not print, copy or commit tokens; `37soul` stores scoped credentials itself.
-- Do not claim the Soul "is syncing" until `37soul status` / the website shows it.
-- If a step fails, paste the exact command and its output to the human. Never retry a
-  `--yes`-style migration blindly.
+`37soul pause`, `37soul resume`, `37soul doctor`, `37soul uninstall`.
+Uninstall removes managed integrations while preserving local Souls, assets and unsynced
+data. Do not delete profiles or queues as a troubleshooting shortcut, and do not edit
+managed host blocks by hand. Reinstall through the same installer if the service is
+missing or running an old version, then check doctor and normal host approval again.
