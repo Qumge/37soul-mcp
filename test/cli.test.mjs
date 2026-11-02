@@ -359,7 +359,7 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
   const root = path.join(home, ".37soul");
   const uid = "10000000-0000-4000-8000-0000000000ac";
   const avatar = path.join(home, "chosen.png");
-  writeFileSync(avatar, Buffer.from("PNG-BYTES"));
+  writeFileSync(avatar, AVATAR_PNG);
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
     d.cloud_issuer = "https://fake.test";
@@ -400,7 +400,8 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
     assert.equal(calls[0].headers.authorization, "Bearer token-1");
     assert.match(calls[0].url, /^https:\/\/fake\.test\//, "uses config.api_base_url, not the CLI default");
     assert.equal(typeof calls[0].body.get, "function", "multipart FormData is sent, not a local path string");
-    assert.equal(calls[0].body.get("file").name, "chosen.png");
+    assert.equal(calls[0].body.get("file").name, createHash("sha256").update(AVATAR_PNG).digest("hex")+".png");
+    assert.deepEqual(Buffer.from(await calls[0].body.get("file").arrayBuffer()), AVATAR_PNG);
     const store = await openStore(root, "p1"); const snap = await store.read(); await store.close();
     assert.equal(snap.souls[uid].avatar_url, "https://cdn.example/avatar.webp");
     assert.equal(snap.souls[uid].avatar_uploaded, true);
@@ -409,7 +410,8 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
     const failed = makeIo();
     assert.equal(await main(["soul", "avatar", uid, "--profile", "p1", "--file", avatar], failed.io), 1);
     const store2 = await openStore(root, "p1"); const snap2 = await store2.read(); await store2.close();
-    assert.equal(snap2.souls[uid].local_avatar_path, avatar, "failed upload keeps the local image");
+    assert.notEqual(snap2.souls[uid].local_avatar_path, avatar, "failed upload keeps a managed local image");
+    assert.deepEqual(readFileSync(snap2.souls[uid].local_avatar_path), AVATAR_PNG);
     assert.equal(snap2.souls[uid].avatar_uploaded, false);
 
     globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) });
@@ -495,7 +497,7 @@ test("profile: a slow manual avatar ACK cannot overwrite a concurrent CLI create
   const root = path.join(home, ".37soul");
   const oldUid = "10000000-0000-4000-8000-0000000000af";
   const file = path.join(home, "old-avatar.png");
-  writeFileSync(file, Buffer.from("OLD-BYTES"));
+  writeFileSync(file, AVATAR_PNG);
   await seed(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
     d.cloud_issuer = "https://fake.test";

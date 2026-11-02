@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {readAvatarFile} from './local/avatars.js';
 /**
  * `37soul` CLI（设计 §6.1）：install / doctor / status / uninstall / pause / resume，
  * 以及两个内部命令 `agentd`（后台采集进程）和 `hook --agent <kind>`（SessionStart）。
@@ -76,7 +77,7 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
   37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
                                                 profile commands default to the valid active profile
-  37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <50+ chars> [--avatar <path>] [--profile <id>]
+  37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <50+ chars> --avatar <path> [--profile <id>]
   37soul soul list [--profile <id>]              list local Souls
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
   37soul soul edit <uid> [--name <n> ...] [--avatar <path>] [--profile <id>]   edit a local (unregistered) Soul
@@ -497,19 +498,13 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
     if (missing.length > 0) {
       io.stderr(`missing or invalid Soul profile fields: ${missing.join(", ")}
 `);
-      io.stderr('usage: 37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <at least 50 chars> [--avatar <path>]\n');
+      io.stderr('usage: 37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <at least 50 chars> --avatar <path>\n');
       return 2;
     }
     const avatarPath = avatarPathFromArgs(flagValue(args, "--avatar"));
-    if (avatarPath) {
-      try {
-        if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
-      } catch {
-        io.stderr(`avatar file not found: ${avatarPath}\n`);
-        return 2;
-      }
-    }
-    const res = await runWriterCommand(root, profileId, "create_soul", { identity, ...(avatarPath ? { avatar_path: avatarPath } : {}) });
+    try { await readAvatarFile(avatarPath); }
+    catch (error) { io.stderr(`${error instanceof Error ? error.message : 'a valid photo is required'}\n`); return 2; }
+    const res = await runWriterCommand(root, profileId, "create_soul", { identity, avatar_path: avatarPath });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;
@@ -591,17 +586,12 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       io.stderr(`missing or invalid Soul profile fields: ${missing.join(", ")}; complete name, sex, age and at least 50-character character\n`);
       return 2;
     }
-    const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity, validate_public_profile: true });
     const avatarPath = avatarPathFromArgs(flagValue(args, "--avatar"));
-    if (res.ok && avatarPath) {
-      try {
-        if (!(await stat(avatarPath)).isFile()) throw new Error("not a file");
-        await runWriterCommand(root, profileId, "set_soul_avatar", { soul_uid: soulUid, local_avatar_path: avatarPath });
-      } catch {
-        io.stderr(`avatar file not found: ${avatarPath}\n`);
-        return 2;
-      }
+    if (avatarPath) {
+      try { await readAvatarFile(avatarPath); }
+      catch (error) { io.stderr(`${error instanceof Error ? error.message : 'a valid photo is required'}\n`); return 2; }
     }
+    const res = await runWriterCommand(root, profileId, "edit_local_identity", { soul_uid: soulUid, identity, validate_public_profile: true, ...(avatarPath ? { avatar_path: avatarPath } : {}) });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
       return 1;

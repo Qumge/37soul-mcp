@@ -1,3 +1,4 @@
+import {preserveAvatar} from '../local/avatars.js';
 /**
  * Task 5: the cloud boundary for soul-assets/v1.
  *
@@ -273,7 +274,7 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
           report.pending = pendingCount(snap);
           return report;
         }
-        if (!listed.includes("soul_profile_public_v1")) {
+        if (!listed.includes("soul_profile_public_v1") || !listed.includes("soul_registration_photo")) {
           report.error = "server_upgrade_required";
           report.pending = pendingCount(snap);
           return report;
@@ -486,13 +487,26 @@ async function handleRegisterSoul(
   const soulUid = String(op.request.soul_uid ?? "");
   if (res.status === 200 || res.status === 201) {
     const body = res.body as { soul?: Soul; consent?: Consent } | null;
+    const photo = op.request.avatar as { data_base64?: unknown } | undefined;
+    if (photo) {
+      if (body?.soul?.soul_uid !== soulUid || !Number.isInteger(body.soul.legacy_host_id) || (body.soul.legacy_host_id ?? 0) <= 0) return "photo_registration_failed";
+      try {
+        const url = new URL(body?.soul?.avatar_url ?? "");
+        if (!['http:', 'https:'].includes(url.protocol) || /(?:^|\.)dicebear\.com$/i.test(url.hostname) || /default[_-]?avatar|placeholder/i.test(url.pathname)) return "photo_registration_failed";
+      } catch { return "photo_registration_failed"; }
+    }
     await store.transact((draft) => {
       delete draft.outbox[op.operation_id];
       if (body?.soul) {
         const previous = draft.souls[soulUid];
+        let chosenPhotoAccepted = false;
+        if (photo && typeof photo.data_base64 === "string" && previous?.local_avatar_path) {
+          try { chosenPhotoAccepted = createHash("sha256").update(readFileSync(previous.local_avatar_path)).digest("hex") === createHash("sha256").update(Buffer.from(photo.data_base64, "base64")).digest("hex"); } catch { /* Keep a changed or missing local photo pending. */ }
+        }
         draft.souls[soulUid] = {
           ...previous,
           ...body.soul,
+          ...(chosenPhotoAccepted ? { avatar_uploaded: true, avatar_upload_error: undefined } : {}),
           // A locally created Soul keeps its local original identity even after the
           // server confirms/updates it.
           ...(previous?.origin === "local"
@@ -682,10 +696,12 @@ async function uploadPendingAvatar(
     const snap = await store.read();
     assertProfileCloudIssuer(snap, baseUrl, await readAccountsIndex(root));
     if (options.localAvatarPath) {
+      if (!options.soulUid || !snap.souls[options.soulUid]) throw new StoreError("unknown_soul", `no local soul ${options.soulUid ?? ""}`);
+      const managedPhoto = await preserveAvatar(root, profileId, options.localAvatarPath);
       await store.transact(draft => {
         const soul = options.soulUid ? draft.souls[options.soulUid] : undefined;
         if (!soul) throw new StoreError("unknown_soul", `no local soul ${options.soulUid ?? ""}`);
-        soul.local_avatar_path = options.localAvatarPath;
+        soul.local_avatar_path = managedPhoto;
         soul.avatar_uploaded = false;
         delete soul.avatar_upload_error;
       });

@@ -1,3 +1,4 @@
+import {AVATAR_PNG} from './helpers/avatar.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
@@ -21,7 +22,7 @@ async function fixture(issuer, run, anonymous = false) {
  const home=mkdtempSync(path.join(tmpdir(),'sync-profile-issuer-')),root=path.join(home,'.37soul');
  await saveConfig(root,{api_base_url:TARGET,machine_id:'machine',active_profile_id:'work',tokens:{},credentials:[{issuer:TARGET,token:'FAKE-B',owner_id:'owner',cloud_device_uid:'device',runtime_kind:'claude-code',profile_id:'work',obtained_at:'fixture'}]});
  await writeAccountsIndex(root,anonymous?{}:{owner:{profile_id:'work',cloud_issuer:TARGET,soul_sync_mode:'assets_only',default_soul_uid:SOUL}});
- const image=path.join(home,'fake.png');writeFileSync(image,'SYNTHETIC-IMAGE');
+ const image=path.join(home,'fake.png');writeFileSync(image,AVATAR_PNG);
  const store=await openStore(root,'work');
  await store.transact(d=>{
   d.owner_id=anonymous?null:'owner';d.cloud_device_uid=anonymous?null:'device';
@@ -33,7 +34,7 @@ async function fixture(issuer, run, anonymous = false) {
  const http=async(url,init={})=>{calls.push({url:String(url),method:init.method??'GET'});return response(init.method==='PUT'?{protocol:'soul-assets/v1',avatar_url:'https://cdn.test/synthetic.png'}:{protocol:'soul-assets/v1',events:[],next_cursor:null,has_more:false});};
  const unchanged=()=>[snapshotPath(root,'work'),path.join(root,'config.json'),path.join(root,'accounts.json')].map(p=>readFileSync(p,'utf8'));
  const before=unchanged();
- try{await run({home,root,http,calls,before,unchanged});}finally{configureSyncHttp(null);rmSync(home,{recursive:true,force:true});}
+ try{await run({home,root,http,calls,before,unchanged,image});}finally{configureSyncHttp(null);rmSync(home,{recursive:true,force:true});}
 }
 for(const [label,issuer] of [['missing',undefined],['mismatch','https://a.test/team'],['malformed','not a URL']]) {
  test(`explicit CLI sync rejects ${label} snapshot issuer despite matching B credential; zero HTTP and unchanged store`,()=>fixture(issuer,async f=>{
@@ -96,10 +97,10 @@ for(const anonymous of [true,false])test(`offline avatar choice remains locally 
  const config=JSON.parse(readFileSync(path.join(f.root,'config.json'),'utf8'));await saveConfig(f.root,{...config,credentials:[]});
  configureSyncHttp(f.http);const writer=await startWriter(f.root);
  try{
-  const r=await sendWriter(f.root,{request_uid:'local-pending-avatar',command:'upload_avatar',profile_id:'work',payload:{soul_uid:SOUL,local_avatar_path:'/synthetic/pending-avatar.png'}});
+  const r=await sendWriter(f.root,{request_uid:'local-pending-avatar',command:'upload_avatar',profile_id:'work',payload:{soul_uid:SOUL,local_avatar_path:f.image}});
   assert.equal(r.ok,true);assert.equal(r.result.status,'not_logged_in');
   const store=await openStore(f.root,'work');const snapshot=await store.read();await store.close();
-  assert.equal(snapshot.souls[SOUL].local_avatar_path,'/synthetic/pending-avatar.png');assert.equal(snapshot.souls[SOUL].avatar_uploaded,false);assert.deepEqual(f.calls,[]);
+  assert.notEqual(snapshot.souls[SOUL].local_avatar_path,f.image);assert.deepEqual(readFileSync(snapshot.souls[SOUL].local_avatar_path),AVATAR_PNG);assert.equal(snapshot.souls[SOUL].avatar_uploaded,false);assert.deepEqual(f.calls,[]);
  }finally{await writer.close();}
 },anonymous));
 

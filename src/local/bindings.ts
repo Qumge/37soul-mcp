@@ -1,3 +1,4 @@
+import {preserveAvatar,registrationAvatar} from './avatars.js';
 import { loadConfig } from "../agentd/state.js";
 import { requireCloudIssuer, assertLoginProfileIssuers } from "./profile-issuer.js";
 import { sameServerIssuer } from "../agentd/server-identity.js";
@@ -553,7 +554,8 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
   if (missing.length > 0) {
     throw new StoreError("invalid_profile", `complete required Soul profile fields: ${missing.join(", ")}`);
   }
-  const avatarPath = typeof payload.avatar_path === "string" && payload.avatar_path.trim() !== "" ? payload.avatar_path : undefined;
+  const chosenPath = typeof payload.avatar_path === "string" && payload.avatar_path.trim() !== "" ? payload.avatar_path : undefined;
+  const avatarPath = await preserveAvatar(root, request.profile_id, chosenPath);
   const soul: Soul = {
     soul_uid: soulUid,
     legacy_host_id: null,
@@ -564,8 +566,8 @@ registerWriterCommand("create_soul", async ({ root, request }) => {
     local_identity: { ...identity },
     local_identity_revision: 1,
     publish_profile: true,
-    avatar_url: defaultAvatarUrl(soulUid),
-    ...(avatarPath ? { local_avatar_path: avatarPath, avatar_uploaded: false } : {}),
+    local_avatar_path: avatarPath,
+    avatar_uploaded: false,
   };
   const store = await openStore(root, request.profile_id);
   try {
@@ -624,7 +626,7 @@ registerWriterCommand("authorize_soul", async ({ root, request }) => {
       const op: OutboxOperation = {
         operation_id: operationId,
         operation_kind: "register_soul",
-        request: { soul_uid: soulUid, identity: soul.identity, consent_categories: categories, publish_profile: publishProfile },
+        request: { soul_uid: soulUid, identity: soul.identity, consent_categories: categories, publish_profile: publishProfile, avatar: await registrationAvatar(soul.local_avatar_path) },
         predecessor_operation_ids: previous ? [previous.operation_id] : [],
       };
       await store.transact((draft) => {
@@ -702,8 +704,15 @@ registerWriterCommand("edit_local_identity", async ({ root, request }) => {
       const missing = validatePublicProfile(identity);
       if (missing.length > 0) throw new StoreError("invalid_profile", `complete required Soul profile fields: ${missing.join(", ")}`);
     }
+    const avatarPath = typeof request.payload.avatar_path === "string"
+      ? await preserveAvatar(root, request.profile_id, request.payload.avatar_path) : undefined;
     await store.transact((draft) => {
       const s = draft.souls[soulUid];
+      if (avatarPath) {
+        s.local_avatar_path = avatarPath;
+        s.avatar_uploaded = false;
+        delete s.avatar_upload_error;
+      }
       s.identity = identity;
       s.identity_revision += 1;
       // An unregistered local Soul has no cloud identity to preserve: the edited
@@ -721,6 +730,9 @@ registerWriterCommand("set_soul_avatar", async ({ root, request }) => {
   const soulUid = String(request.payload.soul_uid ?? "");
   const store = await openStore(root, request.profile_id);
   try {
+    if (!(await store.read()).souls[soulUid]) throw new StoreError("unknown_soul", `no local soul ${soulUid}`);
+    const localPath = typeof request.payload.local_avatar_path === "string"
+      ? await preserveAvatar(root, request.profile_id, request.payload.local_avatar_path) : undefined;
     await store.transact((draft) => {
       const soul = draft.souls[soulUid];
       if (!soul) throw new StoreError("unknown_soul", `no local soul ${soulUid}`);
@@ -728,8 +740,8 @@ registerWriterCommand("set_soul_avatar", async ({ root, request }) => {
         soul.avatar_url = request.payload.avatar_url;
         soul.avatar_uploaded = true;
       }
-      if (typeof request.payload.local_avatar_path === "string" && request.payload.local_avatar_path !== "") {
-        soul.local_avatar_path = request.payload.local_avatar_path;
+      if (localPath) {
+        soul.local_avatar_path = localPath;
         if (!request.payload.avatar_url) soul.avatar_uploaded = false;
         delete soul.avatar_upload_error;
       }

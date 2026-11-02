@@ -1,3 +1,4 @@
+import {writeAvatar} from './helpers/avatar.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
@@ -18,6 +19,7 @@ const soul = { soul_uid: 's1', legacy_host_id: 42, identity_revision: 1, identit
 async function read(root, id) { const store = await openStore(root, id); try { return await store.read(); } finally { await store.close(); } }
 async function fixture(run) {
   const home = mkdtempSync(path.join(tmpdir(), 'active-profile-'));
+  writeAvatar(home);
   const root = path.join(home, '.37soul');
   const source = path.join(home, 'pkg');
   mkdirSync(path.join(source, 'dist/bundle'), { recursive: true });
@@ -136,7 +138,7 @@ test('anonymous install -> actual CLI soul create -> Pi hook keeps one anonymous
     process.env.SOUL37_HOME = home;
     globalThis.fetch = async () => { throw new Error('anonymous create must not network'); };
     try {
-      assert.equal(await main(['soul', 'create', '--name', 'Anonymous Fake', '--sex', 'female', '--age', '24', '--character', 'A synthetic local character who speaks clearly, respects boundaries, remembers explicit preferences and never invents evidence.'], io), 0);
+      assert.equal(await main(['soul', 'create', '--avatar', path.join(home, 'synthetic-avatar.png'), '--name', 'Anonymous Fake', '--sex', 'female', '--age', '24', '--character', 'A synthetic local character who speaks clearly, respects boundaries, remembers explicit preferences and never invents evidence.'], io), 0);
     } finally {
       if (oldHome === undefined) delete process.env.SOUL37_HOME; else process.env.SOUL37_HOME = oldHome;
       globalThis.fetch = oldFetch;
@@ -168,7 +170,7 @@ async function invokeCli(home, args) {
     globalThis.fetch = oldFetch;
   }
 }
-const createArgs = ['soul', 'create', '--name', 'Active Local', '--sex', 'female', '--age', '24', '--character', 'A synthetic local character who speaks clearly, respects boundaries, remembers explicit preferences and never invents evidence.'];
+const createArgs = home => ['soul', 'create', '--name', 'Active Local', '--sex', 'female', '--age', '24', '--character', 'A synthetic local character who speaks clearly, respects boundaries, remembers explicit preferences and never invents evidence.', '--avatar', path.join(home, 'synthetic-avatar.png')];
 function recallAsset(uid, content) {
   return { asset_uid: uid, soul_uid: 's1', kind: 'relationship', trait: 'preference', content, applicability: '', tags: [], evidence: 'explicit_user_statement', verification: 'unverified', sensitivity: 'normal', state: 'active', revision: 1, supersedes_uid: null, pinned: false, source: { runtime_kind: 'pi', session_ref: 'fake', event_ref: 'fake', occurred_at: '2026-11-02T00:00:00Z' }, sync_state: 'local_only', cloud_revision: null };
 }
@@ -182,7 +184,7 @@ test('install -> login work -> no-flag create/recall/select/sync and Pi hook all
       await store.close();
     }
     const defaultBefore = readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8');
-    const created = await invokeCli(home, createArgs);
+    const created = await invokeCli(home, createArgs(home));
     assert.equal(created.code, 0, created.stderr);
     assert.equal(Object.keys((await read(root, 'work')).souls).length, 2);
     assert.deepEqual((await read(root, 'default')).souls, {});
@@ -216,13 +218,13 @@ test('stale active CLI selection refuses implicit default, but explicit --profil
     await install(deps, { agents: ['pi'], installService: false });
     await saveConfig(root, { ...(await loadConfig(root)), active_profile_id: 'missing' });
     const before = readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8');
-    for (const args of [createArgs, ['recall'], ['soul', 'select', 's1'], ['sync'], ['login']]) {
+    for (const args of [createArgs(home), ['recall'], ['soul', 'select', 's1'], ['sync'], ['login']]) {
       const result = await invokeCli(home, args);
       assert.equal(result.code, 1, JSON.stringify(args));
       assert.match(result.stderr, /--profile/);
     }
     assert.equal(readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8'), before);
-    assert.equal((await invokeCli(home, [...createArgs, '--profile', 'default'])).code, 0);
+    assert.equal((await invokeCli(home, [...createArgs(home), '--profile', 'default'])).code, 0);
   });
 });
 
@@ -238,7 +240,7 @@ test('CLI refuses ambiguous profiles without active selection instead of reading
 
 test('uninstalled fresh CLI may create in default without inventing a cloud owner', async () => {
   await fixture(async ({ home, root }) => {
-    assert.equal((await invokeCli(home, createArgs)).code, 0);
+    assert.equal((await invokeCli(home, createArgs(home))).code, 0);
     assert.equal(Object.keys((await read(root, 'default')).souls).length, 1);
     assert.equal((await read(root, 'default')).owner_id, null);
   });
