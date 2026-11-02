@@ -1,6 +1,7 @@
 import path from "node:path";
+import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { editManagedFragment, removeManagedFragment } from "../config-editor.js";
-import { stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { inspectCodexTrust, removeCodexHookConfig, writeCodexHookConfig, codexHookConfigPath, CODEX_HOOK_EVENTS, createCodexAdapter, latestCodexCompletedTurnRefs } from "../adapters/codex.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
 import { parseHookPayload, readTextSafe, dirCheck } from "./shared.js";
@@ -85,36 +86,46 @@ async function uninstall(deps: HostInstallDeps, removed: string[]): Promise<void
   if (removeCodexHookConfig(deps.home)) removed.push(path.relative(deps.home, codexHookConfigPath(deps.home)));
 }
 
-async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
+async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { waiting?: boolean }>> {
   const agentKind = "codex";
-  const checks: HostDoctorCheck[] = [];
+  const checks: Array<HostDoctorCheck & { waiting?: boolean }> = [];
   const instructions = await readTextSafe(codexInstructionsPath(deps.home));
   checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: codexInstructionsPath(deps.home) });
-  // Task 10: honest Codex hook result (replaces the old `ok:true` / "not used
-  // (B tier)" hand-wave). installed / trusted / events_seen /
-  // extraction_capable / injection_capable are the five report states; a write
-  // we performed never makes trusted or events_seen green.
   let hookInstalled = false;
+  let hookError = "not installed — run `37soul install`";
   try {
-    hookInstalled = (await stat(codexHookConfigPath(deps.home))).isFile();
-  } catch {
-    hookInstalled = false;
+    const document = JSON.parse(await readFile(codexHookConfigPath(deps.home), "utf8"));
+    const groups = document?.hooks?.SessionStart;
+    // Match the installer-owned command, including its shell quoting. Merely
+    // finding another event, an old launcher or a prompt hook proves nothing.
+    const launcher = deps.config.launcher ?? "37soul";
+    const quoted = "'" + launcher.replace(/'/g, "'\\''") + "'";
+    const expected = `${quoted} hook --agent codex --event SessionStart`;
+    hookInstalled = Array.isArray(groups) && groups.some(group => Array.isArray(group?.hooks) &&
+      group.hooks.some((hook: any) => hook?.type === "command" && hook.command === expected));
+    hookError = "Missing or outdated managed SessionStart command for the current launcher — run `37soul install`, then review and approve the hook in Codex /hooks.";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      hookError = "Malformed or unreadable .codex/hooks.json — run `37soul install`, then review and approve the hook in Codex /hooks.";
+    }
   }
-  const trust = inspectCodexTrust(deps.home);
+  const evidence = hookInstalled ? await readRuntimeEvidence(deps.home, "codex") : null;
+  const observed = evidence !== null && (evidence.hook_output_observed || evidence.extraction_completed);
   checks.push({
     name: `${agentKind}: SessionStart hook`,
-    ok: trust.trusted && trust.events_seen,
-    detail: codexHookDetail(hookInstalled, trust),
+    ok: observed,
+    ...(hookInstalled ? { waiting: !observed } : {}),
+    detail: hookInstalled ? codexHookDetail(observed) : hookError,
   });
+  if (evidence) checks.push(...runtimeEvidenceChecks("codex", evidence));
   const sessions = path.join(deps.home, ".codex", "sessions");
   checks.push(await dirCheck(`${agentKind}: session records`, sessions));
   return checks;
 }
 
-function codexHookDetail(installed: boolean, trust: { trusted: boolean; events_seen: boolean }): string {
-  if (!installed) return "not installed — run `37soul install`";
-  if (trust.events_seen) return "hook events observed; Codex's persistent trust state is managed in /hooks";
-  return "installed in .codex/hooks.json; Codex has not shown a trusted/observed hook — open /hooks in Codex, review and approve the 37soul hook, then start a new session. Approval allows hook execution/events; extraction and injection remain unverified. Run `37soul doctor` again";
+function codexHookDetail(observed: boolean): string {
+  if (observed) return "Installed hooks with matching local runtime evidence observed; persistent Codex trust is not inferred. Review trust in Codex /hooks; these observations do not prove model adoption.";
+  return "Installed in .codex/hooks.json; matching local runtime evidence not observed — open /hooks in Codex, review and approve the 37soul hook, then start a new session. Persistent trust is not inferred from installation. Run `37soul doctor` again.";
 }
 
 export const host: HostSpec = {

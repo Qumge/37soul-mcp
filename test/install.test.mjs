@@ -894,8 +894,9 @@ test("doctor: OpenCode plugin bridge reports a specific honest state", async () 
   const check = byName(report)["opencode: plugin bridge"];
   assert.ok(check, "the plugin bridge check is present");
   assert.equal(check.ok, false);
-  assert.match(check.detail, /has not loaded.*enable.*restart OpenCode/);
-  assert.match(check.detail, /extraction stays off/);
+  assert.match(check.detail, /not observed.*restart OpenCode/);
+  assert.equal(check.waiting, true);
+  assert.doesNotMatch(check.detail, /extraction stays off/);
 
   h.cleanup();
 });
@@ -912,15 +913,16 @@ test("doctor: Codex hook reports an honest trust state, never a blanket ok", asy
   const check = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
   assert.ok(check, "the codex SessionStart hook check is present");
   assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
-  assert.match(check.detail, /has not shown.*\/hooks.*approve.*new session/);
-  assert.match(check.detail, /remain unverified/);
+  assert.match(check.detail, /not observed.*\/hooks.*approve.*new session/);
+  assert.equal(check.waiting, true);
+  assert.doesNotMatch(check.detail, /remain unverified/);
 
-  // A real hook spool event is evidence of execution, but still not a trust claim.
+  // Retired raw spool is not current runtime evidence or a trust claim.
   mkdirSync(path.join(h.home, ".37soul", "spool", "codex"), { recursive: true });
   writeFileSync(path.join(h.home, ".37soul", "spool", "codex", "s.jsonl"), "{}\n", { mode: 0o600 });
   const observed = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
   assert.equal(observed.ok, false, "observation is not persistent trust");
-  assert.equal(observed.detail, "hook events observed; Codex's persistent trust state is managed in /hooks");
+  assert.equal(observed.detail, check.detail, "old spool must not change current diagnostics");
 
   h.cleanup();
 });

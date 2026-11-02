@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { detectHermesSurface, inspectHermesPlugin, hermesPluginPath, removeHermesPlugin, writeHermesPlugin, createHermesAdapter, latestHermesCompletedTurnRefs } from "../adapters/hermes.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
 import { parseHookPayload, manifestSha256 } from "./shared.js";
@@ -45,13 +46,21 @@ async function uninstall(deps: HostInstallDeps, removed: string[]): Promise<void
   }
 }
 
-async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
+async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { waiting?: boolean }>> {
   const agentKind = "hermes";
-  const checks: HostDoctorCheck[] = [];
-  // Python 桥（Task 9）：三个诚实状态；gateway-only 配置必须显式说出来，
-  // 绝不冒充 CLI 能力。observation_only 是上限，直到有授权的真机 probe。
+  const checks: Array<HostDoctorCheck & { waiting?: boolean }> = [];
   const inspection = inspectHermesPlugin(deps.home);
-  checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: hermesDoctorDetail(inspection) });
+  if (inspection.status !== "observation_only") {
+    checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: hermesDoctorDetail(inspection) });
+    return checks;
+  }
+  const evidence = await readRuntimeEvidence(deps.home, "hermes");
+  const observed = evidence.hook_output_observed || evidence.extraction_completed;
+  checks.push({ name: `${agentKind}: plugin bridge`, ok: observed, waiting: !observed,
+    detail: observed
+      ? "Installed bridge with matching local runtime evidence observed; Hermes trust and official shell-hook consent are not inferred from installation. These observations do not prove model adoption."
+      : "Installed bridge; matching local runtime evidence not observed. Review the managed pre_llm_call/post_llm_call hooks in ~/.hermes/config.yaml, then use Hermes's official consent prompts to approve shell-hook execution; restart Hermes or start a new session. Trust is not inferred from installation. Run `37soul doctor` again." });
+  checks.push(...runtimeEvidenceChecks("hermes", evidence));
   return checks;
 }
 
@@ -62,7 +71,7 @@ function hermesDoctorDetail(inspection: { status: string; surface: string }): st
     case "not_installed":
       return "plugin bridge not installed — run `37soul install`";
     case "observation_only":
-      return "events may be observed; review the managed 37soul pre_llm_call/post_llm_call hooks in ~/.hermes/config.yaml and approve shell-hook execution in Hermes if prompted, then restart Hermes or start a new session. Approval allows hook execution/events only; no model call authorized (structured extraction stays off), and injection remains unverified. Run `37soul doctor` again";
+      return "Installed bridge; awaiting matching local runtime evidence.";
     default:
       return inspection.status;
   }

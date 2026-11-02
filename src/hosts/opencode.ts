@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { inspectOpenCodePlugin, openCodePluginPath, removeOpenCodePlugin, writeOpenCodePlugin, createOpenCodeAdapter, latestOpenCodeCompletedTurnRefs } from "../adapters/opencode.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
 import { parseHookPayload, manifestSha256 } from "./shared.js";
@@ -45,13 +46,22 @@ async function uninstall(deps: HostInstallDeps, removed: string[]): Promise<void
   }
 }
 
-async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
+async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { waiting?: boolean }>> {
   const agentKind = "opencode";
-  const checks: HostDoctorCheck[] = [];
-  // 插件桥（Task 8）：六个诚实状态，各自不同的 detail；没有一个状态是绿的
-  // （observation_only 是上限，直到有授权的真机 probe）。ok 固定 false 且非 fatal。
+  const checks: Array<HostDoctorCheck & { waiting?: boolean }> = [];
   const inspection = inspectOpenCodePlugin(deps.home);
-  checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: openCodeDoctorDetail(inspection) });
+  if (inspection.status === "not_installed" || inspection.status === "unsupported_generation") {
+    checks.push({ name: `${agentKind}: plugin bridge`, ok: false, detail: openCodeDoctorDetail(inspection) });
+    return checks;
+  }
+  const evidence = await readRuntimeEvidence(deps.home, "opencode");
+  const observed = evidence.hook_output_observed || evidence.extraction_completed;
+  const refusal = inspection.status === "model_refused" ? " The host reports a model refused state; hook output is not proof of completed extraction." : "";
+  checks.push({ name: `${agentKind}: plugin bridge`, ok: observed, waiting: !observed,
+    detail: (observed
+      ? "Installed plugin with matching local runtime evidence observed; OpenCode trust is not inferred from installation. These observations do not prove model adoption."
+      : "Installed plugin; matching local runtime evidence not observed. Review and enable the 37soul plugin in ~/.config/opencode/plugins, approve it through OpenCode if prompted, then restart OpenCode and open a new session. Loading and trust are not inferred from installation. Run `37soul doctor` again.") + refusal });
+  checks.push(...runtimeEvidenceChecks("opencode", evidence));
   return checks;
 }
 
@@ -61,14 +71,6 @@ function openCodeDoctorDetail(inspection: { status: string; declared: string }):
       return "plugin bridge not installed — run `37soul install`";
     case "unsupported_generation":
       return `plugin bridge declares an unsupported generation (${inspection.declared || "none"}) — rerun \`37soul install\``;
-    case "not_loaded":
-      return "plugin file present but OpenCode has not loaded it — review the 37soul plugin in ~/.config/opencode/plugins and enable it through OpenCode's plugin configuration; restart OpenCode. Loading and manual approval allow plugin events; extraction stays off and injection remains unverified. Run `37soul doctor` again";
-    case "not_trusted":
-      return "plugin file present but OpenCode has not trusted it — review and approve the 37soul plugin in OpenCode, then start a new session. Approval allows plugin execution/events; extraction stays off and injection remains unverified. Run `37soul doctor` again";
-    case "model_refused":
-      return "a live probe was refused by the model — no authorized probe yet";
-    case "observation_only":
-      return "events may be observed; no model call authorized (structured extraction stays off)";
     default:
       return inspection.status;
   }

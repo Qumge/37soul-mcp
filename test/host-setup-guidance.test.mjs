@@ -8,7 +8,7 @@ import { host as opencode } from '../dist/hosts/opencode.js';
 import { host as hermes } from '../dist/hosts/hermes.js';
 
 for (const host of [codex, opencode, hermes]) {
-  test(`${host.kind}: installed but unverified doctor gives a manual next step and its boundary`, async () => {
+  test(`${host.kind}: installed without runtime evidence waits with setup guidance and separate observation boundaries`, async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'feedback-host-'));
     try {
       mkdirSync(path.join(home, '.codex'), { recursive: true });
@@ -18,12 +18,24 @@ for (const host of [codex, opencode, hermes]) {
       assert.equal(result.report.extraction_capable, false);
       assert.equal(result.report.injection_capable, false);
       const checks = await host.doctor({ home, config: {}, assetsMode: true });
-      const check = checks.find(c => /hook|plugin bridge/.test(c.name));
+      const bridgeName = host.kind === 'codex' ? 'codex: SessionStart hook' : `${host.kind}: plugin bridge`;
+      const check = checks.find(c => c.name === bridgeName);
+      assert.ok(check, 'host setup diagnostic exists');
       assert.equal(check.ok, false);
+      assert.equal(check.waiting, true);
+      assert.notEqual(check.fatal, true);
       assert.match(check.detail, /restart|new session|reopen/i, 'explain when manual setup takes effect');
-      assert.match(check.detail, /load|execut|event/i, 'explain what approval enables');
-      assert.match(check.detail, /extract.*(?:off|unverified|not verified)|(?:off|unverified|not verified).*extract/i);
-      assert.match(check.detail, /inject.*(?:unverified|not verified)|(?:unverified|not verified).*inject/i);
+      assert.match(check.detail, /approve/i, 'setup requires host-owned approval');
+      assert.match(check.detail, /trust.*not inferred|not inferred.*trust/i, 'installation does not establish host trust');
+      assert.doesNotMatch(check.detail, /extraction stays off|no model call authorized/i);
+      for (const name of [`${host.kind}: hook output`, `${host.kind}: extraction`]) {
+        const observation = checks.find(c => c.name === name);
+        assert.ok(observation, 'hook output and extraction have independent diagnostics');
+        assert.equal(observation.ok, false);
+        assert.equal(observation.waiting, true);
+        assert.notEqual(observation.fatal, true);
+        assert.match(observation.detail, /no matching.*observed/i, 'missing evidence is not a disabled capability');
+      }
       if (host.kind === 'codex') assert.match(check.detail, /\/hooks/);
       if (host.kind === 'opencode') assert.match(check.detail, /plugins|plugin/);
       if (host.kind === 'hermes') assert.match(check.detail, /config\.yaml/);

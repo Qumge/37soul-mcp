@@ -139,7 +139,7 @@ async function doctor(deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
   const instructions = await readTextSafe(claudeInstructionsPath(deps.home));
   checks.push({ name: `${agentKind}: instructions`, ok: instructions.includes("37soul:begin"), detail: claudeInstructionsPath(deps.home) });
   if (!assetsMode) {
-    checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered — resume/checkpoint over MCP unavailable" });
+    checks.push({ name: `${agentKind}: mcp server`, ok: config.mcp?.[agentKind] === true, detail: config.mcp?.[agentKind] ? "registered" : "not registered for platform account tools" });
   }
 
   const projects = path.join(deps.home, ".claude", "projects");
