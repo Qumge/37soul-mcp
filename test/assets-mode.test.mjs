@@ -1,20 +1,5 @@
 #!/usr/bin/env node
-/**
- * Task 10 upgrade contract: assets-only mode fails closed.
- *
- * Two halves, tested against the real modules (no network, no transport boot):
- *
- *  1. The legacy write drain is inert in assets mode: `uploadBatch` receives
- *     `tokens = {}` (from `startAgentd`), so a pre-seeded spool/queue produces
- *     zero old write requests — `tokenFor` returns null and it short-circuits
- *     to "unauthorized" before any fetch.
- *
- *  2. A server-side 410 `assets_only_mode` surfaces as an explicit MCP error
- *     through `statusError`: the tool result is an error, names the 410
- *     assets-only mode, never downgrades to a generic "unavailable" message,
- *     never retries (statusError is a pure one-shot mapping) and never reports
- *     success.
- */
+/** Current contract: legacy upload is retired in every account state; 410 remains explicit. */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -85,7 +70,7 @@ test("status: an ok response maps to null (the caller proceeds with the parsed b
 
 // ── Deliverable 2: legacy queues are inert in assets mode ──────────────────────
 
-test("upload: with no tokens (assets mode), uploadBatch short-circuits to unauthorized before any fetch", async () => {
+test("upload: no credentials cannot revive the retired uploader", async () => {
   let fetches = 0;
   const outcome = await uploadBatch(
     {
@@ -96,8 +81,8 @@ test("upload: with no tokens (assets mode), uploadBatch short-circuits to unauth
     queuedItem(),
   );
   assert.equal(fetches, 0, "no old write request may leave the machine in assets mode");
-  assert.equal(outcome.status, "unauthorized");
-  assert.match(outcome.error, /no token configured/);
+  assert.equal(outcome.status, "retired");
+  assert.match(outcome.error, /retired/);
 });
 
 test("daemon: a pre-seeded legacy queue in assets mode uploads nothing across a tick", async () => {

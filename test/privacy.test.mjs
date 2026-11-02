@@ -331,6 +331,7 @@ test("privacy: native ids, raw prompts and rendered text never reach HTTP", asyn
   await syncOnce("p1", http, {
     root,
     token: "test-token",
+    tokenIssuer: "https://fake.test",
     baseUrl: "https://fake.test",
     backoff: { sleep: async () => {} },
   });

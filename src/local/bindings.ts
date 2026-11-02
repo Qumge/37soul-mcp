@@ -1,3 +1,6 @@
+import { loadConfig } from "../agentd/state.js";
+import { requireCloudIssuer, assertLoginProfileIssuers } from "./profile-issuer.js";
+import { sameServerIssuer } from "../agentd/server-identity.js";
 /**
  * Task 3: offline Souls, versioned session bindings, and the resolution chain.
  *
@@ -31,7 +34,7 @@
  * sibling of device.json), not in the fixed §2.5 snapshot.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Binding, RuntimeKind, Soul } from "../assets/protocol.js";
 import type { BindingSnapshot, NativeSessionKey } from "../adapters/types.js";
@@ -44,7 +47,7 @@ import {
   type StoreSnapshot,
 } from "./store.js";
 import { registerWriterCommand } from "./writer.js";
-import { mergeLoginProfile, readAccountsIndex, resolveRoot, writeAccountsIndex, type LocalOptions } from "./profiles.js";
+import { mergeLoginProfile, readAccountsIndex, resolveRoot, resolveLocalAssetsProfileSync, writeAccountsIndex, type LocalOptions } from "./profiles.js";
 
 /** Join the native key into one record key. Never serialized beyond the local store. */
 export function bindingKey(key: NativeSessionKey): string {
@@ -798,6 +801,10 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
   const useProfileId = typeof p.use_profile_id === "string" && p.use_profile_id ? p.use_profile_id : undefined;
   const mode = typeof p.mode === "string" && p.mode ? p.mode : "assets_only";
 
+  const issuer = requireCloudIssuer(p.cloud_issuer);
+  if (mergeProfileId && useProfileId) throw new StoreError("invalid_profile", "merge and use are mutually exclusive");
+  await assertLoginProfileIssuers(root, [request.profile_id, ...(mergeProfileId ? [mergeProfileId] : []), ...(useProfileId ? [useProfileId] : [])], issuer);
+
   if (useProfileId) {
     // Switch, don't merge: the existing same-owner profile becomes the account's
     // profile; the current (anonymous) profile is never written.
@@ -821,6 +828,7 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
     // profile is legal; the CLI process never does this itself.
     await existing.transact((draft) => {
       draft.owner_id = ownerId;
+      draft.cloud_issuer = issuer;
       if (cloudDeviceUid !== null) draft.cloud_device_uid = cloudDeviceUid;
     });
     await existing.close();
@@ -834,21 +842,24 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
     }
 
     const index = await readAccountsIndex(root);
+    if (index.anonymous?.profile_id === useProfileId) delete index.anonymous;
     index[ownerId] = {
       profile_id: useProfileId,
-      default_soul_uid: appliedDefault ?? index[ownerId]?.default_soul_uid ?? null,
+      cloud_issuer: issuer,
+      default_soul_uid: appliedDefault ?? (sameServerIssuer(index[ownerId]?.cloud_issuer, issuer) ? index[ownerId]?.default_soul_uid ?? null : null),
       soul_sync_mode: mode,
     };
     await writeAccountsIndex(root, index);
     return { profile_id: useProfileId, owner_id: ownerId, soul_sync_mode: mode };
   }
 
-  const profileId = await mergeLoginProfile(request.profile_id, ownerId, mergeProfileId, { root });
+  const profileId = await mergeLoginProfile(request.profile_id, ownerId, mergeProfileId, { root, cloudIssuer: issuer });
 
   const store = await openStore(root, profileId);
   try {
     await store.transact((draft) => {
       draft.owner_id = ownerId;
+      draft.cloud_issuer = issuer;
       if (cloudDeviceUid !== null) draft.cloud_device_uid = cloudDeviceUid;
     });
   } finally {
@@ -861,7 +872,8 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
   const index = await readAccountsIndex(root);
   index[ownerId] = {
     profile_id: profileId,
-    default_soul_uid: defaultSoulUid ?? index[ownerId]?.default_soul_uid ?? null,
+    cloud_issuer: issuer,
+    default_soul_uid: defaultSoulUid ?? (sameServerIssuer(index[ownerId]?.cloud_issuer, issuer) ? index[ownerId]?.default_soul_uid ?? null : null),
     soul_sync_mode: mode,
   };
   await writeAccountsIndex(root, index);
@@ -884,6 +896,19 @@ registerWriterCommand("login_associate", async ({ root, request }) => {
  * `default_soul_uid`, and only (re)asserts `soul_sync_mode: "assets_only"`.
  */
 registerWriterCommand("init_assets_profile", async ({ root, request }) => {
+  const current = resolveLocalAssetsProfileSync(root);
+  if (current) {
+    return { profile_id: current.profile_id, soul_sync_mode: "assets_only" };
+  }
+  const configured = await loadConfig(root);
+  const directories = await readdir(path.join(root, "profiles"), { withFileTypes: true }).catch(error => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  if (directories.some(entry => entry.isDirectory()) || (configured && Object.prototype.hasOwnProperty.call(configured, "active_profile_id"))) {
+    throw new StoreError("active_profile_unavailable", "No unambiguous valid active assets profile. Existing data was preserved; run 37soul login --profile <new-profile-id> to explicitly select a profile for this server.");
+  }
+
   const profileId = typeof request.payload.profile_id === "string" && request.payload.profile_id
     ? request.payload.profile_id
     : request.profile_id;

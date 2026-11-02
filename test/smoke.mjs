@@ -268,47 +268,27 @@ const names = tools.map((t) => t.name).sort();
 // 这条断言 2026-09-08 救了一次：服务端 POST /media 上线当天 MCP 没跟，agent 只好
 // 满硬盘 grep 文档、抠 credentials.json 手写 curl。工具表是 agent 唯一看得见的
 // 能力清单 —— 服务端加了能力而这里没加，等于没上线。
-check("exposes the thirteen documented tools", () =>
-  assert.deepEqual(names, ["chat_with_host", "checkpoint", "get_host", "get_operation", "instruct_post", "list_hosts", "log_turn", "read_chat_history", "read_host_photos", "read_recent_posts", "remember", "resume", "shoot", "update_host", "whoami"]));
+check("exposes only current account and character tools", () =>
+  assert.deepEqual(names, ["chat_with_host", "get_host", "get_operation", "instruct_post", "list_hosts", "read_chat_history", "read_host_photos", "read_recent_posts", "shoot", "update_host", "whoami"]));
 
-const resumed = await call("resume", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x" });
-check("resume 返回简报原文（转发远程工具）", () => assert.match(resumed.text, /WHERE THE WORK STANDS/));
-
-const checkpointed = await call("checkpoint", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x", body: { goal: "ship pagination" } });
-check("checkpoint 透传 repo/branch 并回报版本", () => assert.match(checkpointed.text, /Saved handoff for git@github.com:owner\/nimbus.git @ feature\/x \(version 1\)/));
-
-check("resume/checkpoint 的 schema 与远程 MCP 对齐", () => {
-  const resumeTool = tools.find((t) => t.name === "resume");
-  const checkpointTool = tools.find((t) => t.name === "checkpoint");
-  assert.ok(resumeTool.inputSchema.properties.repo);
-  assert.deepEqual([...checkpointTool.inputSchema.required].sort(), ["body", "branch", "repo"]);
-});
-
-// ── assets-only mode: legacy resume/checkpoint are blocked, never forwarded ──
-const assetsHome = mkdtempSync(path.join(tmpdir(), "37soul-mcp-assets-"));
-mkdirSync(path.join(assetsHome, ".37soul"), { recursive: true });
-writeFileSync(
-  path.join(assetsHome, ".37soul", "accounts.json"),
-  `${JSON.stringify({ "owner-1": { profile_id: "p1", default_soul_uid: "s1", soul_sync_mode: "assets_only" } })}\n`,
-  { mode: 0o600 },
-);
-const assetsClient = await connectClient("smoke-assets", { SOUL37_HOME: assetsHome });
-const assetsCall = async (name, args = {}) => {
-  const r = await assetsClient.callTool({ name, arguments: args });
-  return { text: r.content[0].text, isError: !!r.isError };
-};
-const blockedResume = await assetsCall("resume", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x" });
-check("assets mode blocks resume with the assets-only message", () => {
-  assert.equal(blockedResume.isError, true);
-  assert.match(blockedResume.text, /assets-only mode/);
-});
-const blockedCheckpoint = await assetsCall("checkpoint", { repo: "git@github.com:owner/nimbus.git", branch: "feature/x", body: { goal: "ship pagination" } });
-check("assets mode blocks checkpoint the same way", () => {
-  assert.equal(blockedCheckpoint.isError, true);
-  assert.match(blockedCheckpoint.text, /assets-only mode/);
-});
-await assetsClient.close();
-rmSync(assetsHome, { recursive: true, force: true });
+// Retirement replaces old raw writeback/retry success checks: rejected locally,
+// no /turn, /facts or remote /mcp request, including with assets-only metadata.
+for (const assets of [false, true]) {
+  const home = mkdtempSync(path.join(tmpdir(), '37soul-retired-'));
+  mkdirSync(path.join(home,'.37soul'));
+  if (assets) writeFileSync(path.join(home,'.37soul','accounts.json'), JSON.stringify({'owner-1':{profile_id:'p1',soul_sync_mode:'assets_only'}}));
+  const probe = await connectClient('retired', {SOUL37_HOME:home});
+  try {
+    for (const name of ['log_turn','remember','resume','checkpoint']) {
+      const before = seen.length;
+      const result = await probe.callTool({name,arguments:{host_id:262,user_message:'PRIVATE-RAW',host_message:'PRIVATE-RAW',content:'PRIVATE-RAW',repo:'private',branch:'main',body:{notes:'PRIVATE-RAW'}}});
+      check(`retired ${name} is unavailable, assets=${assets}`, () => {
+        assert.equal(result.isError,true);
+        assert.equal(seen.length,before,'retired tool must not contact any endpoint');
+      });
+    }
+  } finally { await probe.close(); rmSync(home,{recursive:true,force:true}); }
+}
 
 const hosts = await call("list_hosts");
 check("list_hosts renders a compact host line", () => {
@@ -430,8 +410,8 @@ check("whoami renders her own life, not just her character", () => {
   assert.match(soul.text, /THIS TURN — SHARE/);
 });
 
-check("whoami tells the agent to send the exchange back", () =>
-  assert.match(soul.text, /log_turn/));
+check("whoami never advertises retired writeback", () =>
+  assert.doesNotMatch(soul.text, /`log_turn`|`remember`|send the exchange back/));
 
 check("whoami 的 THIS TURN 正文里站内格式已经洗掉了", () => {
   const thisTurnSection = soul.text.split("\n\n").find((section) => section.startsWith("THIS TURN —"));
@@ -453,97 +433,12 @@ check("whoami 的说明不再要求每轮都调", () => {
   assert.match(d, /not every turn/i);
   assert.doesNotMatch(d, /START OF EVERY TURN/);
 });
-check("log_turn 只给聊天用，干活的轮次不写", () =>
-  assert.match(tools.find((t) => t.name === "log_turn").description, /skip it for pure work/i));
-check("whoami 结尾不再说「每次都回写」，并且不许把回写说给对方听", () => {
-  assert.match(soul.text, /skip it for pure work/i);
-  assert.match(soul.text, /never mention saving or logging/i);
-});
-
-// ── 协议 v2 · log_turn ──────────────────────────────────────────────
-// 等 whoami 之后那次后台预取落地，再改她的心情 —— 下一次预取才会看到变化。
-await sleep(300);
-soulMood = "有点累，但挺安静";
-turnDelayMs = 1500;
-const loggedAt = Date.now();
-const logged = await call("log_turn", { host_id: 262, user_message: "我这周把猫接回来了", host_message: "那家伙终于回家了" });
-const loggedTook = Date.now() - loggedAt;
-check("log_turn 不等网络（写回在后台）", () => assert.ok(loggedTook < 700, `took ${loggedTook}ms`));
-check("log_turn 明说不许告诉对方", () => assert.match(logged.text, /do not mention this to them/i));
-check("log_turn 再钉一次她是谁", () => assert.match(logged.text, /You are Nyx/));
-check("log_turn 交出下一轮的意图，说明是下一句不是这一句", () =>
-  assert.match(logged.text, /For your NEXT reply \(not the one you are finishing now\) — SHARE/));
-check("log_turn 的下一轮意图带上这周的素材", () =>
-  assert.match(logged.text, /\(from your week: 今天把稿子改完了\)/));
-check("log_turn 的下一轮意图里站内格式已经洗掉了", () => {
-  assert.doesNotMatch(logged.text, /---/);
-  assert.doesNotMatch(logged.text, /THIS TURN —/);
-});
-await sleep(2000);
-const logged2 = await call("log_turn", { host_id: 262, user_message: "你今天怎么样", host_message: "有点累，不过还好" });
-check("她变了什么，跟着 log_turn 回来", () => assert.match(logged2.text, /有点累，但挺安静/));
-await sleep(2000);
-turnDelayMs = 0;
-check("后台预取带着 core_version，人设不重发", () => assert.match(soulUrls().at(-1), /core_version=cv262/));
-
-// ── I1: 同一个角色的后台写回排队 ──────────────────────────────────
-turnDelayMs = 800;
-turnInFlight = 0;
-turnOverlap = false;
-const serializedAt = Date.now();
-const [logA, logB] = await Promise.all([
-  call("log_turn", { host_id: 262, user_message: "queue one", host_message: "reply one" }),
-  call("log_turn", { host_id: 262, user_message: "queue two", host_message: "reply two" }),
-]);
-check("两次 log_turn 都立即返回，不等排队里的写回", () => {
-  assert.equal(logA.isError, false);
-  assert.equal(logB.isError, false);
-  assert.ok(Date.now() - serializedAt < 700);
-});
-await sleep(2200); // 两次 800ms 的写回严格串行需要 ~1600ms+，留够余量
-check("同一个角色的后台写回严格排队，不会并发在途", () => assert.equal(turnOverlap, false));
-check("两次写回按 log_turn 的调用顺序落地", () => {
-  const queueRequests = seen.filter((r) => r.url === "/api/v1/me/hosts/262/turn" && r.method === "POST");
-  const indexOne = queueRequests.findIndex((r) => r.body.includes("queue one"));
-  const indexTwo = queueRequests.findIndex((r) => r.body.includes("queue two"));
-  assert.ok(indexOne !== -1 && indexTwo !== -1);
-  assert.ok(indexOne < indexTwo);
-});
-turnDelayMs = 0;
-
-const retryAt = Date.now();
-const retried = await call("log_turn", { host_id: 500, user_message: "retry me", host_message: "ok" });
-check("会先失败一次的写回也立即返回", () => {
-  assert.equal(retried.isError, false);
-  assert.ok(Date.now() - retryAt < 700);
-});
-await sleep(1500);
-check("重试复用同一个 turn，而不是铸一个新的", () => {
-  const retryRequests = seen.filter((r) => r.url === "/api/v1/me/hosts/500/turn" && r.method === "POST");
-  assert.equal(retryRequests.length, 2);
-  const turns = retryRequests.map((r) => JSON.parse(r.body).turn);
-  assert.equal(turns[0], turns[1]);
-});
-
-// ── I4: 隔久了没读 whoami，log_turn 要提醒 ────────────────────────
-// 独立进程、独立状态：只有它自己看得见自己的 lastWhoamiAt，不跟主流程的 host 262 state 打架。
-const staleClient = await connectClient("stale-whoami", { SOUL37_WHOAMI_STALE_MS: "1000" });
-const staleCall = async (name, args = {}) => {
-  const r = await staleClient.callTool({ name, arguments: args });
-  return { text: r.content[0].text, isError: !!r.isError };
-};
-await staleCall("whoami", { host_id: 262 });
-await sleep(1200);
-const staleLogged = await staleCall("log_turn", { host_id: 262, user_message: "hi", host_message: "hey" });
-check("隔久了没读 whoami，log_turn 提醒重新读", () => assert.match(staleLogged.text, /call whoami/i));
-await staleClient.close();
-
 // ── shoot ──────────────────────────────────────────────────────────
 // 服务端 2026-09-08 上线 POST /media 当天 MCP 没跟，agent 只好翻文档手写 curl。
 // 补上工具之后，这里守的是它**行为对**，不只是**存在**。
 const shot = await call("shoot", { host_id: 262 });
 check("shoot 拿到照片后，把 markdown 写法直接交给模型", () => {
-  // 交 markdown 而不是裸链接：log_turn 会把它转成站内标记，网站上也是一张真图。
+  // Generated media is returned as Markdown for direct display.
   assert.match(shot.text, /!\[窗边的信封\]\(https:\/\/files\.37soul\.com\/p\/new\.webp\)/);
   assert.match(shot.text, /94/);
 });
@@ -597,97 +492,12 @@ for (const [id, why] of [
   });
 }
 // 402 是最容易穿帮的一条：账户、额度、充值这三个词从她嘴里出来就露馅了。
-check("402 明确禁用「账户/额度/充值」这几个词", async () => {
-  const failed = await call("shoot", { host_id: 402 });
-  assert.match(failed.text, /Do not say .*account.*credits.*top up/i);
+const deniedMedia = await call("shoot", { host_id: 402 });
+check("402 明确禁用「账户/额度/充值」这几个词", () => {
+  assert.match(deniedMedia.text, /Do not say .*account.*credits.*top up/i);
 });
-check("log_turn writes both sides back", () => {
-  const turnRequests = seen.filter((r) => r.url === "/api/v1/me/hosts/262/turn");
-  const first = turnRequests.find((r) => r.body.includes("我这周把猫接回来了"));
-  assert.ok(first, "the first exchange never reached /turn");
-  assert.match(first.body, /那家伙终于回家了/);
-});
-
-// 协议 v2：计费只在写回上，turn 是它的幂等键 —— 每一轮都得是新的。
-check("每次写回都带自己的 turn", () => {
-  const turns = seen.filter((r) => r.url === "/api/v1/me/hosts/262/turn").map((r) => JSON.parse(r.body).turn);
-  assert.ok(turns.length >= 2);
-  assert.equal(new Set(turns).size, turns.length);
-});
-
-const deniedAt = Date.now();
-const denied = await call("log_turn", { host_id: 402, user_message: "a", host_message: "b" });
-check("写回会被拒也照样立即返回", () => {
-  assert.equal(denied.isError, false);
-  assert.ok(Date.now() - deniedAt < 700);
-});
-await sleep(300); // 让刚才那次写回落地、转成 "refused"，提示挂起
-const soul402 = await call("whoami", { host_id: 402 });
-check("提示挂起时，whoami 第一行仍然是 you_are，不是提示", () =>
-  assert.match(soul402.text.split("\n")[0], /Rae/));
-check("第一次转进 refused：下一次调用（这里是 whoami）说一次「没存上」", () => {
-  assert.match(soul402.text, /An earlier exchange was not saved/);
-  assert.match(soul402.text, /do not retry/);
-});
-
-const afterDenied = await call("log_turn", { host_id: 402, user_message: "c", host_message: "d" });
-await sleep(300); // 这次写回同样 402，但状态没变（还是 refused）——不应该再提一次
-const afterDenied2 = await call("log_turn", { host_id: 402, user_message: "e", host_message: "f" });
-check("再来的 402 不会重复提示", () => {
-  assert.doesNotMatch(afterDenied.text, /was not saved/i);
-  assert.doesNotMatch(afterDenied2.text, /was not saved/i);
-});
-
-const soul2 = await call("whoami", { host_id: 262 });
-check("consecutive whoami calls do not reuse one turn token", () => {
-  const first = new URL(soulRequest.url, "http://x").searchParams.get("turn");
-  const second = new URL(seen.filter((r) => r.url.startsWith("/api/v1/me/hosts/262/soul")).at(-1).url, "http://x").searchParams.get("turn");
-  assert.notEqual(first, second);
-  assert.ok(soul2.text.length > 0);
-});
-
-// 协议 v2 的部分加载：第二次读带上缓存的 core_version，服务端回 core:"unchanged"、
-// 不带人设原文 —— 渲染出来的她必须还是完整的（从缓存补回），因为一个 MCP 进程
-// 会跨很多段对话，新对话里第一次 whoami 不能没有她是谁。
-check("第二次 whoami 带 core_version，服务端省掉人设，渲染仍从缓存补全", () => {
-  const url = seen.filter((r) => r.url.startsWith("/api/v1/me/hosts/262/soul")).at(-1).url;
-  assert.match(url, /core_version=cv262/);
-  assert.match(soul2.text, /WHO YOU ARE\nnight owl illustrator/);
-  assert.match(soul2.text, /YOUR GREETING\nhi/);
-});
-
-// ── I4: 人设变了要提醒 ─────────────────────────────────────────────
-// 这个 client 手里缓存的 core_version 还是 cv262（上面两次 whoami 都没有改过它）。
-// 现在把服务端的「当前版本」换掉，模拟「人设在别处被改了」：下一次写回触发的后台
-// 预取会带回新版本号，发现跟 shownCoreVersion 对不上，下下次 log_turn 就该提醒。
-CORE_262 = "cv262-v2";
-await call("log_turn", { host_id: 262, user_message: "core change 1", host_message: "core change 1 reply" });
-await sleep(500); // 让这次写回成功、触发的后台预取落地（拿到新版本号）
-const afterCoreChange = await call("log_turn", { host_id: 262, user_message: "core change 2", host_message: "core change 2 reply" });
-check("人设变了，log_turn 提醒重新读 whoami", () => assert.match(afterCoreChange.text, /Her persona changed/));
-
-const longTurn = await call("log_turn", { host_id: 262, user_message: "hi", host_message: "x".repeat(1200) });
-await sleep(300);
-check("log_turn says which side it trimmed", () => {
-  assert.match(longTurn.text, /trimmed to 800/);
-  assert.equal(JSON.parse(seen.filter((r) => r.url === "/api/v1/me/hosts/262/turn").at(-1).body).host_message.length, 800);
-});
-
-const saved = await call("remember", { host_id: 262, content: "养了只叫 Mochi 的狗" });
-check("remember confirms a real save", () => assert.match(saved.text, /Saved \[fact\]/));
-
-const tombstoned = await call("remember", { host_id: 262, content: "不想再提前任" });
-check("remember does not claim to have saved a fact the person deleted", () => {
-  assert.doesNotMatch(tombstoned.text, /^Saved/m);
-  assert.match(tombstoned.text, /deleted/);
-});
-
-// M10: TaskFactGate 的 422 带改写建议，remember 要把它转述出来，而不是回通用报错。
-const taskFact = await call("remember", { host_id: 262, content: "run bin/render-build.sh to deploy" });
-check("remember 转述 422 的改写建议，而不是通用的 Invalid parameters", () => {
-  assert.ok(taskFact.isError);
-  assert.match(taskFact.text, /Build commands, code style and tooling belong in your own memory/i);
-  assert.doesNotMatch(taskFact.text, /^Invalid parameters for remember\.$/);
+check('no retired raw endpoint was contacted', () => {
+  assert.deepEqual(seen.filter(r => /\/(turn|facts)(?:\?|$)/.test(r.url) || r.url === '/mcp'), []);
 });
 
 const errorCases = [

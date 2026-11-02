@@ -17,6 +17,8 @@ import { createDaemon } from "./agentd/daemon.js";
 import { createExtractAdapters, type NativeInvokerLog } from "./agentd/native-invoker.js";
 import { createRotatingLogger } from "./agentd/logger.js";
 import { emptyState, loadConfig, loadState, saveState } from "./agentd/state.js";
+import { requireCloudIssuer, assertLoginProfileIssuers } from "./local/profile-issuer.js";
+import { sameServerIssuer } from "./agentd/server-identity.js";
 import { saveLoginCredentials } from "./agentd/credentials.js";
 import { getGitState } from "./agentd/git-state.js";
 import { repoKey } from "./repo-key.js";
@@ -25,6 +27,7 @@ import { runDoctor } from "./doctor.js";
 import { detectLang, messages } from "./i18n.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
+import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
 import { openStore, profilesDir, snapshotPath } from "./local/store.js";
 import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./local/bindings.js";
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
@@ -48,7 +51,7 @@ export interface CliIO {
  * can pin the gate without running the resident daemon loop (intervals / fs.watch /
  * signal exit). Assets mode gets the real runtime adapters + spawn NativeInvoker
  * (whose readSource resolves event refs through the local path-pointer index);
- * legacy mode keeps its transcript-upload path unchanged and gets `undefined`.
+ * accounts without assets metadata get `undefined`; raw uploads are always retired.
  */
 export function agentdExtractAdapters(
   home: string,
@@ -70,7 +73,9 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul uninstall                               remove managed hooks/service; keep profiles and raw archives
 
   37soul login [--profile <id>]                  device login; merge the local anonymous profile
-  37soul sync [--profile <id>]                   push/pull the local soul (all assets-mode profiles, or one)
+  37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
+  37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
+                                                profile commands default to the valid active profile
   37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <50+ chars> [--avatar <path>] [--profile <id>]
   37soul soul list [--profile <id>]              list local Souls
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
@@ -211,10 +216,23 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     case "login":
       return loginCommand(root, rest, io, deps);
     case "sync": {
-      const profileId = flagValue(rest, "--profile");
-      const reports = profileId
-        ? [{ profile_id: profileId, report: await runSync(root, profileId) }]
-        : await runSyncProfiles(root);
+      const allProfiles = rest.includes("--all-profiles");
+      if (allProfiles && rest.includes("--profile")) {
+        io.stderr("--all-profiles and --profile are mutually exclusive\n");
+        return 2;
+      }
+      let reports;
+      if (allProfiles) {
+        reports = await runSyncProfiles(root);
+      } else {
+        const profileId = await profileIdFromArgs(root, rest, io);
+        if (profileId === null) return 1;
+        reports = [{ profile_id: profileId, report: await runSync(root, profileId) }];
+      }
+      if (reports.length === 0) {
+        io.stderr("No usable assets profile found. Run `37soul install` to initialize local use, or `37soul login` to connect this server. Existing local data was not changed.\n");
+        return 1;
+      }
       let failed = false;
       for (const { profile_id, report } of reports) {
         io.stdout(
@@ -258,13 +276,9 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   const apiBaseUrl =
     (process.env.SOUL37_BASE_URL || config?.api_base_url || "https://37soul.com").replace(/\/+$/, "");
   const machineId = config?.machine_id ?? legacyState.machine_id;
-  // Upgrade gate: in assets mode the legacy transcript upload path must be inert —
-  // pre-seeded spool/queue/log_turn/checkpoint/facts/remember/PAT updates produce
-  // zero old write requests. With tokens forced to {} (and no transcript fallback),
-  // `uploadBatch` short-circuits to "unauthorized" before any fetch and the spool is
-  // never discovered. Local assets/soul data is untouched.
+  // Legacy transcript credentials and fallback are retired in every account state.
+  // Account metadata can gate asset extraction, never raw upload permission.
   const assetsMode = isAssetsModeSync(root);
-  const tokens = assetsMode ? {} : (config?.tokens ?? {});
 
   const logger = createRotatingLogger({ file: path.join(root, "agentd.log") });
   const daemon = createDaemon(
@@ -272,10 +286,9 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
       root,
       apiBaseUrl,
       machineId,
-      tokens,
+      tokens: {},
       home,
-      // v2 §6.2：hook 是主路径；会话记录兜底只对显式开启的 Agent 生效。
-      transcriptFallback: assetsMode ? [] : (config?.transcript_fallback ?? []),
+      transcriptFallback: [],
     },
     {
       log: logger,
@@ -357,8 +370,25 @@ function avatarPathFromArgs(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : path.resolve(value);
 }
 
-function profileIdFromArgs(rest: string[]): string {
-  return flagValue(rest, "--profile") ?? "default";
+async function profileIdFromArgs(root: string, rest: string[], io: CliIO): Promise<string | null> {
+  const explicit = flagValue(rest, "--profile");
+  if (rest.includes("--profile")) {
+    if (explicit && !explicit.startsWith("--")) return explicit;
+    io.stderr("--profile requires an explicit profile id\n");
+    return null;
+  }
+  const active = resolveLocalAssetsProfileSync(root);
+  if (active) return active.profile_id;
+
+  // The only implicit creation fallback is a genuinely uninstalled fresh home.
+  // Existing, damaged or ambiguous metadata must never redirect into default.
+  const entries = await readdir(profilesDir(root), { withFileTypes: true }).catch(error =>
+    error.code === "ENOENT" ? [] : null);
+  const exists = async (file: string) => stat(file).then(() => true, error => error.code !== "ENOENT");
+  if (entries !== null && !entries.some(entry => entry.isDirectory()) &&
+      !(await exists(path.join(root, "config.json"))) && !(await exists(path.join(root, "accounts.json")))) return "default";
+  io.stderr("No valid unambiguous active profile. Existing data was not changed. Use --profile <id> to explicitly choose local data, or run 37soul login --profile <new-profile-id> for this server.\n");
+  return null;
 }
 
 function runtimeFromArgs(rest: string[], defaultValue: RuntimeKind): RuntimeKind {
@@ -408,7 +438,8 @@ async function readProfileDeviceId(root: string, profileId: ProfileId): Promise<
  * 用到的动作（"我上次说过什么"），但我们的答案带状态与来源，而不是一堆片段。
  */
 async function recallCommand(root: string, rest: string[], io: CliIO): Promise<number> {
-  const profileId = profileIdFromArgs(rest);
+  const profileId = await profileIdFromArgs(root, rest, io);
+  if (profileId === null) return 1;
   const terms = parseTerms(rest.filter((arg) => !arg.startsWith("--") && arg !== profileId).join(" "));
   const includeHistory = rest.includes("--history");
   const kindFlag = flagValue(rest, "--kind");
@@ -449,7 +480,8 @@ async function recallCommand(root: string, rest: string[], io: CliIO): Promise<n
 
 async function soulCommand(root: string, rest: string[], io: CliIO, deps: InstallDeps): Promise<number> {
   const [sub, ...args] = rest;
-  const profileId = profileIdFromArgs(args);
+  const profileId = await profileIdFromArgs(root, args, io);
+  if (profileId === null) return 1;
 
   if (sub === "create") {
     const ageValue = flagValue(args, "--age");
@@ -712,7 +744,8 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
 }
 
 export async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
-  const profileId = profileIdFromArgs(rest);
+  const profileId = await profileIdFromArgs(root, rest, io);
+  if (profileId === null) return 1;
   const soulUid = flagValue(rest, "--soul") ?? flagValue(rest, "--soul-uid");
   const nativeSessionId = flagValue(rest, "--session") ?? flagValue(rest, "--native-session-id");
   const runtimeKind = runtimeFromArgs(rest, "claude-code");
@@ -842,6 +875,7 @@ async function listSameOwnerProfiles(
   root: string,
   ownerId: string,
   currentProfileId: string,
+  issuer: string,
 ): Promise<ProfileCandidate[]> {
   const entries = await readdir(profilesDir(root), { withFileTypes: true }).catch(() => []);
   const out: ProfileCandidate[] = [];
@@ -860,7 +894,7 @@ async function listSameOwnerProfiles(
     } catch {
       continue; // a corrupt/unreadable profile is not offered as a candidate
     }
-    if (snap.owner_id !== ownerId) continue;
+    if (snap.owner_id !== ownerId || !sameServerIssuer(snap.cloud_issuer, issuer)) continue;
     let modifiedAt: number | null = null;
     try {
       modifiedAt = (await stat(snapshotPath(root, id))).mtimeMs;
@@ -884,7 +918,23 @@ export async function loginCommand(
   io: CliIO,
   deps: InstallDeps,
 ): Promise<number> {
-  const profileId = profileIdFromArgs(rest);
+  const profileId = await profileIdFromArgs(root, rest, io);
+  if (profileId === null) return 1;
+  const mergeProfileId = flagValue(rest, "--merge-profile");
+  const useProfileId = flagValue(rest, "--use-profile");
+  if (mergeProfileId && useProfileId) {
+    io.stderr("--merge-profile and --use-profile are mutually exclusive\n");
+    return 2;
+  }
+  let issuer: string;
+  try {
+    issuer = requireCloudIssuer(deps.apiBase);
+    await assertLoginProfileIssuers(root, [profileId, ...(mergeProfileId ? [mergeProfileId] : []), ...(useProfileId ? [useProfileId] : [])], issuer);
+  } catch (error) {
+    io.stderr(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+
   const machineId = await readProfileDeviceId(root, profileId);
   const clientVersion = await readClientVersion(fileURLToPath(import.meta.url));
 
@@ -895,15 +945,8 @@ export async function loginCommand(
     return 1;
   }
 
-  // User-visible rule: if the same owner already has local profiles, never merge or
-  // switch silently. List the candidates and require an explicit flag.
-  const mergeProfileId = flagValue(rest, "--merge-profile");
-  const useProfileId = flagValue(rest, "--use-profile");
-  if (mergeProfileId && useProfileId) {
-    io.stderr("--merge-profile and --use-profile are mutually exclusive\n");
-    return 2;
-  }
-  const candidates = await listSameOwnerProfiles(root, login.owner_id, profileId);
+  // Only same-owner, same-issuer profiles are eligible for explicit adoption.
+  const candidates = await listSameOwnerProfiles(root, login.owner_id, profileId, issuer);
   if (candidates.length > 0 && !mergeProfileId && !useProfileId) {
     io.stderr(`you already have ${candidates.length} local profile(s) for owner ${login.owner_id}:\n`);
     for (const candidate of candidates) {
@@ -927,6 +970,7 @@ export async function loginCommand(
   // itself never calls store.transact.
   const res = await runWriterCommand(root, profileId, "login_associate", {
     owner_id: login.owner_id,
+    cloud_issuer: issuer,
     cloud_device_uid: login.cloud_device_uid ?? null,
     default_soul_uid: login.default_soul_uid ?? null,
     mode: login.mode ?? "assets_only",

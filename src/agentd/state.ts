@@ -48,11 +48,13 @@ export function configPath(root: string): string {
 export interface AgentConfig {
   api_base_url: string;
   machine_id: string;
+  /** Explicit profile adopted by successful login; never selected by mtime/order. */
+  active_profile_id?: string;
   /** agent_kind → bearer token（ingest_enabled 的 PAT）。旧兼容字段。 */
   tokens: Record<string, string>;
   /**
    * Scoped credentials for soul-assets/v1. A token is only used for the exact
-   * profile/owner/cloud-device/runtime recorded here; the legacy `tokens` map is
+   * issuer/profile/owner/cloud-device/runtime recorded here; the legacy `tokens` map is
    * never a fallback for assets-mode sync.
    */
   credentials?: StoredCredential[];

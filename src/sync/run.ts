@@ -70,9 +70,9 @@ export async function runSyncProfiles(root: string): Promise<SyncProfileReport[]
   const index = await readAccountsIndex(root);
   const profileIds = [
     ...new Set(
-      Object.values(index)
-        .filter((entry) => entry.soul_sync_mode === "assets_only")
-        .map((entry) => entry.profile_id),
+      Object.entries(index)
+        .filter(([ownerId, entry]) => ownerId !== "anonymous" && entry.soul_sync_mode === "assets_only")
+        .map(([, entry]) => entry.profile_id),
     ),
   ];
 

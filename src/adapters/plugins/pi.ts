@@ -123,6 +123,7 @@ function clamp(text, max) {
 }
 
 export default function extension(pi) {
+  if (process.env.SOUL37_INTERNAL_JOB_UID) return;
   let sessionId = null;
   let cwd = null;
   let pendingContext = "";
@@ -196,8 +197,8 @@ export default function extension(pi) {
     try {
       let last = "";
       try {
-        const entries = ctx && ctx.sessionManager && typeof ctx.sessionManager.getEntries === "function"
-          ? ctx.sessionManager.getEntries()
+        const entries = ctx && ctx.sessionManager && typeof ctx.sessionManager.getBranch === "function"
+          ? ctx.sessionManager.getBranch()
           : [];
         for (let i = entries.length - 1; i >= 0; i -= 1) {
           const message = entries[i] && entries[i].message;
@@ -207,7 +208,9 @@ export default function extension(pi) {
           }
         }
       } catch {}
+      const transcriptPath = ctx?.sessionManager?.getSessionFile();
       await call("Stop", {
+        transcript_path: typeof transcriptPath === "string" ? transcriptPath : undefined,
         session_id: sid(ctx),
         cwd,
         last_assistant_message: last,

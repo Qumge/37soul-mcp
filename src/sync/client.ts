@@ -16,6 +16,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BindingSnapshot, HttpFetch, ProfileId } from "../adapters/types.js";
+import { normalizeServerIssuer, sameServerIssuer } from "../agentd/server-identity.js";
 import { loadConfig } from "../agentd/state.js";
 import { clearDeviceCredentials, credentialForRuntime, selectCredentials, type StoredCredential } from "../agentd/credentials.js";
 import {
@@ -66,6 +67,8 @@ export interface SyncOptions {
   root?: string;
   fs?: Partial<StoreFs>;
   token?: string;
+  /** Required with an explicit token; no wildcard issuer or endpoint inference. */
+  tokenIssuer?: string;
   baseUrl?: string;
   pullLimit?: number;
   backoff?: SyncBackoff;
@@ -85,8 +88,7 @@ type SyncAuth = {
 function tokenForRuntime(auth: SyncAuth, runtimeKind: string | null | undefined): string | null {
   const exact = credentialForRuntime(auth.credentials, runtimeKind);
   if (exact) return exact.token;
-  // Test/compat override: options.token is an explicit wildcard supplied by the
-  // caller, never a guessed global config token.
+  // Explicit runtime wildcard is allowed only after its issuer was checked.
   return auth.credentials.find((credential) => credential.runtime_kind === "*")?.token ?? null;
 }
 
@@ -158,7 +160,7 @@ async function fetchWithBackoff(
   for (;;) {
     let response: FetchResponseLike;
     try {
-      response = (await http(url, init)) as unknown as FetchResponseLike;
+      response = (await http(url, { ...init, redirect: "error" })) as unknown as FetchResponseLike;
     } catch (error) {
       attempt += 1;
       if (attempt > auth.backoff.maxRetries) throw error;
@@ -205,7 +207,7 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
   const root = resolveRoot(options.root);
   const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
   const config = await loadConfig(root).catch(() => null);
-  const baseUrl = (options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = normalizeServerIssuer(options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL);
   const store = await openStore(root, profileId, { fs });
   const report: SyncReport = { accepted: 0, conflicts: 0, pending: 0 };
   try {
@@ -214,18 +216,19 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
     // legacy config.tokens map is intentionally not a fallback: it cannot prove
     // ownership, and using it is how account A used to pull account B's Soul.
     const credentials: StoredCredential[] = options.token
-      ? [{
+      ? (sameServerIssuer(options.tokenIssuer, baseUrl) ? [{
+          issuer: baseUrl,
           token: options.token,
           owner_id: snap.owner_id ?? "",
           cloud_device_uid: snap.cloud_device_uid ?? "",
           runtime_kind: "*",
           profile_id: profileId,
           obtained_at: "",
-        }]
-      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid);
+        }] : [])
+      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid, baseUrl);
     if (credentials.length === 0) {
       report.pending = pendingCount(snap);
-      report.error = "no authorized device token";
+      report.error = "no authorized device token; login required for this server";
       return report;
     }
     const auth: SyncAuth = {
@@ -247,7 +250,7 @@ export async function syncOnce(profileId: ProfileId, http: HttpFetch, options: S
           headers: authHeaders(auth.defaultToken),
         }, auth);
         if (capabilities.status === 401) {
-          const revoked = await handleRevokedOrRejected(store, snap, capabilities, auth.root);
+          const revoked = await handleRevokedOrRejected(store, snap, capabilities, auth);
           report.error = revoked ?? "token_invalid";
           report.pending = pendingCount(await store.read());
           return report;
@@ -416,7 +419,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(op.request),
       }, auth);
-      return handleRegisterSoul(store, snap, op, res, report, auth.root);
+      return handleRegisterSoul(store, snap, op, res, report, auth);
     }
     case "consent": {
       const soulUid = String(op.request.soul_uid ?? "");
@@ -425,7 +428,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(consentBody(op.request)),
       }, auth);
-      return handleConsent(store, snap, op, res, report, auth.root);
+      return handleConsent(store, snap, op, res, report, auth);
     }
     case "binding": {
       const binding = resolveBindingBySessionRef(snap, String(op.request.session_ref ?? ""));
@@ -448,7 +451,7 @@ async function pushOne(
         headers: { ...headers, "idempotency-key": op.operation_id },
         body: JSON.stringify(op.request),
       }, auth);
-      return handleBinding(store, snap, op, res, report, auth.root);
+      return handleBinding(store, snap, op, res, report, auth);
     }
     case "asset":
       // Collected and batched below; never sent here.
@@ -476,7 +479,7 @@ async function handleRegisterSoul(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
-  root: string,
+  auth: SyncAuth,
 ): Promise<string | null> {
   const soulUid = String(op.request.soul_uid ?? "");
   if (res.status === 200 || res.status === 201) {
@@ -529,7 +532,7 @@ async function handleRegisterSoul(
     // can re-run `37soul soul authorize` with a fresh operation/change id.
     return quarantineOp(store, op, "authorization_required", report, null);
   }
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth);
   return fatalFromStatus(res);
 }
 
@@ -612,7 +615,7 @@ async function uploadAvatarForSoul(
   const body = await readJson(response);
   if (response.status === 401) {
     snap = await store.read();
-    const fatal = await handleRevokedOrRejected(store, snap, body, auth.root);
+    const fatal = await handleRevokedOrRejected(store, snap, body, auth);
     return { fatal, result: { status: "failed", soul_uid: soulUid, error: fatal ?? "unauthorized" } };
   }
   if (response.status === 403) {
@@ -671,20 +674,21 @@ async function uploadPendingAvatar(
   const root = resolveRoot(options.root);
   const fs: StoreFs = { ...defaultStoreFs, ...(options.fs ?? {}) };
   const config = await loadConfig(root).catch(() => null);
-  const baseUrl = (options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const baseUrl = normalizeServerIssuer(options.baseUrl ?? config?.api_base_url ?? DEFAULT_BASE_URL);
   const store = await openStore(root, profileId, { fs });
   try {
     const snap = await store.read();
     const credentials: StoredCredential[] = options.token
-      ? [{
+      ? (sameServerIssuer(options.tokenIssuer, baseUrl) ? [{
+          issuer: baseUrl,
           token: options.token,
           owner_id: snap.owner_id ?? "",
           cloud_device_uid: snap.cloud_device_uid ?? "",
           runtime_kind: "*",
           profile_id: profileId,
           obtained_at: "",
-        }]
-      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid);
+        }] : [])
+      : selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid, baseUrl);
     if (credentials.length === 0) return { status: "not_logged_in" };
     const auth: SyncAuth = {
       root,
@@ -713,7 +717,7 @@ async function handleConsent(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
-  root: string,
+  auth: SyncAuth,
 ): Promise<string | null> {
   if (res.status === 200 || res.status === 201) {
     const body = res.body as { consent?: Consent; replay_from?: string } | null;
@@ -746,7 +750,7 @@ async function handleConsent(
   if (res.status === 422) {
     return quarantineOp(store, op, "authorization_required", report, null);
   }
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth);
   return fatalFromStatus(res);
 }
 
@@ -756,7 +760,7 @@ async function handleBinding(
   op: OutboxOperation,
   res: JsonResponse,
   report: SyncReport,
-  root: string,
+  auth: SyncAuth,
 ): Promise<string | null> {
   if (res.status === 200 || res.status === 201) {
     const body = res.body as { binding?: Binding } | null;
@@ -769,7 +773,7 @@ async function handleBinding(
     return null;
   }
   if (res.status === 409) return quarantineOp(store, op, stopCode(res.body).code, report, null);
-  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, root);
+  if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth);
   return fatalFromStatus(res);
 }
 
@@ -778,12 +782,12 @@ async function handleRevokedOrRejected(
   store: LocalStore,
   snap: StoreSnapshot,
   res: JsonResponse,
-  root: string,
+  auth: SyncAuth,
 ): Promise<string | null> {
   const { code } = stopCode(res.body);
   if (code === "device_revoked") {
     await store.transact((draft) => clearCloudCache(draft, { revokeDevice: true }));
-    await clearDeviceCredentials(root, snap.owner_id, snap.cloud_device_uid);
+    await clearDeviceCredentials(auth.root, snap.owner_id, snap.cloud_device_uid, auth.baseUrl);
     return "device_revoked";
   }
   if (code === "token_invalid") {
@@ -792,7 +796,7 @@ async function handleRevokedOrRejected(
     // local originals, and require a fresh login. (Rails currently reports a revoked
     // device as token_invalid because the PAT lookup happens first.)
     await store.transact((draft) => clearCloudCache(draft, { revokeDevice: true }));
-    await clearDeviceCredentials(root, snap.owner_id, snap.cloud_device_uid);
+    await clearDeviceCredentials(auth.root, snap.owner_id, snap.cloud_device_uid, auth.baseUrl);
     return "token_invalid";
   }
   return code;
@@ -822,7 +826,7 @@ async function pushAssetBatch(
   if (res.status !== 200) {
     if (res.status === 401) {
       const snap = await store.read();
-      return handleRevokedOrRejected(store, snap, res, auth.root);
+      return handleRevokedOrRejected(store, snap, res, auth);
     }
     if (res.status === 409) {
       // Whole-request idempotency mismatch: park every change in this batch.
@@ -1043,7 +1047,7 @@ async function pullLoop(
       });
       continue;
     }
-    if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth.root);
+    if (res.status === 401) return handleRevokedOrRejected(store, snap, res, auth);
     return fatalFromStatus(res);
   }
   return null;

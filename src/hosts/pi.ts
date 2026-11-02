@@ -1,5 +1,5 @@
 import path from "node:path";
-import { inspectPiExtension, piExtensionPath, removePiExtension, writePiExtension, createPiAdapter } from "../adapters/pi.js";
+import { inspectPiExtension, piExtensionPath, removePiExtension, writePiExtension, createPiAdapter, latestPiCompletedTurnRefs } from "../adapters/pi.js";
 import type { HostSpec, HostInstallDeps, HostInstallResult, HostDoctorDeps, HostDoctorCheck } from "./types.js";
 import { parseHookPayload, manifestSha256 } from "./shared.js";
 
@@ -38,9 +38,31 @@ async function uninstall(deps: HostInstallDeps, removed: string[]): Promise<void
   }
 }
 
-async function doctor(_deps: HostDoctorDeps): Promise<HostDoctorCheck[]> {
-  // Pi had no per-host configuration checks before the registry refactor.
-  return [];
+async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { waiting?: boolean }>> {
+  const inspection = inspectPiExtension(deps.home);
+  const name = "pi: extension bridge";
+  const recovery = "Run 37soul install to reinstall the Pi extension, then restart Pi and open a new session.";
+  if (inspection.status === "not_installed") {
+    return [{ name, ok: false, detail: `Not installed: missing ${inspection.path}. ${recovery}` }];
+  }
+  if (inspection.status === "generation_unsupported") {
+    return [{ name, ok: false, detail: `Unsupported extension generation at ${inspection.path}: ${inspection.detail}. ${recovery}` }];
+  }
+  if (inspection.detail) {
+    return [{ name, ok: false, detail: `Cannot read extension at ${inspection.path}: ${inspection.detail}. ${recovery}` }];
+  }
+  // Our managed file proves installation only. No Pi-authored load/trust marker
+  // is available here; generic hook activity alone cannot prove this file loaded
+  // or that native extraction succeeded. Never promote a file write to green.
+  return [{
+    name,
+    ok: false,
+    waiting: true,
+    detail: `Extension present at ${inspection.path} (${inspection.generation}); waiting for runtime evidence. ` +
+      "Restart Pi and open a new session to load the extension and emit native events. " +
+      "Loading and trust are not verified; injection and extraction are not verified. " +
+      "A managed file alone does not prove that Pi loaded or executed it.",
+  }];
 }
 
 export const host: HostSpec = {
@@ -52,6 +74,7 @@ export const host: HostSpec = {
     injectionChannel: "SessionStart",
     emitsRuntimeEvents: true,
     parsePayload: parseHookPayload,
+    completedTurnRefs: latestPiCompletedTurnRefs,
   },
   install: {
     plan: ({ home }) => [piExtensionPath(home)],

@@ -23,11 +23,13 @@
  * Nothing here performs network I/O. `mergeLoginProfile` must keep working fully
  * offline — anonymous association and merge are local operations.
  */
+import { requireCloudIssuer, assertProfileCloudIssuer, assertLoginProfileIssuers } from "./profile-issuer.js";
+import { sameServerIssuer } from "../agentd/server-identity.js";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { link as fsLink, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { defaultRoot } from "../agentd/state.js";
+import { defaultRoot, configPath } from "../agentd/state.js";
 import type { ProfileId } from "../adapters/types.js";
 import {
   defaultStoreFs,
@@ -41,6 +43,7 @@ import {
 } from "./store.js";
 
 export interface AccountEntry {
+  cloud_issuer?: string | null;
   profile_id: ProfileId;
   default_soul_uid: string | null;
   /** §3 login `mode` response (currently "assets_only"); gates the host-id local peek. */
@@ -80,8 +83,9 @@ export async function readAccountsIndex(root: string): Promise<AccountsIndex> {
         typeof entry === "object" &&
         typeof (entry as Record<string, unknown>).profile_id === "string"
       ) {
-        const e = entry as { profile_id: string; default_soul_uid?: unknown; soul_sync_mode?: unknown };
+        const e = entry as { cloud_issuer?: unknown; profile_id: string; default_soul_uid?: unknown; soul_sync_mode?: unknown };
         out[ownerId] = {
+          ...(typeof e.cloud_issuer === "string" ? { cloud_issuer: e.cloud_issuer } : {}),
           profile_id: e.profile_id,
           default_soul_uid: typeof e.default_soul_uid === "string" ? e.default_soul_uid : null,
           soul_sync_mode: typeof e.soul_sync_mode === "string" ? e.soul_sync_mode : null,
@@ -237,7 +241,7 @@ export async function mergeLoginProfile(
   profileId: ProfileId,
   ownerId: string,
   mergeProfileId?: ProfileId,
-  opts: LocalOptions = {},
+  opts: LocalOptions & { cloudIssuer?: string } = {},
 ): Promise<ProfileId> {
   if (typeof profileId !== "string" || profileId.length === 0) {
     throw new StoreError("invalid_profile", "profile_id must be a non-empty string");
@@ -245,6 +249,7 @@ export async function mergeLoginProfile(
   if (typeof ownerId !== "string" || ownerId.length === 0) {
     throw new StoreError("invalid_owner", "owner_id must be a non-empty string");
   }
+  const issuer = requireCloudIssuer(opts.cloudIssuer);
   const root = resolveRoot(opts.root);
   const fs: StoreFs = { ...defaultStoreFs, ...(opts.fs ?? {}) };
 
@@ -252,6 +257,7 @@ export async function mergeLoginProfile(
   const probe = await openStore(root, profileId, { fs });
   const current = await probe.read();
   await probe.close();
+  assertProfileCloudIssuer(current, issuer);
   if (current.owner_id !== null && current.owner_id !== ownerId) {
     throw new StoreError(
       "owner_mismatch",
@@ -260,22 +266,37 @@ export async function mergeLoginProfile(
   }
 
   if (mergeProfileId && mergeProfileId !== profileId) {
+    await assertLoginProfileIssuers(root, [mergeProfileId], issuer, fs);
+    const sourceStore = await openStore(root, mergeProfileId, { fs });
+    try {
+      if ((await sourceStore.read()).owner_id !== ownerId) {
+        throw new StoreError("owner_mismatch", `profile ${mergeProfileId} does not belong to ${ownerId}`);
+      }
+    } finally { await sourceStore.close(); }
+  }
+
+  // Pin ownership BEFORE resumable copying. An interrupted merge must not leave
+  // cloud data in an apparently anonymous target that another server can adopt.
+  const store = await openStore(root, profileId, { fs });
+  try {
+    await store.transact((draft) => {
+      assertProfileCloudIssuer(draft, issuer);
+      draft.owner_id = ownerId;
+      draft.cloud_issuer = issuer;
+    });
+  } finally { await store.close(); }
+  if (mergeProfileId && mergeProfileId !== profileId) {
     await mergeProfiles(root, fs, profileId, mergeProfileId, ownerId);
   }
 
-  // Association: set the owner on the target (its own transact).
-  const store = await openStore(root, profileId, { fs });
-  await store.transact((draft) => {
-    draft.owner_id = ownerId;
-  });
-  await store.close();
-
   // The accounts-index switch is written last and atomically.
   const index = await readAccountsIndex(root);
+  if (index.anonymous?.profile_id === profileId) delete index.anonymous;
   index[ownerId] = {
     profile_id: profileId,
-    default_soul_uid: index[ownerId]?.default_soul_uid ?? null,
-    soul_sync_mode: index[ownerId]?.soul_sync_mode ?? null,
+    cloud_issuer: issuer,
+    default_soul_uid: sameServerIssuer(index[ownerId]?.cloud_issuer, issuer) ? index[ownerId]?.default_soul_uid ?? null : null,
+    soul_sync_mode: sameServerIssuer(index[ownerId]?.cloud_issuer, issuer) ? index[ownerId]?.soul_sync_mode ?? null : null,
   };
   await writeAccountsIndex(root, index);
 
@@ -290,59 +311,59 @@ export async function mergeLoginProfile(
  * keeps its env/default behavior. Never reads or exposes a native_session_id or path.
  */
 export function resolveLocalHostIdSync(root: string): number | null {
+  const selected = resolveLocalAssetsProfileSync(root);
+  if (!selected) return null;
   try {
-    const entries = readdirSync(profilesDir(root), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name);
-    if (entries.length !== 1) return null; // only a single local profile can be consulted
-    const profileId = entries[0];
-    const accounts = JSON.parse(readFileSync(accountsIndexPath(root), "utf8")) as Record<
-      string,
-      { profile_id?: unknown; soul_sync_mode?: unknown }
-    >;
-    const entry = Object.values(accounts).find((e) => e.profile_id === profileId);
-    if (!entry || entry.soul_sync_mode !== "assets_only") return null;
-    const snapshot = JSON.parse(readFileSync(snapshotPath(root, profileId), "utf8")) as {
-      souls?: Record<string, { legacy_host_id?: unknown }>;
-    };
-    const souls = Object.values(snapshot.souls ?? {});
+    const snapshot = JSON.parse(readFileSync(snapshotPath(root, selected.profile_id), "utf8"));
+    const souls = Object.values(snapshot.souls ?? {}) as { legacy_host_id?: unknown }[];
     if (souls.length !== 1) return null;
     const hostId = souls[0].legacy_host_id;
     return typeof hostId === "number" && Number.isFinite(hostId) && hostId > 0 ? hostId : null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 /**
- * Task 4: synchronous assets-mode gate for the hook's runtime-event emission.
- * Returns the single profile's (profile_id, device_id) only when the accounts
- * index entry for that sole profile is in assets mode (`soul_sync_mode ===
- * "assets_only"`). Otherwise null, so the hook keeps its legacy behavior.
- * Read-only and local; never reads or exposes a native_session_id or path.
+ * Read-only active-profile resolver shared by hook emission and local MCP peeks.
+ * An explicit invalid/stale selection never falls back. Without an explicit
+ * selection, only a single profile directory can be considered (anonymous install).
+ * Cloud ownership must agree across config target, account index and snapshot.
  */
 export function resolveLocalAssetsProfileSync(
   root: string,
 ): { profile_id: string; device_id: string } | null {
   try {
     const entries = readdirSync(profilesDir(root), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name);
-    if (entries.length !== 1) return null;
-    const profileId = entries[0];
-    const accounts = JSON.parse(readFileSync(accountsIndexPath(root), "utf8")) as Record<
-      string,
-      { profile_id?: unknown; soul_sync_mode?: unknown }
-    >;
-    const entry = Object.values(accounts).find((e) => e.profile_id === profileId);
-    if (!entry || entry.soul_sync_mode !== "assets_only") return null;
-    const snapshot = JSON.parse(readFileSync(snapshotPath(root, profileId), "utf8")) as {
-      device_id?: unknown;
-    };
-    return typeof snapshot.device_id === "string" && snapshot.device_id !== ""
-      ? { profile_id: profileId, device_id: snapshot.device_id }
-      : null;
-  } catch {
-    return null;
-  }
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    let config: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(configPath(root), "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      config = parsed as Record<string, unknown>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    }
+    const explicit = config !== null && Object.prototype.hasOwnProperty.call(config, "active_profile_id");
+    const profileId = explicit ? config!.active_profile_id : entries.length === 1 ? entries[0] : null;
+    if (typeof profileId !== "string" || !profileId || !entries.includes(profileId)) return null;
+    const accounts: unknown = JSON.parse(readFileSync(accountsIndexPath(root), "utf8"));
+    if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) return null;
+    const matching = Object.entries(accounts).filter(([, entry]) => entry && typeof entry === "object" && entry.profile_id === profileId);
+    if (matching.length !== 1) return null;
+    const [ownerId, entry] = matching[0];
+    if (entry.soul_sync_mode !== "assets_only") return null;
+    const snapshot = JSON.parse(readFileSync(snapshotPath(root, profileId), "utf8"));
+    const pinned = JSON.parse(readFileSync(profileDir(root, profileId) + "/device.json", "utf8"));
+    if (snapshot.store_version !== 1 || snapshot.profile_id !== profileId ||
+        typeof snapshot.device_id !== "string" || !snapshot.device_id || snapshot.device_id !== pinned.device_id) return null;
+    if (snapshot.owner_id === null) {
+      if (ownerId !== "anonymous" || snapshot.cloud_device_uid !== null || snapshot.cloud_issuer != null) return null;
+    } else {
+      if (!explicit) return null; // singleton fallback is anonymous-install only
+      if (typeof snapshot.owner_id !== "string" || snapshot.owner_id !== ownerId ||
+          typeof snapshot.cloud_device_uid !== "string" || !snapshot.cloud_device_uid ||
+          !sameServerIssuer(snapshot.cloud_issuer, entry.cloud_issuer) ||
+          !sameServerIssuer(snapshot.cloud_issuer, config?.api_base_url)) return null;
+    }
+    return { profile_id: profileId, device_id: snapshot.device_id };
+  } catch { return null; }
 }

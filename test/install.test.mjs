@@ -271,7 +271,12 @@ test("install: writes a systemd user unit on Linux and enables it", async () => 
   const launcher = runtimeLauncher(h.home, "0.11.0");
   const unit = readFileSync(systemdPath(h.home), "utf8");
   assert.ok(unit.includes(`ExecStart="${launcher}" "agentd"`));
-  assert.ok(h.commands.some((argv) => argv.join(" ") === "systemctl --user enable --now 37soul-agentd.service"));
+  const serviceCommands = h.commands.filter(argv => argv[0] === "systemctl").map(argv => argv.join(" "));
+  assert.deepEqual(serviceCommands, [
+    "systemctl --user daemon-reload",
+    "systemctl --user enable 37soul-agentd.service",
+    "systemctl --user restart 37soul-agentd.service",
+  ], "installation must activate the new ExecStart, including an already-active service");
   h.cleanup();
 });
 
@@ -540,7 +545,7 @@ test("doctor: a scoped login silences the binding hint", async () => {
   const root = dataRoot(h.home);
   const config = await loadConfig(root);
   config.credentials = [{
-    token: "token-1",
+    issuer: "https://app.test", token: "token-1",
     owner_id: "owner-1",
     cloud_device_uid: "cdu-1",
     runtime_kind: "claude-code",
@@ -548,6 +553,16 @@ test("doctor: a scoped login silences the binding hint", async () => {
     obtained_at: "x",
   }];
   await saveConfig(root, config);
+  const scopedStore = await openStore(root, "default");
+  await scopedStore.transact(draft => {
+    draft.owner_id = "owner-1";
+    draft.cloud_device_uid = "cdu-1";
+    draft.cloud_issuer = "https://app.test";
+  });
+  await scopedStore.close();
+  writeFileSync(path.join(root, "accounts.json"), JSON.stringify({
+    "owner-1": { profile_id: "default", default_soul_uid: null, soul_sync_mode: "assets_only", cloud_issuer: "https://app.test" },
+  }));
 
   const report = await runDoctor({ ...h.deps, lang: "zh" });
   assert.deepEqual(report.notes, [], "a logged-in install must not be nagged to log in");
@@ -1065,6 +1080,7 @@ test("install: repeat install preserves scoped credentials, profile, Soul UUID a
   const assetUid = "40000000-0000-4000-8000-000000000001";
   await store.transact((d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://app.test";
     d.cloud_device_uid = "cdu-1";
     d.souls[soulUid] = {
       soul_uid: soulUid, legacy_host_id: 42, identity_revision: 1,
@@ -1084,15 +1100,18 @@ test("install: repeat install preserves scoped credentials, profile, Soul UUID a
   });
   await store.close();
   const credentials = [{
-    token: "scoped-token", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    issuer: "https://app.test", token: "scoped-token", owner_id: "owner-1", cloud_device_uid: "cdu-1",
     runtime_kind: "hermes", profile_id: profileId, obtained_at: "2026-10-20T00:00:00Z",
   }];
   await saveConfig(root, {
     api_base_url: "https://app.test",
+    active_profile_id: profileId,
     machine_id: "machine-1",
     tokens: { hermes: "scoped-token" },
     credentials,
   });
+
+  writeFileSync(path.join(root, "accounts.json"), JSON.stringify({ "owner-1": { profile_id: profileId, cloud_issuer: "https://app.test", soul_sync_mode: "assets_only", default_soul_uid: soulUid } }));
 
   const networkBefore = h.deps.fetch.calls.length;
   await install(h.deps, { agents: ["claude-code"] });

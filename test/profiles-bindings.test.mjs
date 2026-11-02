@@ -121,7 +121,7 @@ test("profiles: anonymous association keeps profile and soul ids", async () => {
   };
   let result;
   try {
-    result = await mergeLoginProfile(profileId, "owner-123", undefined, { root });
+    result = await mergeLoginProfile(profileId, "owner-123", undefined, { root, cloudIssuer: "https://x" });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -160,19 +160,22 @@ test("profiles: same owner merge is crash safe", async () => {
   // The pre-existing same-owner profile (a previous login on another device).
   await seedProfile(root, sourceId, "dev-source", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["soul-b"] = makeSoul("soul-b", "Growth"); // same name, different UID
     d.bindings[bindingKey(sourceKey)] = makeBinding("b-src", "soul-b", sourceKey);
     d.outbox["s-op"] = makeOutboxOp("s-op");
     d.quarantine["q-1"] = { operation: makeOutboxOp("q-op"), reason: "conflict" };
   });
 
-  // Inject a mid-merge interruption: crash on the 2nd snapshot commit.
-  let renameCount = 0;
+  // Interrupt the binding-copy commit after souls were journaled. The issuer
+  // pin is now an earlier commit, so a numeric rename ordinal is not the seam.
+  let crashedOnSourceBinding = false;
   const crashingFs = {
     rename: async (from, to) => {
       if (to.endsWith("snapshot.json") && !to.endsWith("snapshot.json.bak")) {
-        renameCount += 1;
-        if (renameCount === 2) {
+        const next = JSON.parse(readFileSync(from, "utf8"));
+        if (next.bindings[bindingKey(sourceKey)]) {
+          crashedOnSourceBinding = true;
           const err = new Error("simulated crash mid-merge");
           err.code = "EIO";
           throw err;
@@ -183,17 +186,22 @@ test("profiles: same owner merge is crash safe", async () => {
   };
 
   await assert.rejects(
-    () => mergeLoginProfile(targetId, "owner-123", sourceId, { root, fs: crashingFs }),
+    () => mergeLoginProfile(targetId, "owner-123", sourceId, { root, cloudIssuer: "https://x", fs: crashingFs }),
     /simulated crash mid-merge/,
   );
-  assert.equal(renameCount, 2, "the crash injection actually fired");
+  assert.equal(crashedOnSourceBinding, true, "the binding-copy crash injection actually fired");
 
   const journal = JSON.parse(readFileSync(mergeJournalPath(root, targetId), "utf8"));
   assert.ok(journal.completed.includes("souls"), "first step committed and journaled");
   assert.ok(!journal.completed.includes("bindings"), "crash landed before the bindings step");
+  const interruptedStore = await openStore(root, targetId);
+  const interrupted = await interruptedStore.read();
+  await interruptedStore.close();
+  assert.equal(interrupted.cloud_issuer, "https://x", "issuer was durably pinned before copying cloud data");
+  assert.equal(interrupted.owner_id, "owner-123", "interrupted merge cannot masquerade as an anonymous profile");
 
   // Restart: the same call must finish the merge without loss.
-  const result = await mergeLoginProfile(targetId, "owner-123", sourceId, { root });
+  const result = await mergeLoginProfile(targetId, "owner-123", sourceId, { root, cloudIssuer: "https://x" });
   assert.equal(result, targetId);
 
   const mergedStore = await openStore(root, targetId);
@@ -234,11 +242,11 @@ test("profiles: switching accounts never mixes data", async () => {
     d.bindings[bindingKey(aKey)] = makeBinding("b-a", "s-a", aKey);
   });
   // Associate owner A for real (writes accounts.json on disk), not an in-memory index.
-  await mergeLoginProfile("a1", "owner-A", undefined, { root });
+  await mergeLoginProfile("a1", "owner-A", undefined, { root, cloudIssuer: "https://x" });
   await seedProfile(root, "b1", "dev-b");
 
   // Account B claims its own independent profile.
-  const result = await mergeLoginProfile("b1", "owner-B", undefined, { root });
+  const result = await mergeLoginProfile("b1", "owner-B", undefined, { root, cloudIssuer: "https://x" });
   assert.equal(result, "b1");
 
   // The on-disk accounts index maps each owner to a distinct profile.
@@ -261,7 +269,7 @@ test("profiles: switching accounts never mixes data", async () => {
 
   // A profile already owned by A cannot be re-attached to B.
   await assert.rejects(
-    () => mergeLoginProfile("a1", "owner-B", undefined, { root }),
+    () => mergeLoginProfile("a1", "owner-B", undefined, { root, cloudIssuer: "https://x" }),
     (err) => err && err.code === "owner_mismatch",
   );
 
@@ -634,9 +642,11 @@ test("resolveHostId: local peek is gated on assets mode", () => {
   s1.legacy_host_id = 42;
   writeFileSync(
     path.join(root, "profiles", profileId, "snapshot.json"),
-    `${JSON.stringify({ store_version: 1, profile_id: profileId, souls: { s1 } })}\n`,
+    `${JSON.stringify({ store_version: 1, profile_id: profileId, device_id: "dev-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", cloud_issuer: "https://x", souls: { s1 } })}\n`,
     { mode: 0o600 },
   );
+
+  writeFileSync(path.join(root, "config.json"), JSON.stringify({ api_base_url: "https://x", machine_id: "m1", tokens: {}, active_profile_id: profileId }));
 
   // No gate at all (accounts.json missing) -> env/default path, no local host id.
   assert.equal(resolveLocalHostIdSync(root), null, "no gate -> null");
@@ -644,7 +654,7 @@ test("resolveHostId: local peek is gated on assets mode", () => {
   // Gate present but not assets mode -> still null.
   writeFileSync(
     accountsIndexPath(root),
-    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: null, soul_sync_mode: null } })}\n`,
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, cloud_issuer: "https://x", default_soul_uid: null, soul_sync_mode: null } })}\n`,
     { mode: 0o600 },
   );
   assert.equal(resolveLocalHostIdSync(root), null, "non-assets gate -> null");
@@ -652,7 +662,7 @@ test("resolveHostId: local peek is gated on assets mode", () => {
   // Gate present in assets mode -> the local host id.
   writeFileSync(
     accountsIndexPath(root),
-    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: null, soul_sync_mode: "assets_only" } })}\n`,
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, cloud_issuer: "https://x", default_soul_uid: null, soul_sync_mode: "assets_only" } })}\n`,
     { mode: 0o600 },
   );
   assert.equal(resolveLocalHostIdSync(root), 42, "assets gate -> local host id");
@@ -674,7 +684,7 @@ test("login: association runs inside the writer and persists soul_sync_mode", as
       request_uid: requestUid,
       profile_id: "p1",
       command: "login_associate",
-      payload: { owner_id: ownerId, cloud_device_uid: "cdu-1", default_soul_uid: "s1", mode: "assets_only" },
+      payload: { owner_id: ownerId, cloud_issuer: "https://x", cloud_device_uid: "cdu-1", default_soul_uid: "s1", mode: "assets_only" },
     });
     // Two concurrent associations serialize through the writer's dispatch queue.
     const [r1, r2] = await Promise.all([
@@ -832,6 +842,7 @@ test("login: same-owner candidate without a flag is refused, nothing changes", a
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
     d.outbox["op-old"] = makeOutboxOp("op-old");
     d.quarantine["q-old"] = { operation: makeOutboxOp("q-op"), reason: "conflict" };
@@ -862,6 +873,7 @@ test("login: --merge-profile merges into the current profile, source kept", asyn
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
     d.outbox["op-old"] = makeOutboxOp("op-old");
     d.quarantine["q-old"] = { operation: makeOutboxOp("q-op"), reason: "conflict" };
@@ -901,6 +913,7 @@ test("login: --use-profile switches the index, anonymous profile untouched", asy
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
   });
 
@@ -970,6 +983,7 @@ test("login: --use-profile persists the fresh cloud_device_uid and prints the ad
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
   });
 
@@ -998,6 +1012,7 @@ test("login: --use-profile refuses a conflicting cloud device, writing nothing",
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
     d.cloud_device_uid = "cdu-old";
   });
@@ -1029,6 +1044,7 @@ test("login: --use-profile applies a known default soul", async () => {
   });
   await seedProfile(root, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-123";
+    d.cloud_issuer = "https://x";
     d.souls["s-old"] = makeSoul("s-old");
     d.souls["s2"] = makeSoul("s2");
   });
@@ -1055,6 +1071,7 @@ test("login: --use-profile leaves resolution untouched when the default is absen
   });
   await seedProfile(root1, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://x";
     d.souls["s-a"] = makeSoul("s-a");
     d.souls["s-b"] = makeSoul("s-b");
   });
@@ -1074,6 +1091,7 @@ test("login: --use-profile leaves resolution untouched when the default is absen
   });
   await seedProfile(root2, "existing", "dev-existing", (d) => {
     d.owner_id = "owner-2";
+    d.cloud_issuer = "https://x";
     d.souls["s-a"] = makeSoul("s-a");
     d.souls["s-b"] = makeSoul("s-b");
   });
@@ -1093,6 +1111,7 @@ test("P2-1: an authorized predecessor chain still allows a legal same-session sw
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://x";
     d.cloud_device_uid = "cdu-1";
     d.souls["A"] = makeSoul("A");
     d.souls["B"] = makeSoul("B");
@@ -1120,6 +1139,7 @@ test("P2-2: same-Soul selection stays idempotent after injection", async () => {
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://x";
     d.cloud_device_uid = "cdu-1";
     d.souls["B"] = makeSoul("B");
     d.consents["cdu-1:B"] = {
@@ -1178,6 +1198,7 @@ test("P2: an unconfirmed unauthorized switch cannot enqueue the authorized targe
   const root = tempDir();
   await seedProfile(root, "p1", "dev-1", (d) => {
     d.owner_id = "owner-1";
+    d.cloud_issuer = "https://x";
     d.cloud_device_uid = "cdu-1";
     d.souls["A"] = makeSoul("A");
     d.souls["B"] = makeSoul("B");

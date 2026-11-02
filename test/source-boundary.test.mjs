@@ -253,15 +253,19 @@ test("source-boundary: a hook Stop freezes the boundary through the real writer 
   writeFileSync(transcriptPath, `${firstTurn}${secondTurn}`, { mode: 0o600 });
 
   await seedProfile(root, profileId, deviceId, (d) => {
+    d.owner_id = "owner-1";
+    d.cloud_device_uid = "cdu";
+    d.cloud_issuer = "https://fake.test";
     d.souls["s1"] = makeSoul("s1");
     d.consents["cdu:s1"] = makeConsent("cdu", "s1");
   });
   writeFileSync(
     path.join(root, "accounts.json"),
-    `${JSON.stringify({ "owner-1": { profile_id: profileId, default_soul_uid: "s1", soul_sync_mode: "assets_only" } })}\n`,
+    `${JSON.stringify({ "owner-1": { profile_id: profileId, cloud_issuer: "https://fake.test", default_soul_uid: "s1", soul_sync_mode: "assets_only" } })}\n`,
     { mode: 0o600 },
   );
 
+  writeFileSync(path.join(root, "config.json"), JSON.stringify({ api_base_url: "https://fake.test", machine_id: "fake-machine", tokens: {}, active_profile_id: profileId }));
   const writer = await startWriter(root);
   const io = { stdout: () => {}, stderr: () => {} };
   const code = await runHookCommand({

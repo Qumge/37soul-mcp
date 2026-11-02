@@ -158,18 +158,46 @@ export async function installService(spec: ServiceSpec, run: RunCommand): Promis
 
   if (platform === "linux") {
     const file = systemdPath(spec.home);
+    let previous: string | undefined;
+    try { previous = await readFile(file, "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, renderSystemdUnit(spec), { mode: 0o644 });
-    commands.push(["systemctl", "--user", "daemon-reload"]);
-    commands.push(["systemctl", "--user", "enable", "--now", "37soul-agentd.service"]);
-    for (const command of commands) {
-      const result = await run(command);
-      if (result.code !== 0) {
-        await rm(file, { force: true });
-        throw new Error(`${command[0]} failed: ${result.stderr || result.stdout}`);
+    // The atomic staging helper works for a unit file as well as a plist.
+    await writePlist(file, renderSystemdUnit(spec));
+    let restartAttempted = false;
+    const systemctl = async (action: string, ...flags: string[]): Promise<void> => {
+      const command = ["systemctl", "--user", action, ...flags, ...(action === "daemon-reload" ? [] : ["37soul-agentd.service"])];
+      commands.push(command);
+      try {
+        const result = await run(command);
+        if (result.code !== 0) throw new Error(result.stderr || result.stdout || `exit ${result.code}`);
+      } catch (error) {
+        throw new Error(`systemctl ${action} failed: ${error instanceof Error ? error.message : String(error)}`);
       }
+    };
+    try {
+      await systemctl("daemon-reload");
+      await systemctl("enable");
+      // enable --now leaves an already-active process on its old ExecStart.
+      restartAttempted = true;
+      await systemctl("restart");
+      return { serviceFile: file, commands };
+    } catch (error) {
+      let recovery = "";
+      try {
+        if (previous === undefined) {
+          // Only our newly enabled unit: undo enable and any partial startup
+          // while its unit file still exists, then remove and reload.
+          if (restartAttempted) await systemctl("disable", "--now");
+          await rm(file, { force: true });
+        } else await writePlist(file, previous);
+        await systemctl("daemon-reload");
+        if (restartAttempted && previous !== undefined) await systemctl("restart");
+      } catch (restoreError) {
+        recovery = `; ${previous === undefined ? "new service cleanup" : "previous service restore"} failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`;
+      }
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${recovery}`);
     }
-    return { serviceFile: file, commands };
   }
 
   throw new Error(`unsupported platform for the background service: ${platform}`);

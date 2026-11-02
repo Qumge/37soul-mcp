@@ -147,241 +147,44 @@ function harness(overrides = {}) {
   };
 }
 
-test("daemon: flushes after 60s idle and advances the durable cursor only after enqueueing", async () => {
-  const h = harness();
-  writeSession(h.file, [userRecord("第一句", T0), userRecord("第二句", T0 + 1000)]);
-
-  await h.daemon.tick(); // 刚写完：不够空闲，也不满 100
-  assert.equal(h.fetch.calls.length, 0);
-
-  h.advance(61_000);
-  await h.daemon.tick();
-
-  assert.equal(h.fetch.calls.length, 1);
-  const body = h.fetch.calls[0].body;
-  assert.equal(body.seq_from, 1);
-  assert.equal(body.seq_to, 2);
-  assert.equal(body.events.length, 2);
-
-  const state = await loadState(h.root);
-  const stored = state.sessions["claude-code:" + h.file];
-  assert.ok(stored.cursor.offset > 0);
-  assert.equal(stored.last_uploaded_seq, 2);
-  h.cleanup();
-});
-
-test("daemon: 100 events flush without waiting for idle and never exceed the batch cap", async () => {
-  const h = harness({ config: { batchLimit: 100 } });
-  writeSession(
-    h.file,
-    Array.from({ length: 100 }, (_, i) => userRecord(`消息 ${i}`, T0 + i)),
-  );
-
-  await h.daemon.tick();
-
-  assert.equal(h.fetch.calls.length, 1);
-  assert.equal(h.fetch.calls[0].body.events.length, 100);
-  h.cleanup();
-});
-
-test("daemon: five minutes without writes sends one session_end marker; appends after it still flow", async () => {
-  const h = harness();
-  writeSession(h.file, [userRecord("收工前", T0)]);
-  await h.daemon.tick(); // 先让它读到（空闲窗口从读到时起算）
-  h.advance(61_000);
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 1); // 60s 空闲先正常发一批
-
-  h.advance(5 * 60_000);
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 2);
-  assert.deepEqual(h.fetch.calls[1].body.events.map((e) => e.event_type), ["session_end"]);
-
-  writeSession(h.file, [userRecord("又回来了", T0 + 1_000_000)], { append: true });
-  await h.daemon.tick(); // 先读到新增的那句
-  h.advance(61_000);
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 3);
-  assert.deepEqual(h.fetch.calls[2].body.events.map((e) => [e.seq, e.text]), [[3, "又回来了"]]);
-  h.cleanup();
-});
-
-test("daemon: watcher re-scans and polls never double-enqueue or double-upload", async () => {
-  const h = harness();
-  writeSession(h.file, [userRecord("一次", T0)]);
-  await h.daemon.tick(); // 先读到
-  h.advance(61_000);
-
-  await h.daemon.tick();
-  await h.daemon.scan(); // watcher 触发
-  await h.daemon.tick(); // 30s 轮询触发
-
-  assert.equal(h.fetch.calls.length, 1);
-  h.cleanup();
-});
-
-test("daemon: 413 splits the batch and every event lands exactly once", async () => {
-  const fetchImpl = fakeFetch((record) => (record.body.events.length > 2 ? { status: 413, body: { error: "too large" } } : { status: 202, body: {} }));
-  const h = harness({ fetch: fetchImpl, config: { batchLimit: 4 } });
-  writeSession(
-    h.file,
-    Array.from({ length: 4 }, (_, i) => userRecord(`事件 ${i}`, T0 + i)),
-  );
-
-  await h.daemon.tick(); // 满 4 条直接触发 -> 413 -> 拆成两半
-  await h.daemon.tick(); // 两半各自上传
-
-  assert.deepEqual(h.fetch.calls.map((call) => call.body.events.length), [4, 2, 2]);
-  const acceptedSeqs = h.fetch.calls.slice(1).flatMap((call) => call.body.events.map((e) => e.seq));
-  assert.deepEqual(acceptedSeqs.sort((a, b) => a - b), [1, 2, 3, 4]);
-  h.cleanup();
-});
-
-test("daemon: replays a session strictly by seq order even when the queue was written out of order", async () => {
-  const h = harness();
-  await h.queue.enqueue(queuedItem({ seqFrom: 3, seqTo: 4, createdAt: T0 + 1 }));
-  await h.queue.enqueue(queuedItem({ seqFrom: 1, seqTo: 2, createdAt: T0 }));
-
-  await h.daemon.processQueue();
-
-  assert.deepEqual(h.fetch.calls.map((call) => call.body.seq_from), [1, 3]);
-  h.cleanup();
-});
-
-test("daemon: 409 expected_seq pulls the earlier failed batch forward instead of wedging", async () => {
-  const h = harness();
-  await h.queue.enqueue(queuedItem({ seqFrom: 1, seqTo: 2, nextAttemptAt: T0 + 60_000 }));
-  await h.queue.enqueue(queuedItem({ seqFrom: 3, seqTo: 4 }));
-
-  let seen = 0;
-  h.fetch = fakeFetch((record) => {
-    seen += 1;
-    if (record.body.seq_from === 3 && seen === 1) return { status: 409, body: { error: "gap", expected_seq: 1 } };
-    return { status: 202, body: {} };
+// Old retry/status cases now assert a stronger contract: no raw HTTP at all,
+// no queue deletion, and no delayed brief refresh, whatever an old server would return.
+for (const status of [200, 202, 401, 409, 413, 422, 429, 500]) {
+  test(`daemon: retired queue remains unchanged instead of contacting HTTP ${status}`, async () => {
+    let refreshes = 0;
+    const h = harness({ fetch: fakeFetch(() => ({ status })), refreshBrief: async () => { refreshes++; return {text:'brief',fromCache:false}; } });
+    try {
+      await h.queue.enqueue(queuedItem());
+      const before = await h.queue.list();
+      writeSession(h.file, [userRecord('PRIVATE-RAW', T0)]);
+      await h.daemon.scan();
+      await h.daemon.processQueue();
+      await h.daemon.tick();
+      h.advance(10 * 60_000);
+      await h.daemon.tick();
+      assert.deepEqual(h.fetch.calls, []);
+      assert.deepEqual(await h.queue.list(), before);
+      assert.equal(refreshes, 0);
+      assert.deepEqual(h.daemon.blockedAgents(), []);
+      assert.ok(h.logs.every(line => !line.includes('SECRET-TOKEN') && !line.includes('PRIVATE-RAW')));
+    } finally { await h.daemon.stop(); h.cleanup(); }
   });
-  const daemon = createDaemon(
-    { root: h.root, apiBaseUrl: "https://api.test", machineId: "machine-1", tokens: { "claude-code": "t" }, home: h.home },
-    {
-      now: () => T0,
-      fetch: h.fetch,
-      log: { info: () => {}, error: () => {} },
-      discover: async () => [],
-      getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
-      queue: h.queue,
-      acquireLock: async () => async () => {},
-    },
-  );
+}
 
-  await daemon.processQueue();
-
-  assert.deepEqual(h.fetch.calls.map((call) => [call.body.seq_from, call.body.seq_to]), [
-    [3, 4],
-    [1, 2],
-    [3, 4],
-  ]);
-  h.cleanup();
-});
-
-test("daemon: network failures back off, then the same batch uploads exactly once", async () => {
-  let fail = true;
-  const fetchImpl = fakeFetch(() => {
-    if (fail) throw new Error("ECONNRESET");
-    return { status: 202, body: {} };
-  });
-  const h = harness({ fetch: fetchImpl });
-  writeSession(h.file, [userRecord("网络断了", T0)]);
-  await h.daemon.tick(); // 先读到
-  h.advance(61_000);
-
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 1);
-
-  await h.daemon.tick(); // 退避窗口里，不该重试
-  assert.equal(h.fetch.calls.length, 1);
-
-  fail = false;
-  h.advance(120_000);
-  await h.daemon.tick();
-
-  assert.equal(h.fetch.calls.length, 2);
-  assert.deepEqual(h.fetch.calls.at(-1).body.events.map((e) => e.seq), [1]);
-  h.cleanup();
-});
-
-test("daemon: a rejected token stops that agent instead of hammering the API", async () => {
-  const fetchImpl = fakeFetch(() => ({ status: 401, body: { error: "unauthorized" } }));
-  const h = harness({ fetch: fetchImpl });
-  await h.queue.enqueue(queuedItem({ seqFrom: 1, seqTo: 1 }));
-  await h.queue.enqueue(queuedItem({ seqFrom: 2, seqTo: 2 }));
-
-  await h.daemon.processQueue();
-  await h.daemon.processQueue();
-
-  assert.equal(fetchImpl.calls.length, 1);
-  assert.deepEqual(h.daemon.blockedAgents(), ["claude-code"]);
-  h.cleanup();
-});
-
-test("daemon: pause stops capture globally and per repo, resume continues without losing events", async () => {
+test('daemon: pause and resume preserve durable preferences and raw queue', async () => {
   const h = harness();
-  writeSession(h.file, [userRecord("暂停前", T0)]);
-  await h.daemon.tick(); // 先读到（还没到空闲阈值）
-  h.advance(61_000);
-
-  await h.daemon.pauseAll(true);
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 0);
-  assert.equal((await h.queue.list()).length, 0);
-
-  await h.daemon.pauseAll(false);
-  await h.daemon.pauseRepo("github.com/owner/nimbus", true);
-  await h.daemon.tick();
-  assert.equal((await h.queue.list()).length, 0, "暂停的 repo 不该进队列");
-  assert.equal(h.fetch.calls.length, 0);
-
-  await h.daemon.pauseRepo("github.com/owner/nimbus", false);
-  await h.daemon.tick();
-  assert.equal(h.fetch.calls.length, 1);
-  h.cleanup();
-});
-
-test("daemon: refresh happens three minutes after a successful upload, per repo+branch", async () => {
-  const refreshed = [];
-  const h = harness({
-    refreshBrief: async (target) => {
-      refreshed.push(target);
-      return { text: "b", fromCache: false };
-    },
-  });
-  writeSession(h.file, [userRecord("上传", T0)]);
-  await h.daemon.tick(); // 先读到
-  h.advance(61_000);
-  await h.daemon.tick();
-  assert.equal(refreshed.length, 0, "刚上传还不刷新");
-
-  h.advance(2 * 60_000);
-  await h.daemon.tick();
-  assert.equal(refreshed.length, 0, "3 分钟不到");
-
-  h.advance(61_000);
-  await h.daemon.tick();
-  assert.equal(refreshed.length, 1);
-  assert.equal(refreshed[0].repoKey, "github.com/owner/nimbus");
-  assert.equal(refreshed[0].branch, "feature/x");
-  h.cleanup();
-});
-
-test("daemon: bearer tokens never reach the log", async () => {
-  const h = harness();
-  writeSession(h.file, [userRecord("秘密", T0)]);
-  await h.daemon.tick(); // 先读到
-  h.advance(61_000);
-
-  await h.daemon.tick();
-
-  assert.ok(h.logs.length > 0);
-  assert.ok(h.logs.every((line) => !line.includes("SECRET-TOKEN")));
-  h.cleanup();
+  try {
+    await h.queue.enqueue(queuedItem()); const before = await h.queue.list();
+    await h.daemon.pauseAll(true); await h.daemon.pauseRepo('repo-key', true);
+    await h.daemon.tick();
+    assert.equal(h.daemon.state().paused, true);
+    assert.deepEqual(h.daemon.state().paused_repos, ['repo-key']);
+    await h.daemon.resumeAll(); await h.daemon.tick();
+    assert.equal(h.daemon.state().paused, false);
+    assert.deepEqual(h.daemon.state().paused_repos, []);
+    assert.deepEqual(await h.queue.list(), before);
+    assert.deepEqual(h.fetch.calls, []);
+  } finally { await h.daemon.stop(); h.cleanup(); }
 });
 
 test("state: load/save round-trips atomically and a corrupt file falls back to empty", async () => {
@@ -450,82 +253,18 @@ test("discovery: finds Claude sessions and Codex rollouts, skips everything else
   rmSync(home, { recursive: true, force: true });
 });
 
-test("daemon: hook spool is the primary source, assigns seq, and session_end flushes + refreshes the brief immediately", async () => {
-  const root = tempDir();
-  const home = tempDir();
-  const fetchImpl = fakeFetch(() => ({ status: 202, body: {} }));
-  let clock = T0 + 1000;
-  const refreshed = [];
-
-  await appendSpoolRecord(root, "claude-code", "s1", {
-    at: new Date(T0).toISOString(), kind: "message", role: "user", text: "hi", cwd: "/tmp/nimbus",
-  });
-  await appendSpoolRecord(root, "claude-code", "s1", { at: new Date(T0 + 1000).toISOString(), kind: "session_end" });
-
-  const daemon = createDaemon(
-    { root, apiBaseUrl: "https://api.test", machineId: "machine-1", tokens: { "claude-code": "t" }, home },
-    {
-      now: () => clock,
-      fetch: fetchImpl,
-      log: { info: () => {}, error: () => {} },
-      getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
-      acquireLock: async () => async () => {},
-      refreshBrief: async (target) => {
-        refreshed.push(target);
-        return { text: "brief", fromCache: false };
-      },
-    },
-  );
-
-  await daemon.tick();
-
-  const uploads = fetchImpl.calls.filter((call) => call.url.includes("/api/v1/me/transcripts"));
-  assert.equal(uploads.length, 1, "session_end must flush without waiting for idle");
-  const body = uploads[0].body;
-  assert.deepEqual(body.events.map((e) => [e.seq, e.kind]), [[1, "message"], [2, "session_end"]]);
-  assert.equal(body.events[0].text, "hi");
-
-  // 审查修复 3：session_end 上传成功后立刻刷一次 brief.md —— 这就是「退出 Claude
-  // Code 立刻打开 Codex 说继续」能读到新简报的原因。
-  assert.equal(refreshed.length, 1, "immediate refresh after a marker upload");
-  assert.equal(refreshed[0].repoKey, "path:machine-1:/tmp/nimbus");
-
-  // 总结防抖 + 模型跑完之后（这里按 150 秒近似）再刷一次，把整理好的交接单落盘。
-  clock += 151_000;
-  await daemon.tick();
-  assert.equal(refreshed.length, 2, "post-summary refresh");
-
-  rmSync(root, { recursive: true, force: true });
-  rmSync(home, { recursive: true, force: true });
-});
-
-test("daemon: transcript fallback stays off unless the agent is listed", async () => {
-  const home = tempDir();
-  const file = path.join(home, ".claude", "projects", "-tmp-nimbus", "fallback.jsonl");
-  writeSession(file, [userRecord("兜底才看得到", T0)]);
-
-  const offRoot = tempDir();
-  const offFetch = fakeFetch(() => ({ status: 202, body: {} }));
-  const off = createDaemon(
-    { root: offRoot, apiBaseUrl: "https://api.test", machineId: "m1", tokens: { "claude-code": "t" }, home, transcriptFallback: [], batchLimit: 1 },
-    { now: () => T0, fetch: offFetch, log: { info: () => {}, error: () => {} }, getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }), acquireLock: async () => async () => {} },
-  );
-  await off.tick();
-  assert.equal(offFetch.calls.length, 0, "fallback off by default");
-
-  const onRoot = tempDir();
-  const onFetch = fakeFetch(() => ({ status: 202, body: {} }));
-  const on = createDaemon(
-    { root: onRoot, apiBaseUrl: "https://api.test", machineId: "m1", tokens: { "claude-code": "t" }, home, transcriptFallback: ["claude-code"], batchLimit: 1 },
-    { now: () => T0, fetch: onFetch, log: { info: () => {}, error: () => {} }, getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }), acquireLock: async () => async () => {} },
-  );
-  await on.tick();
-  assert.equal(onFetch.calls.length, 1);
-  assert.equal(onFetch.calls[0].body.events[0].via, "transcript");
-
-  rmSync(home, { recursive: true, force: true });
-  rmSync(offRoot, { recursive: true, force: true });
-  rmSync(onRoot, { recursive: true, force: true });
+test('daemon: raw spool and transcript fallback are never discovered, mutated or trimmed', async () => {
+  const h = harness({config:{transcriptFallback:['claude-code'],batchLimit:1}});
+  try {
+    const file = await appendSpoolRecord(h.root, 'claude-code', 's1', {at:new Date(T0).toISOString(),kind:'message',role:'user',text:'PRIVATE-RAW'});
+    const spoolPath = path.join(h.root,'spool','claude-code','s1.jsonl');
+    const before = readFileSync(spoolPath, 'utf8');
+    writeSession(h.file, [userRecord('PRIVATE-RAW', T0)]);
+    await h.daemon.tick(); h.advance(600_000); await h.daemon.tick();
+    assert.equal(readFileSync(spoolPath,'utf8'),before);
+    assert.deepEqual(h.fetch.calls, []);
+    assert.deepEqual(await h.queue.list(), []);
+  } finally { await h.daemon.stop(); h.cleanup(); }
 });
 
 // ---------------------------------------------------------------------------

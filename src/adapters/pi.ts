@@ -17,9 +17,8 @@
  *     "installed" state. It is a write WE performed, so it never makes any doctor
  *     state green. `inspectPiExtension` reports Pi's own load state only from
  *     markers Pi itself writes; our own file never turns it green.
- *   - `extract()` is unsupported here: no verified native invocation exists yet, and
- *     this adapter must not invent one. It returns an explicit unsupported error that
- *     the scheduler treats as a normal, non-retryable failure.
+ *   - Extraction targets the Pi 1.4.0 native CLI with tools, extensions, session
+ *     persistence and context discovery disabled. Live delivery remains unverified.
  *
  * Session identity: a native session id always arrives via the request/event key
  * (from the bridged session_start), never from the process cwd.
@@ -27,6 +26,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { buildExtractionInvocation, parseExtractionOutput } from "./claude-code.js";
+import { serializeSourceTurn, type TurnMessage } from "./source-turn.js";
 import type { ContextBundle } from "../assets/protocol.js";
 import { PI_EXTENSION_FILENAME, PI_EXTENSION_GENERATION, PI_EXTENSION_SOURCE } from "./plugins/pi.js";
 export { PI_EXTENSION_FILENAME, PI_EXTENSION_GENERATION, PI_EXTENSION_SOURCE };
@@ -226,21 +227,89 @@ export function createPiAdapter(deps: AdapterDeps): RuntimeAdapter {
     },
 
     async extract(request: ExtractionRequest): Promise<ExtractionResult> {
-      // Same short-circuit as every other adapter: resolve the bounded source first
-      // and never fabricate it. An empty resolution is a normal, retryable
-      // source_unavailable — not an attempt to run a model.
-      const source = await deps.readSource(request.source_event_refs ?? [], request.source_turn_refs);
-      if (!source.trim()) {
+      const source = await deps.readSource(request.source_event_refs, request.source_turn_refs);
+      const refs = latestPiCompletedTurnRefs(source);
+      if (refs.length === 0 || (request.source_turn_refs !== undefined &&
+          (request.source_turn_refs.length !== refs.length || refs.some((ref, i) => ref !== request.source_turn_refs![i])))) {
         return { error: { code: "source_unavailable", retryable: true } };
       }
-      // Source exists but Pi has no verified native invocation yet: refuse
-      // explicitly rather than inventing a command line. Non-retryable on purpose —
-      // retrying the same unverifiable shape would only burn quota.
-      return { error: { code: "unsupported", retryable: false } };
+      const turn = renderPiTurn(source, refs);
+      if (!turn.trim()) return { error: { code: "source_unavailable", retryable: true } };
+      const { input } = buildExtractionInvocation(request, turn);
+      try {
+        const result = await deps.invoke("pi", [
+          "--print", "--mode", "text", "--no-session", "--no-tools",
+          "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files",
+        ], input, request.job_uid);
+        if (result.code !== 0) return { error: { code: "model_error", retryable: true } };
+        return parseExtractionOutput(result.stdout, request, refs);
+      } catch {
+        return { error: { code: "model_error", retryable: true } };
+      }
     },
 
     async inject(_bundle: ContextBundle): Promise<InjectionResult> {
       return { delivered: false, rendered_sha256: "", error: "pi_injection_unverified" };
     },
   };
+}
+
+
+/** Pi 1.4.0 session v3 entries. Never convert custom messages or thinking to user evidence. */
+function piEntries(jsonl: string): Array<Record<string, any>> {
+  const entries: Array<Record<string, any>> = [];
+  for (const line of jsonl.split("\n")) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry && typeof entry === "object" && !Array.isArray(entry) &&
+          entry.type !== "session" && typeof entry.id === "string" && entry.id) entries.push(entry);
+    } catch { /* torn boundary lines are not evidence */ }
+  }
+  return entries;
+}
+
+/** Follow the persisted active leaf's parent chain, not chronological sibling messages. */
+export function latestPiCompletedTurnRefs(jsonl: string): string[] {
+  const entries = piEntries(jsonl);
+  const byId = new Map(entries.map(entry => [entry.id, entry]));
+  const branch: Array<Record<string, any>> = [];
+  const seen = new Set<string>();
+  let entry = entries[entries.length - 1];
+  while (entry) {
+    if (seen.has(entry.id)) return [];
+    seen.add(entry.id);
+    branch.unshift(entry);
+    if (entry.type === "message" && entry.message?.role === "user") break;
+    if (typeof entry.parentId !== "string") return [];
+    entry = byId.get(entry.parentId)!;
+    if (!entry) return []; // bounded window omitted an ancestor of this turn
+  }
+  if (branch[0]?.message?.role !== "user") return [];
+  const messages = branch.filter(entry => entry.type === "message" &&
+    ["user", "assistant", "toolResult"].includes(entry.message?.role));
+  const last = messages[messages.length - 1];
+  if (last?.message?.role !== "assistant" || last.message.stopReason !== "stop") return [];
+  return messages.map(entry => entry.id);
+}
+
+export function renderPiTurn(jsonl: string, refs: readonly string[]): string {
+  const byId = new Map(piEntries(jsonl).map(entry => [entry.id, entry]));
+  const messages: TurnMessage[] = [];
+  for (const ref of refs) {
+    const entry = byId.get(ref);
+    if (!entry || entry.type !== "message") return "";
+    const message = entry.message;
+    const source = message?.role === "user" ? "user" : message?.role === "assistant" ? "assistant" : "tool";
+    const content = typeof message?.content === "string" ? [{type: "text", text: message.content}] : message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+        messages.push({ source, kind: source === "tool" ? "tool_result" : "text", text: part.text });
+      } else if (source === "assistant" && part?.type === "toolCall") {
+        messages.push({source: "tool", kind: "tool_call", name: String(part.name ?? "tool"),
+          text: JSON.stringify(part.arguments ?? {}).slice(0, 1024)});
+      }
+    }
+  }
+  return serializeSourceTurn(messages);
 }

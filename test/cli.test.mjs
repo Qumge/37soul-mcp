@@ -353,7 +353,7 @@ test("profile: avatar upload sends bytes only after login and keeps a retryable 
   });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
   const previousHome = process.env.SOUL37_HOME;
   const previousFetch = globalThis.fetch;
@@ -417,7 +417,7 @@ test("profile: create --avatar uploads after explicit registration on the sync p
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
   const previousHome = process.env.SOUL37_HOME;
   const previousFetch = globalThis.fetch;
@@ -484,7 +484,7 @@ test("profile: a slow manual avatar ACK cannot overwrite a concurrent CLI create
   });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
   const previousHome = process.env.SOUL37_HOME;
   const previousFetch = globalThis.fetch;
@@ -652,7 +652,7 @@ test("P2: real CLI refuses an unconfirmed same-session switch, then syncs B from
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
 
   const previousHome = process.env.SOUL37_HOME;
@@ -773,7 +773,7 @@ test("F1: real CLI create/bind keeps an unauthorized Soul local and syncs the au
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
 
   const previousHome = process.env.SOUL37_HOME;
@@ -850,7 +850,7 @@ test("P2-1: A(base0)+B(base1) parked in the same session stays unusable until a 
   })}\n`, { mode: 0o600 });
   writeFileSync(path.join(root, "config.json"), `${JSON.stringify({
     api_base_url: "https://fake.test", machine_id: "m1", tokens: {},
-    credentials: [{ token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
+    credentials: [{ issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1", runtime_kind: "hermes", profile_id: "p1", obtained_at: "x" }],
   })}\n`, { mode: 0o600 });
 
   const previousHome = process.env.SOUL37_HOME;

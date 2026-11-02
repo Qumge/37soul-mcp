@@ -35,6 +35,7 @@ const BUNDLE_CLI = path.join(REPO, "dist", "bundle", "cli.js");
 const PACKAGE_VERSION = JSON.parse(readFileSync(path.join(REPO, "package.json"), "utf8")).version;
 
 const NODE18_CANDIDATES = [
+  process.versions.node.split(".")[0] === "18" ? process.execPath : undefined,
   process.env.SOUL37_NODE18,
   "/tmp/37soul-node18/node-v18.20.4-darwin-arm64/bin/node",
   "/tmp/37soul-node18/node-v18.20.4-linux-x64/bin/node",
@@ -127,6 +128,7 @@ test("release: packed artifacts match the manifest, digest, VERSION and tarball 
   const tgz = path.join(REPO, "release", "37soul-runtime.tgz");
   const manifestPath = path.join(REPO, "release", "release-manifest.json");
   if (!existsSync(tgz) || !existsSync(manifestPath)) {
+    assert.notEqual(process.env.SOUL37_REQUIRE_PACKED_RELEASE, "1", "release verification requires packed artifacts; run pack-runtime.sh first");
     t.skip("no packed release/ tree in this checkout — run ./scripts/pack-runtime.sh first");
     return;
   }

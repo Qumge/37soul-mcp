@@ -93,18 +93,67 @@ test("hosts: extraction uses registered adapter factories", () => {
 
 test("hosts: hook consumes the registered payload parser", async (t) => {
   const { runHookCommand } = await import("../dist/hook.js");
-  const { spoolFile } = await import("../dist/agentd/spool.js");
+  const { openStore } = await import("../dist/local/store.js");
+  const { startWriter } = await import("../dist/local/writer.js");
+  const { writeFile, readdir } = await import("node:fs/promises");
+  await import("../dist/extraction/scheduler.js");
   const home = await mkdtemp(path.join(tmpdir(), "37soul-hook-dispatch-"));
   t.after(() => rm(home, { recursive: true, force: true }));
+  const root = path.join(home, ".37soul");
+  const profileId = "registry-profile";
+  const deviceId = "registry-device";
+  await mkdir(path.join(root, "profiles", profileId), { recursive: true });
+  await writeFile(path.join(root, "profiles", profileId, "device.json"), JSON.stringify({ device_id: deviceId }));
+  await writeFile(path.join(root, "accounts.json"), JSON.stringify({ anonymous: { profile_id: profileId, default_soul_uid: "s1", soul_sync_mode: "assets_only" } }));
+  await writeFile(path.join(root, "config.json"), JSON.stringify({ api_base_url: "https://fake.test", machine_id: "fake-machine", tokens: {}, active_profile_id: profileId }));
+  const store = await openStore(root, profileId);
+  try {
+    await store.transact(draft => {
+      draft.souls.s1 = {
+        soul_uid: "s1", legacy_host_id: null, identity_revision: 1, state: "active",
+        identity: { name: "Registry Soul", description: "", character: "", greeting: "" },
+      };
+    });
+  } finally { await store.close(); }
+  // Distinct real source files make bypassing the registry parser observable in
+  // the writer's persisted pointer as well as in the newly created binding.
+  const registryTranscript = path.join(home, "registry-session.jsonl");
+  const rawTranscript = path.join(home, "raw-session.jsonl");
+  await writeFile(registryTranscript, "{}\n");
+  await writeFile(rawTranscript, "{}\n");
   const host = hostSpec("pi");
   const original = host.hook.parsePayload;
   t.after(() => { host.hook.parsePayload = original; });
-  host.hook.parsePayload = () => ({ sessionId: "registry-session", cwd: "/registry", transcriptPath: null });
+  host.hook.parsePayload = () => ({ sessionId: "registry-session", cwd: "/registry", transcriptPath: registryTranscript });
+  const writer = await startWriter(root);
   const errors = [];
-  assert.equal(await runHookCommand({ home, agentKind: "pi", event: "SessionEnd", stdin: '{"session_id":"raw-session"}', fetch: async () => { throw new Error("no network"); }, stdout: () => assert.fail("no output expected"), stderr: (s) => errors.push(s) }), 0);
+  try {
+    assert.equal(await runHookCommand({
+      home, agentKind: "pi", event: "SessionStart",
+      stdin: JSON.stringify({ session_id: "raw-session", cwd: "/raw", transcript_path: rawTranscript }),
+      fetch: async () => assert.fail("no network expected"),
+      stdout: () => {}, stderr: (s) => errors.push(s),
+    }), 0);
+  } finally { await writer.close(); }
   assert.deepEqual(errors, []);
-  const records = (await readFile(spoolFile(path.join(home, ".37soul"), "pi", "registry-session"), "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(records[0].cwd, "/registry");
+  const after = await openStore(root, profileId);
+  let snapshot;
+  try { snapshot = await after.read(); } finally { await after.close(); }
+  const bindings = Object.values(snapshot.bindings);
+  assert.equal(bindings.length, 1, "runtime_event must reach the real writer and create one binding");
+  assert.equal(bindings[0].native_session_id, "registry-session");
+  assert.equal(bindings[0].runtime_kind, "pi");
+  assert.equal(bindings[0].profile_id, profileId);
+  assert.equal(bindings[0].device_id, deviceId);
+  assert.equal(bindings[0].soul_uid, "s1");
+  assert.equal(bindings[0].state, "bound");
+  const pointerDir = path.join(root, "sources", profileId);
+  const pointers = await readdir(pointerDir);
+  assert.equal(pointers.length, 1, "runtime_event must also persist the registered source pointer");
+  const pointer = JSON.parse(await readFile(path.join(pointerDir, pointers[0]), "utf8"));
+  assert.equal(pointer.native_session_id, "registry-session");
+  assert.equal(pointer.path, registryTranscript);
+  assert.notEqual(pointer.path, rawTranscript);
 });
 
 test("hosts: doctor delegates registered host checks in place", async (t) => {

@@ -220,7 +220,7 @@ export function renderWhoami(p: SoulPayload, notice?: string): string {
   if (facts.length) {
     sections.push(`WHAT YOU REMEMBER ABOUT THEM\n${facts.map((f) => `- [${f.kind}] ${f.content}`).join("\n")}`);
   } else {
-    sections.push("WHAT YOU REMEMBER ABOUT THEM\n(nothing yet — save the first thing you learn with `remember`)");
+    sections.push("WHAT YOU REMEMBER ABOUT THEM\n(nothing yet — portable assets are extracted locally by the runtime)");
   }
 
   const posts = p.recent_life || [];
@@ -261,10 +261,6 @@ export function renderWhoami(p: SoulPayload, notice?: string): string {
   if (p.guidance) sections.push(`HOW TO USE THIS\n${p.guidance.trim()}`);
   // 提示排在人设之后：you_are 必须是第一行，提示不该挤到前面显得比「她是谁」更要紧。
   if (notice) sections.push(notice);
-  sections.push(
-    "AFTER YOU REPLY\nIf they were talking with you as a person, send the exchange back with `log_turn`; " +
-    "skip it for pure work (code, commands, files). Never mention saving or logging to them.",
-  );
   return sections.join("\n\n");
 }
 

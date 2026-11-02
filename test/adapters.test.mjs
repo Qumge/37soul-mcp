@@ -1337,7 +1337,7 @@ test("pi: the bridge spawns only the local hook command, makes no network call, 
   assert.ok(source.includes('api_generation = "pi-extension-v1"'), "generation is declared literally");
 });
 
-test("pi: probe reports unverified honestly and extract refuses instead of guessing", async () => {
+test("pi: probe remains unverified and malformed source fails closed", async () => {
   const root = tempDir("pi-probe-");
   const adapter = createPiAdapter({ home: root, invoke: async () => ({ code: 1, stdout: "", stderr: "" }), readSource: async () => "", emit: async () => {} });
 
@@ -1351,7 +1351,7 @@ test("pi: probe reports unverified honestly and extract refuses instead of guess
   const empty = await adapter.extract({ runtime_kind: "pi", source_event_refs: ["ref-1"] });
   assert.deepEqual(empty, { error: { code: "source_unavailable", retryable: true } });
 
-  // Source present but no verified native invocation: explicit refusal, no guessing.
+  // Arbitrary text is not a Pi completed turn: no model invocation.
   const withSource = createPiAdapter({
     home: root,
     invoke: async () => ({ code: 0, stdout: "{}", stderr: "" }),
@@ -1359,7 +1359,7 @@ test("pi: probe reports unverified honestly and extract refuses instead of guess
     emit: async () => {},
   });
   const refused = await withSource.extract({ runtime_kind: "pi", source_event_refs: ["ref-1"] });
-  assert.deepEqual(refused, { error: { code: "unsupported", retryable: false } });
+  assert.deepEqual(refused, { error: { code: "source_unavailable", retryable: true } });
 
   rmSync(root, { recursive: true, force: true });
 });

@@ -1,18 +1,16 @@
 /**
- * `37soul doctor`：逐个 Agent 检查配置在不在、token 还能不能用、会话目录能不能读、
- * 最近一次上传是什么时候。输出是给人看的；返回 ok=false 时 CLI 以非零退出。
+ * `37soul doctor`：本地检查运行时、宿主配置和 issuer/profile/owner/device 凭证范围。
+ * 不发 HTTP、不验证服务端 token，不把历史 transcript 上传当作当前交付成功。
  */
 
 import { readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { loadConfig, loadState } from "./agentd/state.js";
+import { loadConfig } from "./agentd/state.js";
 import { dataRoot, installManifestPath } from "./install.js";
 import { hostSpec } from "./hosts/registry.js";
-import { spoolStats } from "./agentd/spool.js";
 import { plistPath, systemdPath } from "./service.js";
 import { readAccountsIndex } from "./local/profiles.js";
-import { readCredentials } from "./agentd/credentials.js";
-import { isAssetsModeSync } from "./sync/client.js";
+import { readCredentials, selectCredentials } from "./agentd/credentials.js";
 import { detectLang, messages, type Lang } from "./i18n.js";
 import { openStore } from "./local/store.js";
 import { inspectRuntime, type RuntimeHealth } from "./runtime-health.js";
@@ -57,94 +55,73 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   }
   checks.push({ name: "installation", ok: true, detail: `machine ${config.machine_id}` });
 
-  // Soul sync (assets-only mode) status: pending / conflict counts per local profile.
-  // Read-only and non-fatal — the legacy capture path still runs alongside it.
-  const assetsMode = isAssetsModeSync(root);
-
-  // 匿名安装（assets-only 且还没有 scoped credential）在 doctor 末尾给一句轻提示：
-  // 绑定到 37soul.com 才能跨设备。已登录的人不再被念。
-  const credentials = readCredentials(config);
-  if (assetsMode && credentials.length === 0) {
-    notes.push(messages(deps.lang ?? detectLang()).bindingHint);
-  }
-
-  if (assetsMode) {
+  // soul-assets/v1 is the only protocol. Missing/corrupt metadata must never
+  // revive legacy network probes or authorize a token from config.tokens.
+  const assetsMode = true;
+  const credentials: ReturnType<typeof readCredentials> = [];
+  let pending = 0;
+  let conflicts = 0;
+  let unavailableProfiles = 0;
+  const index = await readAccountsIndex(root);
+  for (const [ownerId, entry] of Object.entries(index)) {
+    if (entry.soul_sync_mode !== "assets_only") {
+      unavailableProfiles += 1;
+      continue;
+    }
     try {
-      const index = await readAccountsIndex(root);
-      let pending = 0;
-      let conflicts = 0;
-      for (const entry of Object.values(index)) {
-        const store = await openStore(root, entry.profile_id);
-        try {
-          const snap = await store.read();
-          pending += Object.keys(snap.outbox).length;
-          conflicts += Object.keys(snap.quarantine).length;
-        } finally {
-          await store.close();
-        }
+      const store = await openStore(root, entry.profile_id);
+      try {
+        const snap = await store.read();
+        pending += Object.keys(snap.outbox).length;
+        conflicts += Object.keys(snap.quarantine).length;
+        const scoped = snap.owner_id === ownerId
+          ? selectCredentials(config, entry.profile_id, ownerId, snap.cloud_device_uid, config.api_base_url)
+          : [];
+        credentials.push(...scoped);
+        if (scoped.length === 0) unavailableProfiles += 1;
+      } finally {
+        await store.close();
       }
-      checks.push({
-        name: "soul sync",
-        ok: true,
-        detail: credentials.length === 0
-          ? "assets_only mode — login required; local assets stay local"
-          : `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined`,
-      });    } catch {
-      checks.push({ name: "soul sync", ok: true, detail: "assets_only mode" });
+    } catch {
+      unavailableProfiles += 1;
     }
   }
+  if (credentials.length === 0 || unavailableProfiles > 0) {
+    notes.push(messages(deps.lang ?? detectLang()).bindingHint);
+  }
+  checks.push({
+    name: "soul sync",
+    ok: true,
+    detail: credentials.length === 0
+      ? "assets_only mode — login required; local assets stay local"
+      : `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined; ${credentials.length} locally scoped credential(s) (not server-validated)${unavailableProfiles > 0 ? `; login required for ${unavailableProfiles} profile(s)` : ""}`,
+  });
 
   // Iterate over every *installed* agent (from the manifest), not over tokens:
   // anonymous-first install has no tokens, but the hook/plugin state must still be
-  // reported honestly. The token check only runs when that agent has a token.
+  // reported honestly. Legacy token keys identify diagnostics only, never auth.
   const manifest = await readManifest(deps.home);
   const manifestAgents = new Set<string>();
   for (const entry of manifest.entries) {
     if (typeof entry.agent === "string" && entry.agent !== "") manifestAgents.add(entry.agent);
   }
-  const agents = [...new Set([...Object.keys(config.tokens), ...manifestAgents])];
+  const agents = [...new Set([...Object.keys(config.tokens), ...manifestAgents, ...readCredentials(config).map(credential => credential.runtime_kind)])];
 
   for (const agentKind of agents) {
-    const token = config.tokens[agentKind];
-    if (assetsMode && (token || manifestAgents.has(agentKind))) {
-      // Assets mode never calls the legacy /brief writeback. The useful state is
-      // whether this runtime has a scoped credential for this profile/device.
-      const scoped = readCredentials(config).some((credential) => credential.runtime_kind === agentKind);
-      checks.push({
-        name: `${agentKind}: sync credential`,
-        ok: scoped,
-        detail: scoped ? "scoped to this profile, owner, device and runtime" : "not available — run `37soul login`",
-      });
-    }
-    if (token && !assetsMode) {
-      // Legacy transcript mode only: token 还能用（会顺手把 PAT 的 agent_kind 补上；这是免费读）
-      const response = await deps.fetch(`${config.api_base_url}/api/v1/me/brief?agent_kind=${encodeURIComponent(agentKind)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => null);
-      const tokenOk = response?.status === 200;
-      checks.push({
-        name: `${agentKind}: token`,
-        ok: tokenOk,
-        detail: tokenOk ? "accepted" : response ? `HTTP ${response.status}` : "no answer",
-        fatal: !tokenOk,
-      });
-    }
+    const scoped = credentials.some(credential => credential.runtime_kind === agentKind);
+    checks.push({
+      name: `${agentKind}: sync credential`,
+      ok: scoped,
+      detail: scoped
+        ? "locally scoped to this server, profile, owner, device and runtime (not server-validated)"
+        : "not available — run `37soul login`",
+    });
 
     // Host-specific checks stay in this exact place in the per-agent report.
     const host = hostSpec(agentKind);
     if (host) checks.push(...await host.doctor({ ...deps, config, assetsMode }));
 
-    const state = await loadState(root);
-    const lastUpload = Object.entries(state.sessions)
-      .filter(([key]) => key.startsWith(`${agentKind}:`))
-      .map(([, value]) => value.last_upload_at)
-      .filter(Boolean)
-      .sort()
-      .at(-1);
-    if (!assetsMode) {
-      checks.push({ name: `${agentKind}: last upload`, ok: Boolean(lastUpload), detail: lastUpload ?? "never (nothing captured yet)" });
-    }
+
   }
 
   // 审查修复 1：hook 和后台服务都指向固定 runtime 的启动器 —— 这两条路径必须还在。
@@ -213,30 +190,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       detail: matches ? `running ${path.basename(actual)} (pid ${health.pid})` : `running ${actual}; expected ${expected} — rerun \`37soul install\` to restart the service`, fatal: !matches });
   }
 
-  // v2 §6.2/§6.1：hook 最近一次触发（spool 写入时间）、spool 积压量，以及
-  // 「hook 长时间没动静」时的兜底提示。
-  const spool = await spoolStats(root);
-  checks.push({ name: "spool backlog", ok: true, detail: `${(spool.bytes / 1024).toFixed(1)} KB` });
-  for (const agentKind of Object.keys(config.tokens)) {
-    const stats = spool.agents[agentKind];
-    const recent = Boolean(stats?.lastModifiedMs) && Date.now() - stats.lastModifiedMs < 24 * 3600 * 1000;
-    checks.push({
-      name: `${agentKind}: hook activity`,
-      // 还没用过不是失败：标成等待态，等这个 Agent 真的被用起来才会变绿。
-      ok: recent,
-      waiting: !recent,
-      detail: stats?.lastModifiedMs
-        ? `last event ${new Date(stats.lastModifiedMs).toISOString()}`
-        : "no events yet — normal until you use this agent",
-    });
-    if (!assetsMode && !recent && !(config.transcript_fallback ?? []).includes(agentKind)) {
-      checks.push({
-        name: `${agentKind}: transcript fallback`,
-        ok: true,
-        detail: `hooks have not fired recently — enable with \`37soul install --agents ${agentKind} --fallback ${agentKind}\``,
-      });
-    }
-  }
+  // Raw spool is a historical archive, never current host delivery evidence.
 
   const ok = checks.filter((check) => check.fatal).every((check) => check.ok);
   return { checks, ok, notes };

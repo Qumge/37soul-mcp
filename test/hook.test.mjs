@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * SessionStart hook：注入格式、超时预算、缓存兜底、stderr 隔离、绝不出凭据。
+ * Assets-only hooks: native context, source boundaries, stderr isolation and no raw spool.
  * 另外覆盖 B 档的 repo 简报写盘与 git exclude 维护。
  */
 import test from "node:test";
@@ -48,65 +48,6 @@ function payload(cwd = "/tmp/nimbus") {
   return JSON.stringify({ session_id: "s1", cwd, hook_event_name: "SessionStart", source: "startup" });
 }
 
-test("hook: prints exactly the observed SessionStart wrapper with the API brief", async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-  const fetchImpl = async () =>
-    ({ ok: true, status: 200, async json() { return { text: "=== 37Soul brief ===\nGoal: ship pagination\n=== end ===" }; } });
-
-  const code = await runHook({
-    home,
-    agentKind: "claude-code",
-    fetch: fetchImpl,
-    stdin: payload(),
-    stdout: io.stdout,
-    stderr: io.stderr,
-    getGitState: async () => ({ repo: { remote: "git@github.com:owner/nimbus.git", branch: "feature/x" }, git_state: null }),
-  });
-
-  assert.equal(code, 0);
-  assert.equal(io.out.length, 1);
-  const parsed = JSON.parse(io.out[0]);
-  assert.equal(parsed.hookSpecificOutput.hookEventName, "SessionStart");
-  assert.match(parsed.hookSpecificOutput.additionalContext, /Goal: ship pagination/);
-  assert.equal(io.err.length, 0);
-  assert.equal(io.out.join("").includes("SECRET-TOKEN"), false);
-  cleanup();
-});
-
-test("hook: falls back to the local cache when the API hangs, inside the 300ms budget", async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-  const hangingFetch = () => new Promise(() => {});
-
-  // 缓存按 path key 存（git 也没来得及跑）。
-  const key = "path:m1:/tmp/nimbus";
-  const file = cachePath(dataRoot(home), key, "-");
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, "=== cached brief ===\nGoal: from cache\n=== end ===");
-
-  const started = Date.now();
-  const code = await runHook({
-    home,
-    agentKind: "claude-code",
-    fetch: hangingFetch,
-    stdin: payload(),
-    stdout: io.stdout,
-    stderr: io.stderr,
-    timeoutMs: 120,
-    getGitState: () => new Promise(() => {}),
-  });
-  const elapsed = Date.now() - started;
-
-  assert.equal(code, 0);
-  assert.ok(elapsed < 1000, `hook must not block startup (took ${elapsed}ms)`);
-  const parsed = JSON.parse(io.out[0]);
-  assert.match(parsed.hookSpecificOutput.additionalContext, /from cache/);
-  cleanup();
-});
-
 test("hook: malformed stdin writes only to stderr and never crashes the session", async () => {
   const { home, cleanup } = tempHome();
   const io = capture();
@@ -125,29 +66,6 @@ test("hook: malformed stdin writes only to stderr and never crashes the session"
   assert.equal(code, 0);
   assert.deepEqual(io.out, []);
   assert.ok(io.err.join("").includes("not valid JSON"));
-  cleanup();
-});
-
-test("hook: an API failure keeps stdout valid (cache or nothing) and writes the reason to stderr", async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-  const failingFetch = async () => ({ ok: false, status: 500, async json() { return {}; } });
-
-  const code = await runHook({
-    home,
-    agentKind: "claude-code",
-    fetch: failingFetch,
-    stdin: payload(),
-    stdout: io.stdout,
-    stderr: io.stderr,
-    getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
-  });
-
-  assert.equal(code, 0);
-  assert.ok(io.err.join("").includes("answered 500"));
-  // 没有缓存 → 什么都不注入，而不是注入错误文本
-  assert.deepEqual(io.out, []);
   cleanup();
 });
 
@@ -255,40 +173,7 @@ test("wrapAdditionalContext: exactly the wire shape Claude Code records", () => 
 
 // ── v2：hook 命令（spool 写入 / 事件映射 / 暂停 / 静默） ─────────────────────
 
-test('hook command: a tool event lands in the spool as one JSON line, stdout stays empty', async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-
-  const code = await runHookCommand({
-    home,
-    agentKind: 'claude-code',
-    event: 'PostToolUse',
-    fetch: async () => ({ ok: true, status: 200, async json() { return { text: 'brief' }; } }),
-    stdin: JSON.stringify({
-      session_id: 's1',
-      cwd: '/tmp/nimbus',
-      tool_name: 'Edit',
-      tool_input: { file_path: 'app/models/foo.rb' },
-      tool_response: { is_error: false },
-    }),
-    stdout: io.stdout,
-    stderr: io.stderr,
-  });
-
-  assert.equal(code, 0);
-  assert.deepEqual(io.out, []);
-  const lines = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(lines.length, 1);
-  assert.equal(lines[0].kind, 'tool');
-  assert.equal(lines[0].via, 'hook');
-  assert.equal(lines[0].tool.name, 'Edit');
-  assert.equal(lines[0].tool.input_summary, 'app/models/foo.rb');
-  assert.equal(lines[0].cwd, '/tmp/nimbus');
-  cleanup();
-});
-
-test('hook command: Stop records the assistant text from last_assistant_message', async () => {
+test('hook command: Stop without an assets profile never spools assistant raw text', async () => {
   const { home, cleanup } = tempHome();
   await seedConfig(home);
   const io = capture();
@@ -300,50 +185,8 @@ test('hook command: Stop records the assistant text from last_assistant_message'
     stdout: io.stdout, stderr: io.stderr,
   });
 
-  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(line.kind, 'message');
-  assert.equal(line.role, 'assistant');
-  assert.equal(line.text, '好，收工。');
-  cleanup();
-});
-
-test('hook command: SessionStart writes session_start and injects the brief', async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-
-  await runHookCommand({
-    home, agentKind: 'claude-code', event: 'SessionStart',
-    fetch: async () => ({ ok: true, status: 200, async json() { return { text: '=== brief ===' }; } }),
-    stdin: JSON.stringify({ session_id: 's1', cwd: '/tmp/nimbus', hook_event_name: 'SessionStart', source: 'startup' }),
-    stdout: io.stdout, stderr: io.stderr,
-    getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
-  });
-
-  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(line.kind, 'session_start');
-  assert.equal(line.source, 'startup');
-  const wrapper = JSON.parse(io.out[0]);
-  assert.equal(wrapper.hookSpecificOutput.additionalContext, '=== brief ===');
-  cleanup();
-});
-
-test('hook command: PreCompact writes a compact event and a reinject marker', async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-
-  await runHookCommand({
-    home, agentKind: 'claude-code', event: 'PreCompact',
-    fetch: async () => { throw new Error('must not be called'); },
-    stdin: JSON.stringify({ session_id: 's1' }),
-    stdout: io.stdout, stderr: io.stderr,
-  });
-
-  const [line] = readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(line.kind, 'compact');
-  const marker = JSON.parse(readFileSync(path.join(dataRoot(home), 'state', 's1.json'), 'utf8'));
-  assert.equal(marker.needs_reinject, true);
+  assert.throws(() => readFileSync(spoolFile(dataRoot(home), 'claude-code', 's1')), {code:'ENOENT'});
+  assert.deepEqual(io.out, []);
   cleanup();
 });
 
@@ -399,6 +242,7 @@ test('hook command: assets-mode SessionStart injects the Soul context and record
   const store = await openStore(root, profileId);
   await store.transact((d) => {
     d.owner_id = '123';
+    d.cloud_issuer = 'https://fake.test';
     d.cloud_device_uid = 'cdu';
     d.souls['s1'] = {
       soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
@@ -422,9 +266,10 @@ test('hook command: assets-mode SessionStart injects the Soul context and record
     };
   });
   await store.close();
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
   writeFileSync(
     path.join(root, 'accounts.json'),
-    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    `${JSON.stringify({ '123': { profile_id: profileId, cloud_issuer: 'https://fake.test', default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
     { mode: 0o600 },
   );
 
@@ -470,6 +315,7 @@ test('hook command: UserPromptSubmit uses the real task hint for relevant experi
   const store = await openStore(root, profileId);
   await store.transact((d) => {
     d.owner_id = '123';
+    d.cloud_issuer = 'https://fake.test';
     d.cloud_device_uid = 'cdu';
     d.souls['s1'] = { soul_uid: 's1', legacy_host_id: null, identity_revision: 1, identity: { name: 'Growth', description: '', character: '', greeting: '' }, state: 'active' };
     d.consents['cdu:s1'] = { cloud_device_uid: 'cdu', soul_uid: 's1', revision: 1, categories: ['identity', 'relationship', 'experience'], enabled: true };
@@ -487,7 +333,8 @@ test('hook command: UserPromptSubmit uses the real task hint for relevant experi
     };
   });
   await store.close();
-  writeFileSync(path.join(root, 'accounts.json'), `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`, { mode: 0o600 });
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
+  writeFileSync(path.join(root, 'accounts.json'), `${JSON.stringify({ '123': { profile_id: profileId, cloud_issuer: 'https://fake.test', default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`, { mode: 0o600 });
   const writer = await startWriter(root);
   const io = capture();
   await runHookCommand({
@@ -525,6 +372,7 @@ test('hook command: each Stop selects its own latest turn and replay shares one 
   const store = await openStore(root, profileId);
   await store.transact((d) => {
     d.owner_id = '123';
+    d.cloud_issuer = 'https://fake.test';
     d.cloud_device_uid = 'cdu';
     d.souls['s1'] = {
       soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
@@ -537,9 +385,10 @@ test('hook command: each Stop selects its own latest turn and replay shares one 
     };
   });
   await store.close();
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
   writeFileSync(
     path.join(root, 'accounts.json'),
-    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    `${JSON.stringify({ '123': { profile_id: profileId, cloud_issuer: 'https://fake.test', default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
     { mode: 0o600 },
   );
 
@@ -582,6 +431,7 @@ test('hook command: first SessionStart waits for writer-created binding before i
   const store = await openStore(root, profileId);
   await store.transact((d) => {
     d.owner_id = '123';
+    d.cloud_issuer = 'https://fake.test';
     d.cloud_device_uid = 'cdu';
     d.souls['s1'] = {
       soul_uid: 's1', legacy_host_id: null, identity_revision: 1,
@@ -601,9 +451,10 @@ test('hook command: first SessionStart waits for writer-created binding before i
     };
   });
   await store.close();
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
   writeFileSync(
     path.join(root, 'accounts.json'),
-    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    `${JSON.stringify({ '123': { profile_id: profileId, cloud_issuer: 'https://fake.test', default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
     { mode: 0o600 },
   );
 
@@ -648,6 +499,7 @@ test('hook command: revoked identity never injects the downloaded cloud canary',
   const store = await openStore(root, profileId);
   await store.transact((d) => {
     d.owner_id = '123';
+    d.cloud_issuer = 'https://fake.test';
     d.cloud_device_uid = 'cdu';
     d.souls['s1'] = {
       soul_uid: 's1', legacy_host_id: 7, identity_revision: 1,
@@ -663,9 +515,10 @@ test('hook command: revoked identity never injects the downloaded cloud canary',
     };
   });
   await store.close();
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
   writeFileSync(
     path.join(root, 'accounts.json'),
-    `${JSON.stringify({ 'owner-1': { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
+    `${JSON.stringify({ '123': { profile_id: profileId, cloud_issuer: 'https://fake.test', default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
     { mode: 0o600 },
   );
   const writer = await startWriter(root);
@@ -723,6 +576,7 @@ test('hook command: anonymous local edit is what the next SessionStart injects',
     };
   });
   await store.close();
+  await saveConfig(root, { api_base_url: 'https://fake.test', machine_id: 'fake-machine', tokens: {}, active_profile_id: profileId });
   writeFileSync(
     path.join(root, 'accounts.json'),
     `${JSON.stringify({ anonymous: { profile_id: profileId, default_soul_uid: 's1', soul_sync_mode: 'assets_only' } })}\n`,
@@ -748,40 +602,3 @@ test('hook command: anonymous local edit is what the next SessionStart injects',
 });
 
 // Pi（2026-10-30）：桥扩展只认 SessionStart 通道，载荷形状与其它宿主一致。
-test('hook command: Pi 的 SessionStart 写 spool 并回 additionalContext', async () => {
-  const { home, cleanup } = tempHome();
-  // Pi 的 token 必须在 config.tokens 里，brief 才会被请求（与其它宿主同一条路径）。
-  await seedConfig(home, { tokens: { pi: 'PI-TOKEN' } });
-  const io = capture();
-
-  await runHookCommand({
-    home, agentKind: 'pi', event: 'SessionStart',
-    fetch: async () => ({ ok: true, status: 200, async json() { return { text: '=== soul ===' }; } }),
-    stdin: JSON.stringify({ session_id: 'pi-1', cwd: '/tmp/demo', source: 'startup' }),
-    stdout: io.stdout, stderr: io.stderr,
-    getGitState: async () => ({ repo: { remote: null, branch: null }, git_state: null }),
-  });
-
-  const [line] = readFileSync(spoolFile(dataRoot(home), 'pi', 'pi-1'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(line.kind, 'session_start');
-  assert.equal(JSON.parse(io.out[0]).hookSpecificOutput.additionalContext, '=== soul ===');
-  cleanup();
-});
-
-test('hook command: Pi 的 Stop 载荷带 last_assistant_message 就记成 assistant 消息', async () => {
-  const { home, cleanup } = tempHome();
-  await seedConfig(home);
-  const io = capture();
-
-  await runHookCommand({
-    home, agentKind: 'pi', event: 'Stop',
-    stdin: JSON.stringify({ session_id: 'pi-2', cwd: '/tmp/demo', last_assistant_message: '搞定了。' }),
-    stdout: io.stdout, stderr: io.stderr,
-  });
-
-  const [line] = readFileSync(spoolFile(dataRoot(home), 'pi', 'pi-2'), 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(line.kind, 'message');
-  assert.equal(line.role, 'assistant');
-  assert.equal(line.text, '搞定了。');
-  cleanup();
-});

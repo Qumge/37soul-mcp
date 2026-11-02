@@ -11,6 +11,7 @@ import { readJsonFile, writeJsonFile } from "./config-editor.js";
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
 import { sendWriter, startWriter } from "./local/writer.js";
+import { normalizeServerIssuer, sameServerIssuer } from "./agentd/server-identity.js";
 import { readCredentials } from "./agentd/credentials.js";
 import { readAccountsIndex } from "./local/profiles.js";
 import { openStore } from "./local/store.js";
@@ -366,7 +367,7 @@ export async function deviceLogin(
   agents: string[],
   options: DeviceLoginOptions = {},
 ): Promise<DeviceLoginResult> {
-  const apiBase = deps.apiBase.replace(/\/+$/, "");
+  const apiBase = normalizeServerIssuer(deps.apiBase);
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -388,6 +389,7 @@ export async function deviceLogin(
 
   const created = await deps.fetch(`${apiBase}/api/v1/cli/device_codes`, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agents, ...fields }),
   });
@@ -418,6 +420,7 @@ export async function deviceLogin(
   for (;;) {
     const poll = await deps.fetch(`${apiBase}/api/v1/cli/tokens`, {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device_code: device.device_code, agents, ...fields }),
     });
@@ -497,6 +500,7 @@ export async function install(
   deps: InstallDeps,
   opts: { agents?: string[]; installService?: boolean; fallback?: string[] } = {},
 ): Promise<InstallResult> {
+  const apiBase = normalizeServerIssuer(deps.apiBase);
   const log = deps.log ?? (() => {});
   const detected = await detectAgents(deps.home);
   const selected = (opts.agents ?? (deps.select ? await deps.select(detected) : detected)).filter((kind) =>
@@ -533,8 +537,9 @@ export async function install(
   };
 
   const config: AgentConfig = {
-    api_base_url: deps.apiBase,
+    api_base_url: apiBase,
     machine_id: existing?.machine_id ?? cryptoRandomId(),
+    ...(existing?.active_profile_id !== undefined ? { active_profile_id: existing.active_profile_id } : {}),
     tokens: { ...(existing?.tokens ?? {}), ...tokens },
     // Repeat install must not drop the scoped credentials granted by login. A
     // fresh anonymous install starts with an empty array; existing data/profile
@@ -551,6 +556,9 @@ export async function install(
     node_path: deps.nodePath,
   };
   await saveConfig(root, config);
+  if (existing && !sameServerIssuer(existing.api_base_url, apiBase)) {
+    log("Server changed; login required for this server (37soul login). Local data and issuer-bound credentials were preserved.");
+  }
 
   const results: InstalledAgent[] = [];
   const configuredHosts = new Map<string, HostInstallResult>();
@@ -705,7 +713,7 @@ export async function status(deps: InstallDeps): Promise<string[]> {
   for (const [kind, token] of Object.entries(config?.tokens ?? {})) {
     lines.push(`${kind}: token ${token ? "set" : "missing"}`);
   }
-  const credentials = readCredentials(config);
+  const credentials = readCredentials(config).filter(credential => sameServerIssuer(credential.issuer, config?.api_base_url));
   lines.push(`sync credentials: ${credentials.length} scoped`);
   const accounts = await readAccountsIndex(root);
   const assetsProfiles = Object.values(accounts).filter((entry) => entry.soul_sync_mode === "assets_only");

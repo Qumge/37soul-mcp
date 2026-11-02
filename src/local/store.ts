@@ -91,6 +91,8 @@ export interface StoreSnapshot {
   store_version: 1;
   profile_id: ProfileId;
   owner_id: string | null;
+  /** Missing/null on old cloud profiles is unknown, never inferred from config. */
+  cloud_issuer?: string | null;
   device_id: string;
   cloud_device_uid: string | null;
   souls: Record<string, Soul>;
@@ -226,6 +228,7 @@ export function emptySnapshot(profileId: ProfileId, deviceId: string): StoreSnap
     store_version: 1,
     profile_id: profileId,
     owner_id: null,
+    cloud_issuer: null,
     device_id: deviceId,
     cloud_device_uid: null,
     souls: {},
@@ -475,6 +478,7 @@ function isStoreSnapshot(value: unknown): value is StoreSnapshot {
     typeof s.device_id === "string" &&
     s.device_id.length > 0 &&
     (s.owner_id === null || typeof s.owner_id === "string") &&
+    (s.cloud_issuer === undefined || s.cloud_issuer === null || typeof s.cloud_issuer === "string") &&
     (s.cloud_device_uid === null || typeof s.cloud_device_uid === "string") &&
     isRecord(s.souls) &&
     isRecord(s.bindings) &&

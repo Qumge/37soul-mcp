@@ -183,6 +183,7 @@ function syncOpts(root) {
   return {
     root,
     token: "test-token",
+    tokenIssuer: "https://fake.test",
     baseUrl: "https://fake.test",
     backoff: { sleep: async () => {}, maxRetries: 1 },
   };
@@ -1343,7 +1344,7 @@ test("sync: capabilities 401 reuses revocation cleanup instead of claiming serve
       machine_id: "m1",
       tokens: {},
       credentials: [{
-        token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
+        issuer: "https://fake.test", token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
         runtime_kind: "hermes", profile_id: "p1", obtained_at: "x",
       }],
     })}\n`,
@@ -1792,7 +1793,7 @@ test("R4: device_revoked removes scoped credentials and parks pending work", asy
       machine_id: "m1",
       tokens: {},
       credentials: [{
-        token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
+        issuer: "https://fake.test", token: "scoped-token", owner_id: IDS.owner, cloud_device_uid: IDS.cloudDevice,
         runtime_kind: "hermes", profile_id: "p1", obtained_at: "x",
       }],
     })}\n`,

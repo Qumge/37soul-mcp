@@ -78,7 +78,7 @@ function seedConfig(root) {
       tokens: { "claude-code": "test-token" },
       credentials: [
         {
-          token: "test-token",
+          issuer: "https://fake.test", token: "test-token",
           owner_id: "owner-1",
           cloud_device_uid: "cdu-1",
           runtime_kind: "claude-code",
@@ -86,7 +86,7 @@ function seedConfig(root) {
           obtained_at: "2026-10-21T00:00:00Z",
         },
         {
-          token: "test-token-3",
+          issuer: "https://fake.test", token: "test-token-3",
           owner_id: "owner-3",
           cloud_device_uid: "cdu-3",
           runtime_kind: "claude-code",
@@ -374,8 +374,8 @@ test("R1: syncing all profiles never sends profile A with profile B's token", as
     "owner-B": { profile_id: "pB", default_soul_uid: null, soul_sync_mode: "assets_only" },
   });
   seedScopedConfig(root, [
-    { token: "token-A", owner_id: "owner-A", cloud_device_uid: "cdu-A", runtime_kind: "hermes", profile_id: "pA", obtained_at: "x" },
-    { token: "token-B", owner_id: "owner-B", cloud_device_uid: "cdu-B", runtime_kind: "hermes", profile_id: "pB", obtained_at: "x" },
+    { issuer: "https://fake.test", token: "token-A", owner_id: "owner-A", cloud_device_uid: "cdu-A", runtime_kind: "hermes", profile_id: "pA", obtained_at: "x" },
+    { issuer: "https://fake.test", token: "token-B", owner_id: "owner-B", cloud_device_uid: "cdu-B", runtime_kind: "hermes", profile_id: "pB", obtained_at: "x" },
   ]);
 
   const calls = [];
@@ -460,7 +460,7 @@ test("R3: bindings use the token of their own runtime", async () => {
   });
   seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
   seedScopedConfig(root, runtimes.map((runtime) => ({
-    token: `token-${runtime}`, owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    issuer: "https://fake.test", token: `token-${runtime}`, owner_id: "owner-1", cloud_device_uid: "cdu-1",
     runtime_kind: runtime, profile_id: "p1", obtained_at: "x",
   })));
 
@@ -545,7 +545,7 @@ test("R5: headers-then-stalled-body is bounded and the writer recovers", async (
   });
   seedAccounts(root, { "owner-1": { profile_id: "p1", default_soul_uid: "soul-1", soul_sync_mode: "assets_only" } });
   seedScopedConfig(root, [{
-    token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+    issuer: "https://fake.test", token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
     runtime_kind: "claude-code", profile_id: "p1", obtained_at: "x",
   }]);
 
@@ -573,7 +573,7 @@ test("R5: headers-then-stalled-body is bounded and the writer recovers", async (
       machine_id: "m1",
       tokens: {},
       credentials: [{
-        token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
+        issuer: `http://127.0.0.1:${port}`, token: "token-1", owner_id: "owner-1", cloud_device_uid: "cdu-1",
         runtime_kind: "claude-code", profile_id: "p1", obtained_at: "x",
       }],
     })}\n`,
@@ -645,7 +645,7 @@ test("R1: a legacy global token is not guessed into a scoped profile", async () 
   configureSyncHttp(http);
   try {
     const report = await runSync(root, "p1");
-    assert.equal(report.error, "no authorized device token");
+    assert.equal(report.error, "no authorized device token; login required for this server");
     assert.equal(calls, 0, "an unbound legacy token never reaches the network");
   } finally {
     configureSyncHttp(null);

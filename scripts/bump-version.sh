@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bump the version everywhere it lives. This package ships to npm AND to the
-# official MCP Registry, and the registry refuses a server.json whose version
-# does not match the npm package it points at — so these must never drift.
+# Bump the source and hosted MCP Registry version together. The runtime ships
+# through GitHub Releases and install.sh, never npm. Keep package-lock metadata
+# aligned with package.json before packing.
 #
 #   ./scripts/bump-version.sh 0.4.4
 set -euo pipefail
@@ -23,6 +23,10 @@ echo "Bumping $current -> $new"
 
 tmp=$(mktemp)
 jq --arg v "$new" '.version = $v' package.json > "$tmp" && mv "$tmp" package.json
+if [ -f package-lock.json ]; then
+  tmp=$(mktemp)
+  jq --arg v "$new" '.version = $v | .packages[""].version = $v' package-lock.json > "$tmp" && mv "$tmp" package-lock.json
+fi
 
 # The version the running server reports over MCP, so clients see the real one.
 perl -pi -e 's/^(const MCP_VERSION = ")[^"]+(";)/${1}'"$new"'${2}/' src/index.ts
@@ -47,10 +51,12 @@ if [ -f server.json ] && jq -e '(.packages | type) == "array"' server.json >/dev
   report "server.json packages" "$(jq -r '[.packages[] | select(.identifier=="37soul-mcp") | .version] | unique | join(",")' server.json)"
 fi
 
-# Fail rather than leave a half-bumped tree — that state is exactly how npm and
-# the registry end up pointing at different versions.
+# Fail rather than leave a half-bumped source and hosted registry manifest.
 expected=$(jq -r .version package.json)
 checks=( "$(grep -o 'const MCP_VERSION = "[^"]*"' src/index.ts | cut -d'"' -f2)" )
+if [ -f package-lock.json ]; then
+  checks+=( "$(jq -r .version package-lock.json)" "$(jq -r '.packages[""].version' package-lock.json)" )
+fi
 if [ -f server.json ]; then
   checks+=( "$(jq -r .version server.json)" )
   if jq -e '(.packages | type) == "array"' server.json >/dev/null; then
