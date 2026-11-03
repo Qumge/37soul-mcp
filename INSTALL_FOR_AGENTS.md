@@ -74,6 +74,13 @@ continue to section 4 only when the human requests it.
 
 ### B. Existing website Soul: login and restore
 
+If the CLI cannot select valid existing local data, it offers a separate website
+reconnection. The human must confirm it: old local profiles remain intact and are
+not copied, merged or uploaded by this recovery. Do not answer the confirmation for
+the human, delete profiles, or rewrite the account index. In a noninteractive shell,
+show the concrete command printed by the CLI to the human instead of guessing a
+profile. Damaged shared metadata must be repaired explicitly, never reset.
+
 ```bash
 37soul login
 ```

@@ -9,6 +9,7 @@ import {readAvatarFile} from './local/avatars.js';
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline/promises";
 import { realpathSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
@@ -45,6 +46,7 @@ export interface CliIO {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   stdin: () => Promise<string>;
+  confirm?: (message: string) => Promise<boolean>;
 }
 
 /**
@@ -902,13 +904,66 @@ async function listSameOwnerProfiles(
   return out;
 }
 
+// Readers normalize missing fields. Before login writes shared metadata, reject
+// shapes those readers would silently discard; never turn recovery into a reset.
+async function invalidLoginMetadata(root: string): Promise<string | null> {
+  const record = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const optionalString = (value: unknown) => value == null || typeof value === "string";
+  for (const file of ["config.json", "accounts.json"]) {
+    let value: unknown;
+    try { value = JSON.parse(await readFile(path.join(root, file), "utf8")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return file;
+    }
+    if (!record(value)) return file;
+    if (file === "config.json") {
+      if (typeof value.api_base_url !== "string" || !value.api_base_url ||
+          typeof value.machine_id !== "string" || !value.machine_id ||
+          (value.tokens !== undefined && !record(value.tokens)) ||
+          (value.credentials !== undefined && !Array.isArray(value.credentials)) ||
+          (value.transcript_fallback !== undefined && !Array.isArray(value.transcript_fallback))) return file;
+    } else {
+      const fields = ["profile_id", "cloud_issuer", "default_soul_uid", "soul_sync_mode"];
+      for (const [owner, entry] of Object.entries(value)) {
+        if (owner === "__proto__" || !record(entry) || typeof entry.profile_id !== "string" || !entry.profile_id ||
+            Object.keys(entry).some(key => !fields.includes(key)) ||
+            !optionalString(entry.cloud_issuer) || !optionalString(entry.default_soul_uid) ||
+            !optionalString(entry.soul_sync_mode)) return file;
+      }
+    }
+  }
+  return null;
+}
+
 export async function loginCommand(
   root: string,
   rest: string[],
   io: CliIO,
   deps: InstallDeps,
 ): Promise<number> {
-  const profileId = await profileIdFromArgs(root, rest, io);
+  const invalidMetadata = await invalidLoginMetadata(root);
+  if (invalidMetadata) {
+    io.stderr(`Existing ${invalidMetadata} has damaged or unsupported metadata. Existing data was not changed; repair this file before reconnecting.\n`);
+    return 1;
+  }
+  let profileId = await profileIdFromArgs(root, rest, io);
+  if (profileId === null && !rest.includes("--profile") &&
+      !rest.includes("--merge-profile") && !rest.includes("--use-profile")) {
+    let recoveryIssuer: string;
+    try { recoveryIssuer = requireCloudIssuer(deps.apiBase); }
+    catch { return 1; }
+    const recoveryId = `reconnect-${randomUUID()}`;
+    io.stderr(`Existing local profiles will be kept unchanged. Reconnecting to ${recoveryIssuer} uses a separate profile; old records will not be copied or merged. Select your website Soul in the browser to restore its cloud assets.\n`);
+    if (!io.confirm) {
+      io.stderr(`To continue explicitly, run: 37soul login --profile ${recoveryId}\n`);
+      return 1;
+    }
+    if (await io.confirm(`Keep existing local data unchanged and reconnect to ${recoveryIssuer} in a separate profile (not merged)? [y/N] `)) {
+      profileId = recoveryId;
+    }
+  }
   if (profileId === null) return 1;
   const mergeProfileId = flagValue(rest, "--merge-profile");
   const useProfileId = flagValue(rest, "--use-profile");
@@ -1062,6 +1117,17 @@ export function processIO(): CliIO {
   return {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    confirm: process.stdin.isTTY && process.stderr.isTTY ? async (message) => {
+      const terminal = createInterface({ input: process.stdin, output: process.stderr });
+      const controller = new AbortController();
+      terminal.once("close", () => controller.abort());
+      terminal.once("SIGINT", () => controller.abort());
+      try {
+        const answer = await terminal.question(message, { signal: controller.signal });
+        return /^(y|yes)$/i.test(answer.trim());
+      } catch { return false; }
+      finally { terminal.close(); }
+    } : undefined,
     stdin: () =>
       new Promise((resolve) => {
         let data = "";

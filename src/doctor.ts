@@ -9,7 +9,7 @@ import { loadConfig } from "./agentd/state.js";
 import { dataRoot, installManifestPath } from "./install.js";
 import { hostSpec } from "./hosts/registry.js";
 import { plistPath, systemdPath } from "./service.js";
-import { readAccountsIndex } from "./local/profiles.js";
+import { readAccountsIndex, resolveLocalAssetsProfileSync } from "./local/profiles.js";
 import { assertProfileCloudIssuer } from "./local/profile-issuer.js";
 import { sameServerIssuer } from "./agentd/server-identity.js";
 import { readCredentials, selectCredentials } from "./agentd/credentials.js";
@@ -57,6 +57,15 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   }
   checks.push({ name: "installation", ok: true, detail: `machine ${config.machine_id}` });
 
+  const localProfile = resolveLocalAssetsProfileSync(root);
+  checks.push({
+    name: "local profile",
+    ok: localProfile !== null,
+    detail: localProfile ? `active profile ${localProfile.profile_id}`
+      : "No unambiguous valid local assets profile — run `37soul login` to complete recovery; existing local data is preserved",
+    fatal: localProfile === null,
+  });
+
   // soul-assets/v1 is the only protocol. Missing/corrupt metadata must never
   // revive legacy network probes or authorize a token from config.tokens.
   const assetsMode = true;
@@ -66,6 +75,9 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   let unavailableProfiles = 0;
   const index = await readAccountsIndex(root);
   for (const [ownerId, entry] of Object.entries(index)) {
+    // Reconnection leaves old data separate; its retained anonymous alias is
+    // not the active website connection and cannot require another login.
+    if (ownerId === "anonymous" && localProfile && entry.profile_id !== localProfile.profile_id) continue;
     if (entry.soul_sync_mode !== "assets_only") {
       unavailableProfiles += 1;
       continue;

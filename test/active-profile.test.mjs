@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { install } from '../dist/install.js';
 import { loginCommand, main } from '../dist/cli.js';
+import { runDoctor } from '../dist/doctor.js';
 import { loadConfig, saveConfig } from '../dist/agentd/state.js';
 import { resolveLocalAssetsProfileSync, resolveLocalHostIdSync, writeAccountsIndex } from '../dist/local/profiles.js';
 import { openStore } from '../dist/local/store.js';
@@ -82,7 +83,10 @@ test('unselected multiple profiles are ambiguous rather than newest/first-owner 
     const store = await openStore(root, 'second'); await store.transact(() => {}); await store.close();
     const config = await loadConfig(root); delete config.active_profile_id; await saveConfig(root, config);
     assert.equal(resolveLocalAssetsProfileSync(root), null);
-    await assert.rejects(install(deps, { agents: ['pi'], installService: false }), /profile|login/i);
+    const before = readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8');
+    await install(deps, { agents: ['pi'], installService: false });
+    assert.equal(resolveLocalAssetsProfileSync(root), null, 'upgrading does not choose a profile');
+    assert.equal(readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8'), before);
   });
 });
 
@@ -280,5 +284,105 @@ test('explicit all-profiles sync retains two-account coverage while no-flag sync
     assert.match(all.stdout, /profile second:/);
     assert.doesNotMatch(all.stdout, /profile default:/);
     assert.equal((await invokeCli(home, ['sync', '--all-profiles', '--profile', 'work'])).code, 2);
+  });
+});
+
+async function legacyProfile(root, deps) {
+  await install(deps, { agents: ['pi'], installService: false });
+  const store = await openStore(root, 'default');
+  await store.transact(d => {
+    d.owner_id = 'owner'; d.cloud_device_uid = 'old-device'; d.cloud_issuer = null;
+    d.souls.s1 = soul;
+    d.assets.canary = recallAsset('canary', 'RETAINED_LOCAL_MEMORY');
+  });
+  await store.close();
+  await writeAccountsIndex(root, {
+    anonymous: { profile_id: 'default', default_soul_uid: null, soul_sync_mode: 'assets_only' },
+    owner: { profile_id: 'default', default_soul_uid: 's1', soul_sync_mode: 'assets_only' },
+  });
+  const config = await loadConfig(root); delete config.active_profile_id; await saveConfig(root, config);
+}
+
+test('plain login offers confirmed website reconnection while retaining an unverified old profile byte-for-byte', async () => {
+  await fixture(async ({root, deps, io}) => {
+    await legacyProfile(root, deps);
+    const before = readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8');
+    let prompt = '', output = '';
+    const code = await loginCommand(root, [], {...io, stderr: s => {output += s;}, confirm: async text => {prompt = text; return true;}}, deps);
+    assert.equal(code, 0, output);
+    assert.match(prompt, /keep|preserv/i);
+    assert.match(prompt, /not.*(?:merge|copy)|separate/i);
+    const active = resolveLocalAssetsProfileSync(root);
+    assert.match(active.profile_id, /^reconnect-/);
+    assert.equal(readFileSync(path.join(root, 'profiles/default/snapshot.json'), 'utf8'), before);
+    assert.equal((await read(root, active.profile_id)).assets.canary, undefined);
+    assert.ok((await read(root, active.profile_id)).souls.s1, 'website Soul is pulled into the new profile');
+    const config = await loadConfig(root);
+    const report = await runDoctor({...deps, inspectRuntime: async () => ({ok:true,agentd:true,pid:123,entrypoint:path.join(config.runtime_dir,'dist/cli.js')})});
+    assert.equal(report.checks.find(check => check.name === 'local profile').ok,true);
+    assert.doesNotMatch(report.checks.find(check => check.name === 'soul sync').detail, /login required/, 'retained inactive anonymous index must not make the restored connection appear unauthenticated');
+  });
+});
+
+test('declining recovery performs no network request and changes no local metadata', async () => {
+  await fixture(async ({root, deps, io}) => {
+    await legacyProfile(root, deps);
+    const files = ['config.json', 'accounts.json', 'profiles/default/snapshot.json'];
+    const before = files.map(f => readFileSync(path.join(root,f),'utf8'));
+    let prompts = 0, requests = 0;
+    const code = await loginCommand(root, [], {...io, confirm: async () => {prompts++; return false;}}, {...deps, fetch: async () => {requests++; throw Error('must not network');}});
+    assert.equal(code, 1); assert.equal(prompts, 1); assert.equal(requests, 0);
+    assert.deepEqual(files.map(f => readFileSync(path.join(root,f),'utf8')), before);
+    assert.deepEqual(readdirSync(path.join(root,'profiles')), ['default']);
+  });
+});
+
+test('noninteractive recovery prints a concrete safe command without creating a profile', async () => {
+  await fixture(async ({root, deps, io}) => {
+    await legacyProfile(root, deps);
+    let output = '';
+    const code = await loginCommand(root, [], {...io, stderr: s => {output += s;}}, deps);
+    assert.equal(code,1);
+    assert.match(output, /37soul login --profile reconnect-[a-z0-9-]+/);
+    assert.match(output, /not.*(?:merge|copy)|separate/i);
+    assert.deepEqual(readdirSync(path.join(root,'profiles')), ['default']);
+  });
+});
+
+test('plain fresh-install login uses its anonymous profile without a recovery prompt', async () => {
+  await fixture(async ({root, deps, io}) => {
+    await install(deps, { agents: ['pi'], installService: false });
+    assert.equal(await loginCommand(root, [], {...io, confirm: async () => {throw Error('unnecessary recovery prompt');}}, deps), 0);
+    assert.equal(resolveLocalAssetsProfileSync(root).profile_id, 'default');
+  });
+});
+
+test('explicit unverified profile and corrupt shared metadata never start confirmed recovery', async () => {
+  await fixture(async ({root, deps, io}) => {
+    await legacyProfile(root, deps);
+    const confirm = async () => {throw Error('must not bypass explicit selection or corrupt metadata');};
+    assert.equal(await loginCommand(root, ['--profile','default'], {...io,confirm}, deps),1);
+    writeFileSync(path.join(root,'accounts.json'), '{broken');
+    assert.equal(await loginCommand(root, [], {...io,confirm}, deps),1);
+    assert.equal(readFileSync(path.join(root,'accounts.json'),'utf8'), '{broken');
+    assert.deepEqual(readdirSync(path.join(root,'profiles')), ['default']);
+  });
+});
+
+for (const [file, replacement] of [
+  ['config.json', {retained:'data'}],
+  ['accounts.json', {owner:null}],
+  ['accounts.json', JSON.parse('{"__proto__":{"profile_id":"default"}}')],
+  ['accounts.json', {owner:{profile_id:'default',retained:'data'}}],
+]) test(`recovery refuses structurally damaged shared metadata: ${file} ${JSON.stringify(replacement)}`, async () => {
+  await fixture(async ({root,deps,io}) => {
+    await legacyProfile(root,deps);
+    writeFileSync(path.join(root,file),JSON.stringify(replacement));
+    const before=readFileSync(path.join(root,file),'utf8');
+    let prompts=0,requests=0;
+    const code=await loginCommand(root,[],{...io,confirm:async()=>{prompts++;return false;}},{...deps,fetch:async()=>{requests++;throw Error('must not network');}});
+    assert.equal(code,1);assert.equal(prompts,0);assert.equal(requests,0);
+    assert.equal(readFileSync(path.join(root,file),'utf8'),before);
+    assert.deepEqual(readdirSync(path.join(root,'profiles')),['default']);
   });
 });

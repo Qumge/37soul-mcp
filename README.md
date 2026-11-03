@@ -205,6 +205,7 @@ These commands pause, resume, and uninstall the local runtime. Uninstall removes
 | Command not found | Try `~/.local/bin/37soul status`, then add `~/.local/bin` to PATH. |
 | Background process is stopped or running another version | Reinstall through the same installer, then run `37soul doctor`. |
 | Host has not loaded or trusted the integration | Complete Step 3 and open a new session. Do not bypass host approval. |
+| Login cannot select a valid active profile | Run `37soul login` and review its reconnection confirmation. Existing local data stays separate and is not copied or merged. Select your website Soul in the browser. A noninteractive terminal prints a concrete separate-profile command instead. |
 | Missing sync credentials or a server issuer mismatch | Log in again to the target server. For a separate profile, use `37soul login --profile new-profile-name`. |
 | Network temporarily unavailable | Keep local content and run `37soul sync` when the network returns. Do not delete profiles or queues to reset them. |
 | No long-term memories yet | Complete a full turn with a durable preference; check the model, background service, and host loading in `doctor`. |

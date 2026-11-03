@@ -5,7 +5,7 @@
  * fake 运行时驱动整条链路，不需要真的登录一次。
  */
 
-import { chmod, cp, lstat, mkdir, readFile, readlink, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readJsonFile, writeJsonFile } from "./config-editor.js";
 import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
@@ -14,7 +14,7 @@ import { sendWriter, startWriter } from "./local/writer.js";
 import { buildExecutionPath } from "./agentd/native-executable.js";
 import { normalizeServerIssuer, sameServerIssuer } from "./agentd/server-identity.js";
 import { readCredentials } from "./agentd/credentials.js";
-import { readAccountsIndex } from "./local/profiles.js";
+import { readAccountsIndex, resolveLocalAssetsProfileSync } from "./local/profiles.js";
 import { openStore } from "./local/store.js";
 import "./local/bindings.js"; // side effect: register init_assets_profile (anonymous-first install)
 import { HOSTS, hostSpec, SUPPORTED_AGENTS, AGENT_HOMES } from "./hosts/registry.js";
@@ -471,7 +471,21 @@ export async function deviceLogin(
  * starts a transient writer for the dispatch and closes it (the CLI process never
  * commits the snapshot itself).
  */
-async function ensureAnonymousAssetsProfile(root: string): Promise<void> {
+async function ensureAnonymousAssetsProfile(root: string, log: (line: string) => void): Promise<void> {
+  // Inspect with the current CLI before contacting a possibly older writer.
+  // Installation must never adopt or reinitialise an existing unavailable profile.
+  if (resolveLocalAssetsProfileSync(root)) return;
+  const configured = await loadConfig(root);
+  const directories = await readdir(path.join(root, "profiles"), { withFileTypes: true }).catch(error => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const hasIndex = await existsFile(path.join(root, "accounts.json"));
+  if (directories.some(entry => entry.isDirectory()) || hasIndex ||
+      (configured && Object.prototype.hasOwnProperty.call(configured, "active_profile_id"))) {
+    log("Local profile unavailable. Existing snapshots and account index were preserved; installation will continue. Run `37soul login` to complete recovery before using local hooks.");
+    return;
+  }
   const request = {
     request_uid: cryptoRandomId(),
     profile_id: "default",
@@ -497,6 +511,29 @@ async function ensureAnonymousAssetsProfile(root: string): Promise<void> {
   }
 }
 
+/** Refuse damaged shared configuration before any installation mutation. */
+async function assertInstallConfig(root: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(configPath(root), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("Cannot read config.json; repair it before installing. Existing data was preserved.");
+  }
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch {
+    throw new Error("Invalid config.json JSON; repair it before installing. Existing data was preserved.");
+  }
+  const object = (item: unknown): item is Record<string, unknown> =>
+    item !== null && typeof item === "object" && !Array.isArray(item);
+  if (!object(value) || typeof value.api_base_url !== "string" || typeof value.machine_id !== "string" ||
+      (Object.prototype.hasOwnProperty.call(value, "tokens") && !object(value.tokens)) ||
+      (Object.prototype.hasOwnProperty.call(value, "credentials") && !Array.isArray(value.credentials)) ||
+      (Object.prototype.hasOwnProperty.call(value, "transcript_fallback") && !Array.isArray(value.transcript_fallback))) {
+    throw new Error("Invalid config.json structure; repair it before installing. Existing data was preserved.");
+  }
+}
+
 export async function install(
   deps: InstallDeps,
   opts: { agents?: string[]; installService?: boolean; fallback?: string[] } = {},
@@ -517,7 +554,8 @@ export async function install(
   // unavailable until the user logs in on the website and pairs a token.
 
   const root = dataRoot(deps.home);
-  await ensureAnonymousAssetsProfile(root);
+  await assertInstallConfig(root);
+  await ensureAnonymousAssetsProfile(root, log);
   const existing = (await loadConfig(root)) ?? null;
 
   // 审查修复 1：先把运行文件复制到固定 runtime，再写任何会长期存在的路径引用
