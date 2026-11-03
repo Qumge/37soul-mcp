@@ -37,6 +37,7 @@ export const WRITER_COMMANDS = [
   "set_soul_avatar",
   "upload_avatar",
   "bind",
+  "connect_session",
   "detach",
   "review_asset",
   "delete_asset",

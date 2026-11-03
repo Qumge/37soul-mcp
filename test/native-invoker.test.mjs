@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 
 import { createNativeInvoker, createExtractAdapters } from "../dist/agentd/native-invoker.js";
 
-const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"];
+const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi", "gemini-cli", "cursor"];
 
 /** A fake spawn that records every call and synchronously invokes its callback. */
 function recordingSpawn(responder = () => ({ stdout: "[]", stderr: "" })) {

@@ -38,7 +38,7 @@ import type {
 } from "../adapters/types.js";
 import { contentDigest, type AssetSource, type ProposedAsset } from "../assets/protocol.js";
 import { classifyProposalState, validateProposedAsset } from "../assets/validation.js";
-import { captureSourcePointer, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
+import { captureSourcePointer, sourceMatchesBoundary, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
 import {
   defaultStoreFs,
   openStore,
@@ -611,7 +611,19 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   // Task 10c: record the host's own transcript location as a path pointer for this
   // event ref — path only, never text. Validated here (absolute, existing regular
   // file); runtimes that omit a transcript location are never indexed.
+  const binding = await resolveBinding(event.key, undefined, { root });
   const candidate = extractTranscriptPath(request.payload);
+  if (binding?.source_boundary && (candidate === null || !(await sourceMatchesBoundary(candidate, binding.source_boundary)))) {
+    // Keep only the new hook's path so an explicit reattach can establish a fresh
+    // boundary after compaction. This event must never schedule old source.
+    if (candidate !== null && await validateTranscriptPath(candidate)) {
+      await captureSourcePointer(root, event.key.profile_id, event.event_ref, {
+        runtime_kind: event.key.runtime_kind, native_session_id: event.key.native_session_id,
+        path: candidate, captured_at: new Date().toISOString(),
+      });
+    }
+    return {scheduled: false, reason: "source_boundary_unavailable"};
+  }
   if (candidate !== null) {
     const valid = await validateTranscriptPath(candidate);
     if (valid !== null) {
@@ -623,6 +635,7 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
         path: valid,
         captured_at: new Date().toISOString(),
         ...(endOffset !== undefined ? { end_offset: endOffset } : {}),
+        ...(binding?.source_boundary ? {source_boundary: binding.source_boundary} : {}),
       }).catch(() => {});
     }
   }
@@ -630,7 +643,6 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   // Resolve/create the binding for every non-internal lifecycle event. A first
   // SessionStart has no binding yet; the hook awaits this command and then reads
   // that binding to inject. Only completed-turn events schedule extraction.
-  const binding = await resolveBinding(event.key, undefined, { root });
   if (!binding) return { scheduled: false, reason: "no_binding" };
   if (!(APPLICABLE_EVENT_KINDS as readonly string[]).includes(event.kind)) {
     return { scheduled: false, reason: "not_applicable" };

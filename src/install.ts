@@ -78,17 +78,6 @@ export function installManifestPath(home: string): string {
 }
 
 
-/**
- * 被检测到、但我们还没有采集能力的宿主。
- *
- * 2026-10-30 之前这些宿主是**静默丢弃**的：`detectAgents` 认得 `~/.gemini`，
- * `planInstall` 却直接 filter 掉，不给任何提示 —— 装了 Gemini CLI 的人跑完
- * `37soul install` 会以为成功了。明确列出来并打印，比假装支持诚实。
- */
-const KNOWN_UNSUPPORTED: Record<string, string> = {
-  "gemini-cli": "detected, capture not implemented yet (tracked; MCP-only for now)",
-};
-
 /** v2 §6.1：`install --plan` 只打印要动哪些文件、装哪些 hook，不写入任何东西。 */
 export async function planInstall(deps: InstallDeps, opts: { agents?: string[] } = {}): Promise<InstallPlan> {
   const detected = await detectAgents(deps.home);
@@ -353,6 +342,8 @@ export interface DeviceLoginResult {
 }
 
 export interface DeviceLoginOptions {
+  /** Website role selected before opening the device approval page. */
+  hostId?: number;
   /**
    * §3 new-protocol login (`37soul login`). Sends protocol/mode/machine_id/
    * client_version and parses owner_id/cloud_device_uid/default_soul_uid. Defaults
@@ -373,6 +364,10 @@ export async function deviceLogin(
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const assetsMode = options.assetsMode === true;
+  if (options.hostId !== undefined && (!Number.isSafeInteger(options.hostId) || options.hostId <= 0)) {
+    throw new Error("host id must be a positive integer");
+  }
+
 
   if (assetsMode && !options.machineId) {
     throw new Error("assets login requires a stable machine_id");
@@ -406,6 +401,9 @@ export async function deviceLogin(
   };
 
   const approval = new URL(device.verification_url);
+  if (options.hostId !== undefined) {
+    approval.searchParams.set("host_id", String(options.hostId));
+  }
   const verificationUrl = `${apiBase}/cli/approve${approval.search}${approval.hash}`;
   log("");
   log(`  Open:  ${verificationUrl}`);

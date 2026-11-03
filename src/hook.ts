@@ -9,6 +9,7 @@ import type { GitStateResult } from "./agentd/git-state.js";
 import { dataRoot } from "./install.js";
 import { loadState } from "./agentd/state.js";
 import type { RuntimeEvent, RuntimeEventKind } from "./adapters/types.js";
+import {RUNTIME_KINDS} from "./assets/protocol.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { sendWriter } from "./local/writer.js";
 import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
@@ -94,14 +95,14 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     // writer creates it while handling this event. Injecting concurrently would
     // read the snapshot before that binding commits (first-session race).
     const sourcePath = parsed.transcriptPath;
-    let sourceTurnRefs: string[] | undefined;
+    let sourceTurnRefs: string[] | undefined = parsed.sourceTurnRefs;
     let sourceEndOffset: number | undefined;
     if (deps.event === "Stop" && sourcePath) {
       try {
         const window = await readSourceTailWindow(sourcePath);
         if (window !== null) {
           const transcript = window.text;
-          sourceTurnRefs = host?.hook.completedTurnRefs?.(transcript);
+          if (host?.hook.completedTurnRefs) sourceTurnRefs = host.hook.completedTurnRefs(transcript);
           if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
           // Freeze the endpoint this Stop actually read: the drain may run much
           // later, after the transcript has grown past the 4MiB tail window.
@@ -116,10 +117,25 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     ).catch(() => {});
     // SessionStart needs the binding before injecting. Stop is the completed-turn
     // event whose source pointer must reach the writer before the host exits.
-    if (deps.event === "SessionStart" || deps.event === "Stop") await runtimeEvent;
+    if (deps.event === "SessionStart" || deps.event === "Stop" || deps.event === "UserPromptSubmit") await runtimeEvent;
     else void runtimeEvent;
 
     const channel = host?.hook.injectionChannel ?? "none";
+    const assetsForHint = resolveLocalAssetsProfileSync(root);
+    const hint = assetsForHint && sessionId && sessionId !== "unknown" && sessionId.length <= 256 && (RUNTIME_KINDS as readonly string[]).includes(deps.agentKind)
+      ? `[37Soul local connection] Native session context (local only): --agent ${deps.agentKind} --session '${sessionId.replace(/'/g, "'\\''")}'. When the user chooses a website Soul, run 37soul connect --host <numeric-host-id> with these exact flags. Read identity through 37soul whoami; do not start remote MCP OAuth or expose credentials.`
+      : "";
+    let delivered = false;
+    const deliver = (text: string) => {
+      const document = JSON.parse(text);
+      if (hint) document.hookSpecificOutput.additionalContext += `\n\n${hint}`;
+      delivered = true;
+      const output = document.hookSpecificOutput;
+      deps.stdout(`${host?.hook.formatContext ? host.hook.formatContext(output.additionalContext, output.hookEventName) : JSON.stringify(document)}\n`);
+    };
+    const deliverHint = (event: "SessionStart" | "UserPromptSubmit") => {
+      if (!delivered && hint) deps.stdout(`${host?.hook.formatContext ? host.hook.formatContext(hint, event) : wrapAdditionalContext(hint, event)}\n`);
+    };
     if (deps.event === "SessionStart" && channel === "SessionStart") {
 
       // Assets mode (soul-assets/v1): inject the bound Soul's current context instead
@@ -128,23 +144,25 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       // recorded through the writer only after actual stdout delivery.
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
-        await withBudget(deps.timeoutMs ?? 300, () =>
-          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout, "session", "SessionStart"),
-        ).catch(() => {});
+        const allowHint = await withBudget(deps.timeoutMs ?? 300, () =>
+          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deliver, "session", "SessionStart"),
+        ).catch(() => false);
+        if (allowHint) deliverHint("SessionStart");
         return 0;
       }
 
       return 0; // Missing/damaged assets metadata never enables old brief injection.
     }
 
-    if (deps.event === "UserPromptSubmit") {
+    if (deps.event === "UserPromptSubmit" && (!host?.hook.formatContext || channel === "UserPromptSubmit")) {
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
         const prompt = parsed.prompt ?? "";
         if (prompt.trim() !== "") {
-          await withBudget(deps.timeoutMs ?? 300, () =>
-            injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deps.stdout, prompt, "UserPromptSubmit"),
-          ).catch(() => {});
+          const allowHint = await withBudget(deps.timeoutMs ?? 300, () =>
+            injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deliver, prompt, "UserPromptSubmit"),
+          ).catch(() => false);
+          if (allowHint) deliverHint("UserPromptSubmit");
           return 0;
         }
       }
@@ -233,7 +251,7 @@ async function injectSoulContext(
   stdout: (text: string) => void,
   taskHint = "session",
   outputEvent: "SessionStart" | "UserPromptSubmit" = "SessionStart",
-): Promise<void> {
+): Promise<boolean> {
   const store = await openStore(root, assets.profile_id);
   try {
     const snap = await store.read();
@@ -244,7 +262,7 @@ async function injectSoulContext(
       native_session_id: sessionId,
     });
     const binding = snap.bindings[key];
-    if (!binding || binding.state !== "bound") return;
+    if (!binding || binding.state !== "bound") return true;
 
     let input;
     try {
@@ -252,11 +270,11 @@ async function injectSoulContext(
     } catch (error) {
       // Revoked identity/device: never inject a cached private identity. Local
       // originals are handled inside ownerContextInput and remain available.
-      if (error instanceof StoreError && error.code === "identity_not_authorized") return;
+      if (error instanceof StoreError && error.code === "identity_not_authorized") return true;
       throw error;
     }
     const bundle = selectContext(input);
-    if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return;
+    if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return true;
 
     // Deliver first, then record the receipt — an injected receipt must only exist
     // after the context actually reached the session.
@@ -267,6 +285,7 @@ async function injectSoulContext(
       command: "record_receipt",
       payload: { binding, bundle, stage: "injected" },
     });
+    return true;
   } finally {
     await store.close();
   }

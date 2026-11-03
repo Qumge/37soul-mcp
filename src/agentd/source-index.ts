@@ -21,8 +21,10 @@
  *    MAX_POINTER_AGE_MS) so it cannot grow without limit.
  */
 import { constants } from "node:fs";
+import {createHash} from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+import type {NativeSessionKey, SessionSourceBoundary} from "../adapters/types.js";
 import type { RuntimeKind } from "../assets/protocol.js";
 
 /** At most this many bytes of a transcript are read, and only that prefix is returned. */
@@ -57,6 +59,8 @@ export interface SourcePointerRecord {
    * local-only: it is never copied into a watermark, outbox envelope or log.
    */
   end_offset?: number;
+  /** Local-only lower bound for an explicitly attached native session. */
+  source_boundary?: SessionSourceBoundary;
 }
 
 function isByteOffset(value: unknown): value is number {
@@ -197,6 +201,52 @@ export async function pruneSourcePointers(root: string, profileId: string, sessi
   for (const full of drop) await rm(full, { force: true }).catch(() => {});
 }
 
+/** Find only this exact native session's hook-provided source; never infer from cwd. */
+export async function sessionSourceBoundary(root: string, key: NativeSessionKey): Promise<SessionSourceBoundary | null> {
+  const dir = profileDir(root, key.profile_id);
+  const files = await readdir(dir).catch(() => []);
+  const records: SourcePointerRecord[] = [];
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const record = JSON.parse(await readFile(path.join(dir, file), "utf8")) as SourcePointerRecord;
+      if (record.runtime_kind === key.runtime_kind && record.native_session_id === key.native_session_id) records.push(record);
+    } catch { /* Corrupt pointers are not evidence. */ }
+  }
+  records.sort((a, b) => String(b.captured_at).localeCompare(String(a.captured_at)));
+  const record = records[0];
+  if (!record || !path.isAbsolute(record.path)) return null;
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(record.path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (!info.isFile()) return null;
+    const byte = Buffer.alloc(1);
+    if (info.size > 0) await handle.read(byte, 0, 1, info.size - 1);
+    return {path: record.path, start_offset: info.size, device: info.dev, inode: info.ino, starts_line: info.size === 0 || byte[0] === 10, anchor_sha256: await boundaryAnchor(handle, info.size)};
+  } catch { return null; }
+  finally { if (handle) await handle.close().catch(() => {}); }
+}
+
+async function boundaryAnchor(handle: FileHandle, offset: number): Promise<string> {
+  const length = Math.min(64, offset);
+  const bytes = Buffer.alloc(length);
+  const read = await handle.read(bytes, 0, length, offset - length);
+  if (read.bytesRead !== length) throw new Error("source boundary changed");
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export async function sourceMatchesBoundary(file: string, boundary: SessionSourceBoundary): Promise<boolean> {
+  if (file !== boundary.path) return false;
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    return info.isFile() && info.dev === boundary.device && info.ino === boundary.inode && info.size >= boundary.start_offset && await boundaryAnchor(handle, boundary.start_offset) === boundary.anchor_sha256;
+  } catch { return false; }
+  finally { if (handle) await handle.close().catch(() => {}); }
+}
+
 /**
  * Resolve event refs in order through the pointer index and return the bounded
  * window of the first resolvable transcript, honoring a frozen endpoint when the
@@ -235,7 +285,7 @@ async function readSourceRef(root: string, eventRef: string, turnRefs?: readonly
     } catch {
       continue;
     }
-    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs, record.end_offset);
+    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs, record.end_offset, record.source_boundary);
   }
   return null;
 }
@@ -321,32 +371,35 @@ async function readSourceWindow(
   maxBytes: number,
   turnRefs?: readonly string[],
   endOffset?: number,
+  boundary?: SessionSourceBoundary,
 ): Promise<string | null> {
   // Legacy callers without frozen turn refs get the bounded tail (short files are
   // whole). Production extraction passes turnRefs and still verifies every ref.
-  if (!turnRefs || turnRefs.length === 0) return readSourceTail(file, maxBytes);
+  if (!boundary && (!turnRefs || turnRefs.length === 0)) return readSourceTail(file, maxBytes);
   let handle: FileHandle | null = null;
   try {
     handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await handle.stat();
     if (!info.isFile()) return null;
+    if (boundary && (file !== boundary.path || info.dev !== boundary.device || info.ino !== boundary.inode || info.size < boundary.start_offset || await boundaryAnchor(handle, boundary.start_offset) !== boundary.anchor_sha256)) return "";
     // A frozen boundary is authoritative: read exactly the prefix the completed
     // turn was captured against. If the file shrank below it, the frozen bytes no
     // longer exist — fail honestly instead of silently reading a different tail.
     const frozen = isByteOffset(endOffset);
     if (frozen && info.size < endOffset) return "";
     const end = frozen ? endOffset : info.size;
-    const start = Math.max(0, end - maxBytes);
+    if (boundary && end < boundary.start_offset) return "";
+    const start = Math.max(boundary?.start_offset ?? 0, end - maxBytes);
     const length = Math.min(maxBytes, end - start);
     const buffer = Buffer.alloc(length);
     const { bytesRead } = await handle.read(buffer, 0, length, start);
     if (bytesRead !== length) return ""; // concurrent truncation: no stable window
     let text = buffer.toString("utf8", 0, bytesRead);
-    if (start > 0) {
+    if (start > 0 && !(boundary && start === boundary.start_offset && boundary.starts_line)) {
       const newline = text.indexOf("\n");
       text = newline >= 0 ? text.slice(newline + 1) : "";
     }
-    return windowContainsTurnRefs(text, turnRefs) ? text : "";
+    return windowContainsTurnRefs(text, turnRefs ?? []) ? text : "";
   } catch {
     return null;
   } finally {

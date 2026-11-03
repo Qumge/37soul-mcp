@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {readLocalIdentity} from './local/agent-connect.js';
 import {readAvatarFile} from './local/avatars.js';
 /**
  * `37soul` CLI（设计 §6.1）：install / doctor / status / uninstall / pause / resume，
@@ -30,7 +31,7 @@ import { detectLang, messages } from "./i18n.js";
 import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
-import { openStore, profilesDir, snapshotPath } from "./local/store.js";
+import { openStore, profilesDir, snapshotPath, StoreError } from "./local/store.js";
 import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./local/bindings.js";
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
@@ -67,7 +68,7 @@ export function agentdExtractAdapters(
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
-  37soul install [--agents claude-code,codex,opencode,hermes,pi] [--plan] [--fallback codex]
+  37soul install [--agents claude-code,codex,opencode,hermes,pi,gemini-cli,cursor] [--plan] [--fallback codex]
                                                 connect the agents on this machine
   37soul doctor                                  check configuration and credentials
   37soul status                                  show machine, credentials and Soul sync state
@@ -75,7 +76,9 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul resume                                  resume capture
   37soul uninstall                               remove managed hooks/service; keep profiles and raw archives
 
-  37soul login [--profile <id>]                  device login; merge the local anonymous profile
+  37soul login [--host <id>] [--profile <id>]                  device login; merge the local anonymous profile
+  37soul whoami --host <id> [--agent <kind>]    read identity using this local login
+  37soul connect --host <id> --agent <kind> --session <native-id>   attach this session
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
   37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
                                                 profile commands default to the valid active profile
@@ -216,6 +219,9 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       return bindCommand(root, rest, io, false);
     case "detach":
       return bindCommand(root, rest, io, true);
+    case "whoami":
+    case "connect":
+      return localIdentityCommand(root, rest, io, deps, command === "connect");
     case "login":
       return loginCommand(root, rest, io, deps);
     case "sync": {
@@ -735,6 +741,58 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
   return 2;
 }
 
+async function localIdentityCommand(root: string, rest: string[], io: CliIO, deps: {apiBase: string; fetch: typeof fetch}, attach: boolean): Promise<number> {
+  const hostArg = flagValue(rest, "--host");
+  const hostId = hostArg && /^[1-9]\d*$/.test(hostArg) ? Number(hostArg) : NaN;
+  const runtime = flagValue(rest, "--agent");
+  const session = flagValue(rest, "--session");
+  if (!Number.isSafeInteger(hostId) || (rest.includes("--agent") && !(RUNTIME_KINDS as readonly string[]).includes(runtime ?? ""))) {
+    io.stderr("--host requires a positive integer; --agent must name a supported runtime\n"); return 2;
+  }
+  if (attach && (!runtime || !session || session.startsWith("--"))) {
+    io.stderr("connect requires --agent and --session from the current native hook context; never guess another session\n"); return 2;
+  }
+  const profile = await profileIdFromArgs(root, rest, io);
+  if (profile === null) return 1;
+  try {
+    if (attach) {
+      const store = await openStore(root, profile);
+      let present: boolean;
+      try { present = Object.values((await store.read()).souls).some(soul => soul.legacy_host_id === hostId); }
+      finally { await store.close(); }
+      if (!present) await runSync(root, profile);
+    }
+    const identity = await readLocalIdentity(root, profile, hostId, runtime as RuntimeKind | undefined, deps);
+    const requireActive = async () => {
+      const latest = await loadConfig(root);
+      if ((latest?.active_profile_id !== undefined && latest.active_profile_id !== profile) || resolveLocalAssetsProfileSync(root)?.profile_id !== profile) {
+        throw new StoreError("active_profile_changed", "The active account/profile changed. Retry the connection using the current native hook context.");
+      }
+    };
+    if (attach || !rest.includes("--profile")) await requireActive();
+    if (attach) {
+      let snap;
+      const read = async () => { const store = await openStore(root, profile); try { return await store.read(); } finally { await store.close(); } };
+      snap = await read();
+      if (!Object.values(snap.souls).some(s => s.legacy_host_id === hostId)) { await runSync(root, profile); snap = await read(); }
+      const soul = Object.values(snap.souls).find(s => s.legacy_host_id === hostId);
+      if (!soul) throw new Error(`Selected Soul is not restored. Run 37soul login --host ${hostId} and approve that Soul, then retry.`);
+      const result = await runWriterCommand(root, profile, "connect_session", {
+        device_id: snap.device_id, runtime_kind: runtime, native_session_id: session, soul_uid: soul.soul_uid,
+      });
+      if (!result.ok) throw new StoreError(result.error.code, result.error.message);
+      await requireActive();
+      identity.connection = {...(result.result as Record<string, unknown>), state: "attached"};
+    }
+    io.stdout(`${JSON.stringify(identity, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    // Only our typed errors carry safe messages. Network/response bodies never do.
+    const message = error instanceof StoreError ? error.message : `Selected Soul is not restored. Run 37soul login --host ${hostId} and retry.`;
+    io.stderr(`${message}\n`); return 1;
+  }
+}
+
 export async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
   const profileId = await profileIdFromArgs(root, rest, io);
   if (profileId === null) return 1;
@@ -943,6 +1001,11 @@ export async function loginCommand(
   io: CliIO,
   deps: InstallDeps,
 ): Promise<number> {
+  const requestedHost = flagValue(rest, "--host");
+  const hostId = requestedHost && /^[1-9]\d*$/.test(requestedHost) ? Number(requestedHost) : undefined;
+  if (rest.includes("--host") && (!Number.isSafeInteger(hostId) || !hostId)) {
+    io.stderr("--host requires a positive integer\n"); return 2;
+  }
   const invalidMetadata = await invalidLoginMetadata(root);
   if (invalidMetadata) {
     io.stderr(`Existing ${invalidMetadata} has damaged or unsupported metadata. Existing data was not changed; repair this file before reconnecting.\n`);
@@ -957,7 +1020,7 @@ export async function loginCommand(
     const recoveryId = `reconnect-${randomUUID()}`;
     io.stderr(`Existing local profiles will be kept unchanged. Reconnecting to ${recoveryIssuer} uses a separate profile; old records will not be copied or merged. Select your website Soul in the browser to restore its cloud assets.\n`);
     if (!io.confirm) {
-      io.stderr(`To continue explicitly, run: 37soul login --profile ${recoveryId}\n`);
+      io.stderr(`To continue explicitly, run: 37soul login${hostId !== undefined ? ` --host ${hostId}` : ""} --profile ${recoveryId}\n`);
       return 1;
     }
     if (await io.confirm(`Keep existing local data unchanged and reconnect to ${recoveryIssuer} in a separate profile (not merged)? [y/N] `)) {
@@ -983,7 +1046,7 @@ export async function loginCommand(
   const machineId = await readProfileDeviceId(root, profileId);
   const clientVersion = await readClientVersion(fileURLToPath(import.meta.url));
 
-  const login = await deviceLogin(deps, [...RUNTIME_KINDS], { assetsMode: true, machineId, clientVersion });
+  const login = await deviceLogin(deps, [...RUNTIME_KINDS], { assetsMode: true, machineId, clientVersion, hostId });
 
   if (!login.owner_id) {
     io.stderr("login returned no owner_id\n");
@@ -1057,13 +1120,15 @@ export async function loginCommand(
   // Path B: the selected website Soul arrives via the first Pull, not in the
   // pre-login snapshot. Set it as the account default only after it actually exists
   // locally; never fabricate a same-name replacement.
+  let targetReady = false;
   if (login.default_soul_uid) {
     try {
       const store = await openStore(root, adoptedProfileForCredentials);
       try {
         const snap = await store.read();
         const restored = snap.souls[login.default_soul_uid];
-        if (restored) {
+        if (restored && (hostId === undefined || restored.legacy_host_id === hostId)) {
+          targetReady = true;
           await setAccountDefaultSoul(adoptedProfileForCredentials, login.default_soul_uid, { root });
           const assets = Object.values(snap.assets).filter(
             (asset) => asset.soul_uid === login.default_soul_uid && asset.state !== "deleted",
@@ -1086,6 +1151,11 @@ export async function loginCommand(
   const adoptedProfile = adopted && typeof adopted.profile_id === "string" ? adopted.profile_id : profileId;
   const adoptedOwner = adopted && typeof adopted.owner_id === "string" ? adopted.owner_id : login.owner_id;
   io.stdout(`logged in as owner ${adoptedOwner} (profile ${adoptedProfile})\n`);
+  if (hostId !== undefined && !targetReady) {
+    io.stderr(`Account authorized, but the requested Soul ${hostId} is not ready. Run 37soul login --host ${hostId}, approve that Soul and verify Soul restored before connecting the Agent.\n`);
+    return 1;
+  }
+  if (!login.default_soul_uid) io.stderr("Account login completed; no Soul was selected. Run 37soul login --host <id> to connect a website Soul.\n");
   return 0;
 }
 

@@ -1,3 +1,4 @@
+import {sessionSourceBoundary, sourceMatchesBoundary} from "../agentd/source-index.js";
 import {preserveAvatar,registrationAvatar} from './avatars.js';
 import { loadConfig } from "../agentd/state.js";
 import { requireCloudIssuer, assertLoginProfileIssuers } from "./profile-issuer.js";
@@ -761,6 +762,39 @@ registerWriterCommand("bind", async ({ root, request }) => {
     native_session_id: String(p.native_session_id ?? ""),
   };
   return selectSoul(key, String(p.soul_uid ?? ""), { root });
+});
+
+// Unlike legacy bind, an explicit current-session connection starts a new cloud
+// binding at a proven local byte boundary. Old jobs/outbox operations retain their
+// old identity; none are rewritten to the new Soul.
+registerWriterCommand("connect_session", async ({root, request}) => {
+  const p = request.payload;
+  const key: NativeSessionKey = {profile_id: request.profile_id, device_id: String(p.device_id ?? ""), runtime_kind: p.runtime_kind as RuntimeKind, native_session_id: String(p.native_session_id ?? "")};
+  assertNativeKey(key);
+  const config = await loadConfig(root);
+  if ((config?.active_profile_id !== undefined && config.active_profile_id !== key.profile_id) || resolveLocalAssetsProfileSync(root)?.profile_id !== key.profile_id) {
+    throw new StoreError("active_profile_changed", "The active account/profile changed. Retry using the current native hook context.");
+  }
+  const store = await openStore(root, key.profile_id);
+  try {
+    const snap = await store.read();
+    const soulUid = String(p.soul_uid ?? "");
+    const soul = snap.souls[soulUid];
+    if (!soul || snap.device_id !== key.device_id) throw new StoreError("unknown_soul", "The requested Soul is not available in this local profile.");
+    const consent = snap.consents[`${snap.cloud_device_uid}:${soulUid}`];
+    if (!consent?.enabled || !consent.categories.includes("identity")) {
+      throw new StoreError("identity_not_authorized", `This Soul needs device consent. Run 37soul login --host ${soul.legacy_host_id}.`);
+    }
+    const k = bindingKey(key);
+    const existing = snap.bindings[k];
+    const boundary = await sessionSourceBoundary(root, key);
+    if (existing?.state === "bound" && existing.soul_uid === soulUid && existing.source_boundary && boundary?.path === existing.source_boundary.path && await sourceMatchesBoundary(boundary.path, existing.source_boundary)) return toBinding(existing);
+    if (!boundary) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message so its managed hook can report the native session; never choose another terminal by recency.");
+    const next = {...createBinding(key, soulUid), source_boundary: boundary};
+    const op = bindingOutboxOp(next, "bound", 0, []);
+    await store.transact(draft => { draft.bindings[k] = next; draft.outbox[op.operation_id] = op; });
+    return toBinding(next);
+  } finally { await store.close(); }
 });
 
 registerWriterCommand("detach", async ({ root, request }) => {

@@ -534,7 +534,9 @@ test('hook command: revoked identity never injects the downloaded cloud canary',
   } finally {
     await writer.close();
   }
-  assert.deepEqual(io.out, [], 'nothing is injected after identity revocation');
+  assert.ok(!io.out.join('').includes('OWNER_PRIVATE_IDENTITY_CANARY'), 'revocation suppresses all private Soul content');
+  assert.ok(!io.out.join('').includes('[Soul]'), 'only nonprivate native connection context can be emitted');
+  assert.match(io.out.join(''), /37soul connect/, 'the exact native session remains available for connecting another approved Soul');
   assert.ok(!io.err.join('').includes('OWNER_PRIVATE_IDENTITY_CANARY'), 'the canary never reaches stderr either');
   cleanup();
 });

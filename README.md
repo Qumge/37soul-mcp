@@ -92,7 +92,7 @@ curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 37soul login
 ```
 
-Open the authorization link, sign in to your own account, verify the short code, select your existing Soul, review the sync consent, and approve the device. Wait until the terminal shows `Soul restored:`. If you did not select a Soul, login alone does not restore one: repeat login and select the intended Soul.
+Open the authorization link, sign in to your own account, verify the short code, select your existing Soul, review the sync consent, and approve the device. Wait until the terminal shows `Soul restored:`. If you did not select a Soul, only account authorization is complete. Use `37soul login --host HOST_ID` from its connection page to preselect and require that Soul; connection is ready only after the download succeeds. Reinstalling with a valid account reuses its local profile.
 
 #### Want to create a Soul locally first? No account needed
 
@@ -131,6 +131,8 @@ The CLI keeps a managed copy of the photo, so moving or deleting the original do
 | OpenCode | Restart to load the managed plugin. Resolve any plugin loading errors reported by the host. |
 | Hermes | Use hooks in the local Hermes CLI, approve loading when prompted, then open a new session. A gateway-only configuration cannot replace the CLI. |
 | Pi | Restart to load the managed extension. Approve it if the host restricts extensions, then open a new session. |
+| Gemini CLI | Review the native hooks in `~/.gemini/settings.json`; `BeforeAgent` supplies context. Loading and model adoption require host verification. Automatic extraction is disabled. |
+| Cursor | Review `~/.cursor/hooks.json`; `sessionStart` supplies context where supported. Loading and model adoption require host verification. Automatic extraction is disabled. |
 
 Each host still needs working model authentication or configuration. 37Soul does not supply or automatically replace those credentials.
 
@@ -141,7 +143,9 @@ A new session binds to exactly one Soul: this host's default if you set one, oth
 37soul soul select <soul_uid> --agent claude-code
 ```
 
-Omit `--agent` to change the account default. Once the Agent is open, tell it which Soul to use, or ask it to run `whoami` to confirm. A session that has already started cannot switch Souls in place — telling the Agent to switch does not change it either; select the Soul as above and open a new session.
+Omit `--agent` to change the account default for future sessions. With an existing local login, the Agent reads identity through `37soul whoami --host HOST_ID --agent RUNTIME`. The runtime reads its scoped credential internally; do not start a second remote MCP OAuth flow or read/write token files.
+
+To attach or switch an open session, the Agent uses the exact native hook context with `37soul connect --host HOST_ID --agent RUNTIME --session SESSION_ID`. Success returns `connection.state: attached`. A local source boundary starts the new identity's memory range; old transcript bytes and pending jobs are not reassigned. Missing hook/session context, consent or a downloaded Soul produces an explicit error; never guess another terminal. Once its hook is loaded, the session does not need the whole console restarted. Initial plugin loading and host consent still follow Step 3. The legacy `bind` command retains its existing guards.
 
 ### Step 4: Teach a preference and check it
 

@@ -8,21 +8,22 @@ import { RUNTIME_KINDS } from "../dist/assets/protocol.js";
 import { detectAgents, planInstall } from "../dist/install.js";
 import { createExtractAdapters } from "../dist/agentd/native-invoker.js";
 
-const KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"];
+const LEGACY_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"];
+const KINDS = [...LEGACY_KINDS, "gemini-cli", "cursor"];
 
 test("hosts: registry covers the protocol in order with unique homes and complete dispatch", () => {
   assert.deepEqual(HOSTS.map((host) => host.kind), KINDS);
   assert.deepEqual(HOSTS.map((host) => host.kind), RUNTIME_KINDS);
   assert.deepEqual(SUPPORTED_AGENTS, RUNTIME_KINDS);
-  assert.equal(new Set(HOSTS.map((host) => host.home)).size, 5);
-  assert.deepEqual(Object.values(AGENT_HOMES), [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".gemini"]);
+  assert.equal(new Set(HOSTS.map((host) => host.home)).size, 7);
+  assert.deepEqual(Object.values(AGENT_HOMES), [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".gemini", ".cursor"]);
   for (const host of HOSTS) {
     assert.equal(hostSpec(host.kind), host);
     for (const method of ["plan", "configure", "uninstall"]) assert.equal(typeof host.install[method], "function");
     assert.equal(typeof host.hook.parsePayload, "function");
     assert.equal(typeof host.doctor, "function");
   }
-  assert.equal(hostSpec("gemini-cli"), undefined);
+  assert.equal(hostSpec("gemini-cli").kind, "gemini-cli");
   assert.equal(hostSpec("unknown"), undefined);
 });
 
@@ -31,10 +32,10 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
   t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(path.join(home, ".gemini"));
   assert.deepEqual(await detectAgents(home), ["gemini-cli"]);
-  for (const dir of [".claude", ".codex", ".config/opencode", ".hermes", ".pi"]) {
+  for (const dir of [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".cursor"]) {
     await mkdir(path.join(home, dir), { recursive: true });
   }
-  assert.deepEqual(await detectAgents(home), [...KINDS, "gemini-cli"]);
+  assert.deepEqual(await detectAgents(home), KINDS);
   const deps = { home, cliScriptPath: "/pkg/dist/cli.js", runtimeVersion: "0.13.2", platform: "darwin" };
   const plan = await planInstall(deps);
   const hostFiles = [
@@ -43,11 +44,13 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
     [".config/opencode/plugins/37soul-soul.js"],
     [".hermes/agent-hooks/37soul-hook.py"],
     [".pi/agent/extensions/37soul-soul.ts"],
+    [".gemini/settings.json"],
+    [".cursor/hooks.json"],
   ];
   const commonFiles = [".37soul/config.json", ".37soul/install-manifest.json", ".37soul/runtime/0.13.2", ".local/bin/37soul"];
   const absolute = (files) => files.map((file) => path.join(home, file));
   assert.deepEqual(plan.agents, KINDS);
-  assert.deepEqual(plan.unsupported, ["gemini-cli"]);
+  assert.deepEqual(plan.unsupported, []);
   assert.deepEqual(plan.files, absolute([...hostFiles.flat(), ...commonFiles]));
   for (const [index, kind] of KINDS.entries()) {
     assert.deepEqual((await planInstall(deps, { agents: [kind] })).files, absolute([...hostFiles[index], ...commonFiles]));
@@ -55,7 +58,7 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
   assert.deepEqual((await planInstall(deps, { agents: [...KINDS].reverse() })).files, plan.files);
 });
 
-test("hosts: extraction still constructs all five adapters", () => {
+test("hosts: extraction constructs all seven registered adapters", () => {
   const adapters = createExtractAdapters("/unused-host-registry-home");
   assert.deepEqual(Object.keys(adapters), KINDS);
   for (const kind of KINDS) assert.equal(adapters[kind].runtime_kind, kind);
@@ -199,7 +202,7 @@ test("hosts: null hook payload keeps the legacy error receipt", async (t) => {
   const { runHookCommand } = await import("../dist/hook.js");
   const home = await mkdtemp(path.join(tmpdir(), "37soul-null-payload-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  for (const agentKind of [...KINDS, "unknown"]) {
+  for (const agentKind of [...LEGACY_KINDS, "unknown"]) {
     const errors = [];
     assert.equal(await runHookCommand({ home, agentKind, event: "SessionEnd", stdin: "null", fetch: async () => { throw new Error("no network"); }, stdout: () => assert.fail("no output expected"), stderr: s => errors.push(s) }), 0);
     assert.deepEqual(errors, ["37soul hook: Cannot read properties of null (reading 'session_id')\n"]);

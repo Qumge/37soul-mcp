@@ -110,4 +110,12 @@ export type HttpFetch = typeof fetch;
 export type ProfileId = string;
 
 /** A Binding plus its local native session key. */
-export type BindingSnapshot = Binding & NativeSessionKey;
+export interface SessionSourceBoundary {
+  path: string;
+  start_offset: number;
+  device: number;
+  inode: number;
+  starts_line: boolean;
+  anchor_sha256: string;
+}
+export type BindingSnapshot = Binding & NativeSessionKey & {source_boundary?: SessionSourceBoundary};

@@ -92,7 +92,7 @@ curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 37soul login
 ```
 
-打开授权链接，登录自己的账号，核对短码，选择已有的 Soul，阅读同步授权范围后批准设备。等终端显示 `Soul restored:`。如果没有选择 Soul，单独登录不会恢复角色；重新执行登录并选择正确的 Soul。
+打开授权链接，登录自己的账号，核对短码，选择已有的 Soul，阅读同步授权范围后批准设备。等终端显示 `Soul restored:`。如果没有选择 Soul，只完成了账号授权。在角色连接页复制 `37soul login --host 角色ID`，确认页会预选并要求批准该角色；角色下载成功后才会显示 `Soul restored:`。同一有效账号重复安装会复用已有资料。
 
 #### 想先在本机创建 Soul：不需要账号
 
@@ -131,6 +131,10 @@ CLI 会保留照片的托管副本，移动或删除原文件不会破坏它。�
 | OpenCode | 重启以加载受管插件；处理宿主报告的插件加载错误。 |
 | Hermes | 在本机 Hermes CLI 中使用 hooks 接入，按提示批准加载，再开新会话。只有 gateway 的配置不能代替 CLI。 |
 | Pi | 重启以加载受管扩展；如果宿主限制扩展，先批准，再开新会话。 |
+| Gemini CLI | 查看 `~/.gemini/settings.json` 的原生 hooks；通过 `BeforeAgent` 提供上下文。加载与模型采用情况需由宿主验证，自动记忆提炼暂不启用。 |
+| Cursor | 查看 `~/.cursor/hooks.json`；在支持的 `sessionStart` 阶段提供上下文。加载与模型采用情况需由宿主验证，自动记忆提炼暂不启用。 |
+
+Gemini CLI 与 Cursor 目前提供原生 hook 和身份接入，暂不自动提炼记忆，详见[能力与验证边界](docs/new-native-hosts.md)。
 
 每个宿主仍需要可用的模型登录或配置。37Soul 不提供或自动替换这些凭证。
 
@@ -141,7 +145,9 @@ CLI 会保留照片的托管副本，移动或删除原文件不会破坏它。�
 37soul soul select <soul_uid> --agent claude-code
 ```
 
-省略 `--agent` 就改账号默认。打开 Agent 后，直接告诉它这次用哪个 Soul，或让它调一次 `whoami` 确认。已经开始的会话不能就地换 Soul —— 在 Agent 里让它换也一样，要按上面的命令选好再开新会话。
+省略 `--agent` 就改账号默认，供后续会话使用。已有本机登录时，Agent 用 `37soul whoami --host 角色ID --agent 宿主名` 读取角色资料；运行时会在内部取用当前账号的凭据，不需要再给远程 MCP 做一次 OAuth，也不要读取或手写 token 文件。
+
+要在已打开的会话中接入或切换角色，让 Agent 使用受管 hook 给出的准确宿主和会话参数运行 `37soul connect --host 角色ID --agent 宿主名 --session 会话ID`。接入成功会返回 `connection.state: attached`。它从本机会话的明确位置开始新的记忆归属，切换前的记录不会交给新 Soul。缺少 hook 会话信息、未授权或角色未下载时会明确报错，不会猜另一终端；已加载 hook 的会话无需关闭整个控制台。首次安装扩展或批准宿主 hook 仍需按第三步完成。旧的 `bind` 命令保留原有保护规则。
 
 ### 第四步：说一条长期偏好，确认它学到了什么
 

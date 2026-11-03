@@ -1152,7 +1152,7 @@ test("install: 检测到 Pi 时写扩展桥并记进 manifest", async () => {
   h.cleanup();
 });
 
-test("install: plan 把检测到但装不了的宿主列进 unsupported（不再静默丢弃）", async () => {
+test("install: plan 为新增 Gemini 安装原生 hook，提取状态另行验证", async () => {
   const h = harness();
   mkdirSync(path.join(h.home, ".pi", "agent"), { recursive: true });
   mkdirSync(path.join(h.home, ".gemini"), { recursive: true });
@@ -1160,8 +1160,9 @@ test("install: plan 把检测到但装不了的宿主列进 unsupported（不再
   const plan = await planInstall(h.deps, {});
 
   assert.ok(plan.agents.includes("pi"), "Pi 现在是可安装目标");
-  assert.ok(plan.unsupported.includes("gemini-cli"), "Gemini 检测到了但采集未实现，必须报出来");
-  assert.ok(!plan.agents.includes("gemini-cli"), "未实现的宿主不能被当成已连接");
+  assert.ok(!plan.unsupported.includes("gemini-cli"), "Gemini 现在有原生 hook 安装入口");
+  assert.ok(plan.agents.includes("gemini-cli"), "安装 hook 不等于已经验证自动提取");
+  assert.ok(plan.files.includes(path.join(h.home, ".gemini", "settings.json")));
   h.cleanup();
 });
 
