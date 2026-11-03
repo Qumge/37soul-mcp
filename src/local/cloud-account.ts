@@ -28,7 +28,9 @@ export async function accountJson(access:CloudAccountAccess,fetcher:typeof fetch
  }catch(error){if(error instanceof StoreError)throw error;throw new StoreError('cloud_unavailable','Account request failed: network or timeout error. Retry locally; do not start remote OAuth.');}
 }
 export interface OwnedHost {id:number;nickname:string;soul_uid:string;sex?:string;age?:number;karma_score?:number}
-export const SOUL_UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// PostgreSQL emits canonical hex UUIDs even when legacy md5-generated values
+// have arbitrary version/variant bits. Validate the wire shape, not their origin.
+export const SOUL_UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export async function ownedHosts(root:string,profile:string,runtime:RuntimeKind|undefined,options:{name?:string;hostId?:number;limit?:number;offset?:number},deps:{apiBase:string;fetch:typeof fetch}):Promise<{hosts:OwnedHost[];pagination:{total:number;limit:number;offset:number;has_more:boolean}}>{
  const access=await cloudAccountAccess(root,profile,runtime,deps.apiBase);await requireCurrentAccount(root,access);
  const params=new URLSearchParams({limit:String(options.limit??50),offset:String(options.offset??0)});
