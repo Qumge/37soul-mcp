@@ -73,6 +73,8 @@ export interface HostHookPayload {
   cwd?: string;
   prompt?: string;
   transcriptPath: string | null;
+  /** Native completion IDs from the hook payload; local RuntimeEvent provenance only. */
+  sourceTurnRefs?: string[];
 }
 
 export interface HostHookSpec {
@@ -81,6 +83,8 @@ export interface HostHookSpec {
   emitsRuntimeEvents: boolean;
   parsePayload(payload: Record<string, any>): HostHookPayload;
   completedTurnRefs?(transcript: string): string[];
+  /** Full native JSON response. Call only at injectionChannel; never equate output with model adoption. */
+  formatContext?(text: string, event: "SessionStart" | "UserPromptSubmit"): string;
 }
 
 export interface HostDoctorCheck {
