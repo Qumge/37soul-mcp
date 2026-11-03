@@ -118,4 +118,8 @@ export interface SessionSourceBoundary {
   starts_line: boolean;
   anchor_sha256: string;
 }
-export type BindingSnapshot = Binding & NativeSessionKey & {source_boundary?: SessionSourceBoundary};
+export type BindingSnapshot = Binding & NativeSessionKey & {
+  source_boundary?: SessionSourceBoundary;
+  /** Local sync/provenance archive; never a current native binding or a wire field. */
+  retired?: true;
+};

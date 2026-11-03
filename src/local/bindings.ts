@@ -489,11 +489,12 @@ export async function assertBindingCurrent(
   const store = await openStore(root, key.profile_id, { fs });
   try {
     const snap = await store.read();
-    const current = Object.values(snap.bindings).find((binding) => binding.binding_uid === bindingUid);
+    const current = snap.bindings[bindingKey(key)];
     if (!current) {
       throw new StoreError("unknown_binding", `no binding ${bindingUid} in profile ${key.profile_id}`);
     }
-    if (current.state !== "bound" || current.revision !== revision) {
+    if (current.retired === true || current.binding_uid !== bindingUid ||
+        bindingKey(current) !== bindingKey(key) || current.state !== "bound" || current.revision !== revision) {
       throw new StoreError(
         "stale_binding",
         `binding ${bindingUid} is ${current.state} at revision ${current.revision}; a result frozen at revision ${revision} cannot be applied`,
@@ -783,7 +784,7 @@ registerWriterCommand("connect_session", async ({root, request}) => {
     if (!soul || snap.device_id !== key.device_id) throw new StoreError("unknown_soul", "The requested Soul is not available in this local profile.");
     const consent = snap.consents[`${snap.cloud_device_uid}:${soulUid}`];
     if (!consent?.enabled || !consent.categories.includes("identity")) {
-      throw new StoreError("identity_not_authorized", `This Soul needs device consent. Run 37soul login --host ${soul.legacy_host_id}.`);
+      throw new StoreError("identity_not_authorized", "This Soul needs identity consent. Explicitly re-enable identity consent for this Soul and device, then retry 37soul connect.");
     }
     const k = bindingKey(key);
     const existing = snap.bindings[k];
@@ -792,7 +793,13 @@ registerWriterCommand("connect_session", async ({root, request}) => {
     if (!boundary) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message so its managed hook can report the native session; never choose another terminal by recency.");
     const next = {...createBinding(key, soulUid), source_boundary: boundary};
     const op = bindingOutboxOp(next, "bound", 0, []);
-    await store.transact(draft => { draft.bindings[k] = next; draft.outbox[op.operation_id] = op; });
+    await store.transact(draft => {
+      // Keep the old cloud state and frozen provenance resolvable for pending
+      // sync/ACKs, without leaving it at the native injection/extraction key.
+      if (existing) draft.bindings[`retired\0${existing.binding_uid}`] = { ...existing, retired: true };
+      draft.bindings[k] = next;
+      draft.outbox[op.operation_id] = op;
+    });
     return toBinding(next);
   } finally { await store.close(); }
 });

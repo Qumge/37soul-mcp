@@ -50,7 +50,7 @@ import {
   type StoreFs,
   type StoreSnapshot,
 } from "../local/store.js";
-import { assertBindingCurrent, resolveBinding } from "../local/bindings.js";
+import { assertBindingCurrent, bindingKey, resolveBinding } from "../local/bindings.js";
 import { resolveRoot } from "../local/profiles.js";
 import { registerWriterCommand, sendWriter, startWriter, type WriterResult } from "../local/writer.js";
 import {
@@ -278,6 +278,7 @@ async function enqueueExtractionDirect(
   const store = await openStore(root, binding.profile_id, { fs });
   try {
     const snap = await store.read();
+    if (!isCurrentBinding(snap, binding)) return { scheduled: false, reason: "stale_binding" };
     const existing = snap.extraction_watermarks[key];
     if (existing?.completed) return { scheduled: false, reason: "completed" };
     if (existing) {
@@ -314,7 +315,12 @@ async function claimExtractionDirect(
   const store = await openStore(root, binding.profile_id, { fs });
   try {
     const snap = await store.read();
+    if (!isCurrentBinding(snap, binding)) return { scheduled: false, reason: "stale_binding" };
     const existing = snap.extraction_watermarks[key];
+    if (existing && (existing.request.binding_uid !== binding.binding_uid ||
+        existing.request.binding_revision !== binding.revision || existing.request.soul_uid !== binding.soul_uid)) {
+      return { scheduled: false, reason: "stale_binding" };
+    }
     if (existing?.completed) return { scheduled: false, reason: "completed" };
     if (existing) {
       if (existing.attempts >= MAX_AUTO_ATTEMPTS) return { scheduled: false, reason: "budget_exhausted" };
@@ -734,8 +740,17 @@ export async function drainPendingExtractions(
   return stats;
 }
 
+/** Sync may enumerate retired records; extraction must use only the canonical key. */
+function isCurrentBinding(snap: StoreSnapshot, binding: BindingSnapshot): boolean {
+  const current = snap.bindings[bindingKey(binding)];
+  return binding.retired !== true && current !== undefined && current.retired !== true &&
+    bindingKey(current) === bindingKey(binding) && current.state === "bound" &&
+    current.binding_uid === binding.binding_uid && current.revision === binding.revision &&
+    current.soul_uid === binding.soul_uid && current.session_ref === binding.session_ref;
+}
+
 function findBindingByUid(snap: StoreSnapshot, bindingUid: string): BindingSnapshot | undefined {
-  return Object.values(snap.bindings).find((binding) => binding.binding_uid === bindingUid);
+  return Object.values(snap.bindings).find((binding) => binding.binding_uid === bindingUid && isCurrentBinding(snap, binding));
 }
 
 function rangeFromKeyAndRequest(key: string, request: ExtractionRequest): SourceRange {
