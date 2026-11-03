@@ -38,6 +38,7 @@ export const WRITER_COMMANDS = [
   "upload_avatar",
   "bind",
   "connect_session",
+  "select_cloud_soul",
   "detach",
   "review_asset",
   "delete_asset",

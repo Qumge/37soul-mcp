@@ -123,7 +123,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     const channel = host?.hook.injectionChannel ?? "none";
     const assetsForHint = resolveLocalAssetsProfileSync(root);
     const hint = assetsForHint && sessionId && sessionId !== "unknown" && sessionId.length <= 256 && (RUNTIME_KINDS as readonly string[]).includes(deps.agentKind)
-      ? `[37Soul local connection] Native session context (local only): --agent ${deps.agentKind} --session '${sessionId.replace(/'/g, "'\\''")}'. When the user chooses a website Soul, run 37soul connect --host <numeric-host-id> with these exact flags. Read identity through 37soul whoami; do not start remote MCP OAuth or expose credentials.`
+      ? `[37Soul local connection] Native session context (local only): --agent ${deps.agentKind} --session '${sessionId.replace(/'/g, "'\\''")}'. Use 37soul hosts to list owned Souls after account login. When the user chooses one, run 37soul connect --name <displayed-name> or --host <numeric-host-id> with these exact flags. Read identity through 37soul whoami only after selection; do not start remote MCP OAuth or expose credentials.`
       : "";
     let delivered = false;
     const deliver = (text: string) => {

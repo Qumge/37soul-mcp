@@ -60,3 +60,28 @@ test('bundle: one local login powers identity read and exact-session attachment 
  assert.ok(binding.source_boundary.start_offset>0);
  assert.ok(!JSON.stringify(after.outbox).includes(transcript));
 });
+
+test('bundle: an account-only login can discover and connect a first Soul without a second login',async t=>{
+ const home=await mkdtemp(path.join(tmpdir(),'soul-bundle-account-'));t.after(()=>rm(home,{recursive:true,force:true}));
+ const token='SYNTHETIC-BUNDLE-ACCOUNT-TOKEN';const uid='10000000-0000-4000-8000-000000000277';let selected=false;const paths=[];
+ const consent={cloud_device_uid:'cloud-device',soul_uid:uid,revision:1,enabled:true,categories:['identity','relationship','experience']};
+ const role={id:277,nickname:'Sophia Ramirez',soul_uid:uid};
+ const soul={soul_uid:uid,legacy_host_id:277,identity_revision:1,state:'active',identity:{name:'Sophia Ramirez',character:'Curious and thoughtful.',greeting:'',description:''}};
+ const server=createServer((request,response)=>{
+  request.resume();const u=new URL(request.url,'http://localhost');paths.push({path:u.pathname,method:request.method});
+  assert.equal(request.headers.authorization,`Bearer ${token}`);let body;
+  if(u.pathname==='/api/v1/me/hosts')body={hosts:[role],pagination:{total:1,limit:50,offset:0,has_more:false}};
+  else if(u.pathname==='/api/v1/me/hosts/277/connection'&&request.method==='POST'){selected=true;body={protocol:'soul-assets/v1',host_id:277,soul_uid:uid,consent,replay_from:'0'};}
+  else if(u.pathname.includes('/soul_sync/'))body={protocol:'soul-assets/v1',events:selected?[{event_uid:'c1',object_type:'consent',object:consent},{event_uid:'s1',object_type:'soul',object:soul}]:[],next_cursor:'2',has_more:false};
+  else if(u.pathname==='/api/v1/me/hosts/277/soul'&&selected)body={you_are:'You are Sophia Ramirez',host:{id:277,nickname:'Sophia Ramirez'}};
+  else{response.writeHead(404);response.end('{}');return;}
+  response.writeHead(200,{'Content-Type':'application/json'});response.end(JSON.stringify(body));
+ });server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve);}));
+ const base=`http://127.0.0.1:${server.address().port}`;const root=path.join(home,'.37soul');await mkdir(path.join(root,'profiles','p1'),{recursive:true});await writeFile(path.join(root,'profiles','p1','device.json'),JSON.stringify({device_id:'device'}));const store=await openStore(root,'p1');await store.transact(d=>{d.owner_id='owner';d.cloud_issuer=base;d.cloud_device_uid='cloud-device';});await store.close();
+ await writeFile(path.join(root,'config.json'),JSON.stringify({api_base_url:base,machine_id:'machine',active_profile_id:'p1',tokens:{},credentials:[{issuer:base,profile_id:'p1',owner_id:'owner',cloud_device_uid:'cloud-device',runtime_kind:'claude-code',token}]}));await writeFile(path.join(root,'accounts.json'),JSON.stringify({owner:{profile_id:'p1',cloud_issuer:base,default_soul_uid:null,soul_sync_mode:'assets_only'}}));
+ const transcript=path.join(home,'native.jsonl');await writeFile(transcript,'history before role selection\n');await captureSourcePointer(root,'p1',randomUUID(),{runtime_kind:'claude-code',native_session_id:'exact-session',path:transcript,captured_at:new Date().toISOString()});
+ const stage=path.join(home,'standalone');await mkdir(stage);await copyFile(new URL('../dist/bundle/cli.js',import.meta.url),path.join(stage,'cli.js'));await writeFile(path.join(stage,'package.json'),JSON.stringify({type:'module'}));const options={cwd:stage,env:{...process.env,SOUL37_HOME:home,SOUL37_BASE_URL:base},timeout:15000};
+ const directory=await exec(process.execPath,[path.join(stage,'cli.js'),'hosts'],options);assert.equal(JSON.parse(directory.stdout).hosts[0].id,277);assert.equal(selected,false);
+ const connected=await exec(process.execPath,[path.join(stage,'cli.js'),'connect','--name','Sophia Ramirez','--agent','claude-code','--session','exact-session'],options);const result=JSON.parse(connected.stdout);assert.equal(result.host.id,277);assert.equal(result.connection.state,'attached');assert.ok(!connected.stdout.includes(token));assert.ok(!paths.some(row=>/oauth|device_codes|tokens|\/mcp/.test(row.path)));assert.equal(paths.filter(row=>row.path.endsWith('/connection')).length,1);
+ const after=JSON.parse(await readFile(path.join(root,'profiles','p1','snapshot.json'),'utf8'));assert.deepEqual(Object.keys(after.souls),[uid]);assert.equal(Object.values(after.bindings)[0].soul_uid,uid);assert.ok(!JSON.stringify(after.outbox).includes(transcript));
+});

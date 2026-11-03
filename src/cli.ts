@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import {ownedHosts} from './local/cloud-account.js';
+import {configureCloudSelectionHttp} from './local/cloud-selection.js';
+import {sessionSourceBoundary} from './agentd/source-index.js';
 import {readLocalIdentity} from './local/agent-connect.js';
 import {readAvatarFile} from './local/avatars.js';
 /**
@@ -76,9 +79,10 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul resume                                  resume capture
   37soul uninstall                               remove managed hooks/service; keep profiles and raw archives
 
-  37soul login [--host <id>] [--profile <id>]                  device login; merge the local anonymous profile
+  37soul login [--host <id>] [--profile <id>]                  login to your account; choose a Soul later in your Agent
+  37soul hosts [--name <name>] [--limit <n>] [--offset <n>]   list your owned Souls
   37soul whoami --host <id> [--agent <kind>]    read identity using this local login
-  37soul connect --host <id> --agent <kind> --session <native-id>   attach this session
+  37soul connect --name <name>|--host <id> --agent <kind> --session <native-id>   attach this session
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
   37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
                                                 profile commands default to the valid active profile
@@ -123,6 +127,7 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
   // Composition root: the sync writer command's transport is injected here (and in
   // startAgentd), never read from `globalThis.fetch` inside the writer.
   configureSyncHttp(globalThis.fetch as HttpFetch);
+  configureCloudSelectionHttp(globalThis.fetch);
   switch (command) {
     case "install": {
       const agents = flagValue(rest, "--agents")?.split(",").map((s) => s.trim()).filter(Boolean);
@@ -219,6 +224,8 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       return bindCommand(root, rest, io, false);
     case "detach":
       return bindCommand(root, rest, io, true);
+    case "hosts":
+      return hostsCommand(root, rest, io, deps);
     case "whoami":
     case "connect":
       return localIdentityCommand(root, rest, io, deps, command === "connect");
@@ -315,6 +322,7 @@ export async function startAgentd(io: CliIO, home: string): Promise<number> {
   // never fail the user's working session. The writer's sync transport is injected
   // here (the agentd process hosts the writer), never read from `globalThis.fetch`.
   configureSyncHttp(globalThis.fetch as HttpFetch);
+  configureCloudSelectionHttp(globalThis.fetch);
   const writer = await startWriter(root).catch((error) => {
     logger.error(`writer failed to start: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -741,56 +749,82 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
   return 2;
 }
 
+async function hostsCommand(root: string, rest: string[], io: CliIO, deps: {apiBase: string; fetch: typeof fetch}): Promise<number> {
+  const runtime = flagValue(rest, "--agent");
+  const limitArg = flagValue(rest, "--limit") ?? "50";
+  const offsetArg = flagValue(rest, "--offset") ?? "0";
+  if ((rest.includes("--agent") && !(RUNTIME_KINDS as readonly string[]).includes(runtime ?? "")) || !/^\d+$/.test(limitArg) || !/^\d+$/.test(offsetArg) || Number(limitArg) < 1 || Number(limitArg) > 50 || !Number.isSafeInteger(Number(offsetArg)) || (rest.includes("--name") && !flagValue(rest, "--name")?.trim())) {
+    io.stderr("Use a supported --agent, --limit 1..50, --offset >=0, and a nonempty --name.\n"); return 2;
+  }
+  const profile = await profileIdFromArgs(root, rest, io); if (profile === null) return 1;
+  try { io.stdout(`${JSON.stringify(await ownedHosts(root, profile, runtime as RuntimeKind | undefined, {name: flagValue(rest, "--name"), limit: Number(limitArg), offset: Number(offsetArg)}, deps), null, 2)}\n`); return 0; }
+  catch (error) { io.stderr(`${error instanceof StoreError ? error.message : "Could not list owned Souls: network or timeout error."}\n`); return 1; }
+}
+
 async function localIdentityCommand(root: string, rest: string[], io: CliIO, deps: {apiBase: string; fetch: typeof fetch}, attach: boolean): Promise<number> {
   const hostArg = flagValue(rest, "--host");
-  const hostId = hostArg && /^[1-9]\d*$/.test(hostArg) ? Number(hostArg) : NaN;
+  let hostId = hostArg && /^[1-9]\d*$/.test(hostArg) ? Number(hostArg) : NaN;
+  const name = flagValue(rest, "--name")?.trim();
   const runtime = flagValue(rest, "--agent");
   const session = flagValue(rest, "--session");
-  if (!Number.isSafeInteger(hostId) || (rest.includes("--agent") && !(RUNTIME_KINDS as readonly string[]).includes(runtime ?? ""))) {
-    io.stderr("--host requires a positive integer; --agent must name a supported runtime\n"); return 2;
+  if ((rest.includes("--agent") && !(RUNTIME_KINDS as readonly string[]).includes(runtime ?? "")) || (attach && name && rest.includes("--host")) || (!Number.isSafeInteger(hostId) && !(attach && name && !rest.includes("--host")))) {
+    io.stderr("Choose a positive --host, or connect --name with an exact displayed name; --agent must be a supported runtime.\n"); return 2;
   }
   if (attach && (!runtime || !session || session.startsWith("--"))) {
     io.stderr("connect requires --agent and --session from the current native hook context; never guess another session\n"); return 2;
   }
-  const profile = await profileIdFromArgs(root, rest, io);
-  if (profile === null) return 1;
+  const profile = await profileIdFromArgs(root, rest, io); if (profile === null) return 1;
+  const requireActive = async () => {
+    const latest = await loadConfig(root);
+    if ((latest?.active_profile_id !== undefined && latest.active_profile_id !== profile) || resolveLocalAssetsProfileSync(root)?.profile_id !== profile) throw new StoreError("active_profile_changed", "The active account/profile changed. Retry the connection using the current native hook context.");
+  };
   try {
+    let directoryTarget: {id:number;soul_uid:string} | undefined;
     if (attach) {
-      const store = await openStore(root, profile);
-      let present: boolean;
-      try { present = Object.values((await store.read()).souls).some(soul => soul.legacy_host_id === hostId); }
-      finally { await store.close(); }
-      if (!present) await runSync(root, profile);
+      await requireActive();
+      const deviceId = await readProfileDeviceId(root, profile);
+      const source = await sessionSourceBoundary(root, {profile_id: profile,device_id: deviceId,runtime_kind: runtime as RuntimeKind,native_session_id: session!});
+      if (!source) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message; never guess a different terminal.");
+      if (name) {
+        const directory = await ownedHosts(root, profile, runtime as RuntimeKind, {name,limit:2}, deps);
+        const matches = directory.hosts.filter(host => host.nickname.trim().toLowerCase() === name.toLowerCase());
+        if (matches.length === 0) throw new StoreError("unknown_soul", "No owned Soul with that name was found. List 37soul hosts; do not create a replacement.");
+        if (matches.length !== 1 || directory.pagination.total !== 1 || directory.pagination.has_more) throw new StoreError("ambiguous_soul", `Multiple Souls share that name. Ask which Host ID: ${matches.map(host=>host.id).join(", ")}.`);
+        hostId = matches[0].id; directoryTarget = matches[0];
+      }
+      const store = await openStore(root, profile); let ready: boolean;
+      try {
+        const snap = await store.read();const soul = Object.values(snap.souls).find(s=>s.legacy_host_id===hostId);const consent = soul ? snap.consents[`${snap.cloud_device_uid}:${soul.soul_uid}`] : undefined;
+        if (consent && (!consent.enabled || !consent.categories.includes("identity"))) throw new StoreError("soul_consent_revoked", "This Soul has disabled consent; re-enable it explicitly before reconnecting.");
+        ready = Boolean(soul && consent?.enabled && consent.categories.includes("identity"));
+      } finally { await store.close(); }
+      if (!ready) {
+        let target = directoryTarget;
+        if (!target) {
+          const directory = await ownedHosts(root, profile, runtime as RuntimeKind, {hostId,limit:2}, deps);
+          target = directory.hosts.find(host=>host.id===hostId);
+          if (directory.pagination.total !== 1) target = undefined;
+        }
+        if (!target) throw new StoreError("unknown_soul", "No owned Soul with this Host ID was found. Do not create a replacement.");
+        const selected = await runWriterCommand(root, profile, "select_cloud_soul", {host_id:hostId,soul_uid:target.soul_uid,runtime_kind:runtime});
+        if (!selected.ok) throw new StoreError(selected.error.code, selected.error.message);
+        const synced = await runSync(root, profile);
+        if (synced.error) throw new StoreError("restore_pending", "This Soul was selected but its download is pending. Retry 37soul connect; account login is already complete.");
+      }
     }
     const identity = await readLocalIdentity(root, profile, hostId, runtime as RuntimeKind | undefined, deps);
-    const requireActive = async () => {
-      const latest = await loadConfig(root);
-      if ((latest?.active_profile_id !== undefined && latest.active_profile_id !== profile) || resolveLocalAssetsProfileSync(root)?.profile_id !== profile) {
-        throw new StoreError("active_profile_changed", "The active account/profile changed. Retry the connection using the current native hook context.");
-      }
-    };
     if (attach || !rest.includes("--profile")) await requireActive();
     if (attach) {
-      let snap;
-      const read = async () => { const store = await openStore(root, profile); try { return await store.read(); } finally { await store.close(); } };
-      snap = await read();
-      if (!Object.values(snap.souls).some(s => s.legacy_host_id === hostId)) { await runSync(root, profile); snap = await read(); }
-      const soul = Object.values(snap.souls).find(s => s.legacy_host_id === hostId);
-      if (!soul) throw new Error(`Selected Soul is not restored. Run 37soul login --host ${hostId} and approve that Soul, then retry.`);
-      const result = await runWriterCommand(root, profile, "connect_session", {
-        device_id: snap.device_id, runtime_kind: runtime, native_session_id: session, soul_uid: soul.soul_uid,
-      });
-      if (!result.ok) throw new StoreError(result.error.code, result.error.message);
-      await requireActive();
-      identity.connection = {...(result.result as Record<string, unknown>), state: "attached"};
+      const store = await openStore(root, profile);let snap;
+      try {snap=await store.read();} finally {await store.close();}
+      const soul = Object.values(snap.souls).find(s=>s.legacy_host_id===hostId);
+      if (!soul) throw new StoreError("restore_pending", "The selected Soul has not downloaded. Retry 37soul connect; do not log in again.");
+      const result = await runWriterCommand(root, profile, "connect_session", {device_id:snap.device_id,runtime_kind:runtime,native_session_id:session,soul_uid:soul.soul_uid});
+      if (!result.ok) throw new StoreError(result.error.code,result.error.message);
+      await requireActive();identity.connection={...(result.result as Record<string,unknown>),state:"attached"};
     }
-    io.stdout(`${JSON.stringify(identity, null, 2)}\n`);
-    return 0;
-  } catch (error) {
-    // Only our typed errors carry safe messages. Network/response bodies never do.
-    const message = error instanceof StoreError ? error.message : `Selected Soul is not restored. Run 37soul login --host ${hostId} and retry.`;
-    io.stderr(`${message}\n`); return 1;
-  }
+    io.stdout(`${JSON.stringify(identity,null,2)}\n`);return 0;
+  } catch(error) {io.stderr(`${error instanceof StoreError ? error.message : "Could not connect the selected Soul. Retry locally without remote OAuth."}\n`);return 1;}
 }
 
 export async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {
@@ -1018,7 +1052,7 @@ export async function loginCommand(
     try { recoveryIssuer = requireCloudIssuer(deps.apiBase); }
     catch { return 1; }
     const recoveryId = `reconnect-${randomUUID()}`;
-    io.stderr(`Existing local profiles will be kept unchanged. Reconnecting to ${recoveryIssuer} uses a separate profile; old records will not be copied or merged. Select your website Soul in the browser to restore its cloud assets.\n`);
+    io.stderr(`Existing local profiles will be kept unchanged. Reconnecting to ${recoveryIssuer} uses a separate profile; old records will not be copied or merged. After account login, choose your Soul in the local Agent to restore its authorized assets.\n`);
     if (!io.confirm) {
       io.stderr(`To continue explicitly, run: 37soul login${hostId !== undefined ? ` --host ${hostId}` : ""} --profile ${recoveryId}\n`);
       return 1;
@@ -1155,7 +1189,7 @@ export async function loginCommand(
     io.stderr(`Account authorized, but the requested Soul ${hostId} is not ready. Run 37soul login --host ${hostId}, approve that Soul and verify Soul restored before connecting the Agent.\n`);
     return 1;
   }
-  if (!login.default_soul_uid) io.stderr("Account login completed; no Soul was selected. Run 37soul login --host <id> to connect a website Soul.\n");
+  if (!login.default_soul_uid) io.stdout("Account ready. Choose any of your Souls in your Agent; 37soul hosts lists the available roles. No Soul was selected during login.\n");
   return 0;
 }
 

@@ -84,15 +84,25 @@ To preview the changes without writing them:
 curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 ```
 
-### Step 2: Choose your Soul
-
-#### Already have a Soul on the website? Restore it
+### Step 2: Log in to your account, then choose in your Agent
 
 ```bash
 37soul login
 ```
 
-Open the authorization link, sign in to your own account, verify the short code, select your existing Soul, review the sync consent, and approve the device. Wait until the terminal shows `Soul restored:`. If you did not select a Soul, only account authorization is complete. Use `37soul login --host HOST_ID` from its connection page to preselect and require that Soul; connection is ready only after the download succeeds. Reinstalling with a valid account reuses its local profile.
+Open the link, verify the short code and approve this computer. You do not choose a
+Soul during account login. It gives this device access to your owned-Soul directory.
+Then tell your local Agent: **“Connect Sophia Ramirez.”** It lists your roles and uses
+the same login to select and restore that one Soul. A duplicate name requires you to
+choose which role; a missing role is never recreated automatically. Switching to
+another owned Soul reuses this login. Raw conversations stay local.
+
+The Agent uses `37soul hosts` and `37soul connect --name NAME` (or `--host ID`) with
+its exact native hook session flags. Only `connection.state: attached` confirms that
+session's attachment. `whoami` reads identity after selection. Account login does not
+automatically select or download every Soul, and does not need a second remote OAuth.
+Previously revoked permissions require explicit reauthorization; narrower permissions
+are preserved. Reinstalling with a valid account reuses its existing local profile.
 
 #### Want to create a Soul locally first? No account needed
 

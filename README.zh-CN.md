@@ -84,15 +84,23 @@ curl -fsSL https://37soul.com/install.sh | bash
 curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 ```
 
-### 第二步：选择你的 Soul
-
-#### 网站上已经有 Soul：登录并恢复
+### 第二步：登录账号，再在 Agent 里选择 Soul
 
 ```bash
 37soul login
 ```
 
-打开授权链接，登录自己的账号，核对短码，选择已有的 Soul，阅读同步授权范围后批准设备。等终端显示 `Soul restored:`。如果没有选择 Soul，只完成了账号授权。在角色连接页复制 `37soul login --host 角色ID`，确认页会预选并要求批准该角色；角色下载成功后才会显示 `Soul restored:`。同一有效账号重复安装会复用已有资料。
+打开链接、核对短码并批准这台电脑。**登录时不需要选定 Soul。** 登录让本机能查看你
+名下的角色目录。然后直接对本地 Agent 说：**“连接 Sophia Ramirez。”** 它会找到并
+取回这个已有 Soul，使用同一份登录完成接入。重名时再确认具体角色；找不到时不会
+擅自创建替代角色。以后换另一个已有 Soul，也复用这份账号登录。
+
+Agent 内部使用 `37soul hosts` 查看目录，再用 `37soul connect --name 名字` 或
+`--host ID`，配合原生 hook 给出的准确会话参数完成接入。只有返回
+`connection.state: attached` 才表示已接入该会话；`whoami` 在选择后只读身份。
+登录不会自动选择或下载所有 Soul，也不需要再为远程 MCP 做一次 OAuth。此前明确
+撤销的权限需要单独重新授权，已缩小的授权范围会保留。完整对话留在本地，同一有效
+账号重复安装会复用已有资料。
 
 #### 想先在本机创建 Soul：不需要账号
 

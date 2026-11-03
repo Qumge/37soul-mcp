@@ -15,13 +15,12 @@ export async function readLocalIdentity(root: string, profileId: string, hostId:
     try {
       const snap = await store.read();
       assertProfileCloudIssuer(snap, base, await readAccountsIndex(root));
+      const credential = credentialForRuntime(selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid, base), runtime);
+      if (!credential) throw new StoreError('login_required', 'No credential for this account/server/runtime. Run 37soul login, then choose a Soul in your Agent.');
       const soul = Object.values(snap.souls).find(candidate => candidate.legacy_host_id === hostId);
       const consent = soul ? snap.consents[`${snap.cloud_device_uid}:${soul.soul_uid}`] : undefined;
-      if (!soul || !consent?.enabled || !consent.categories.includes("identity")) {
-        throw new StoreError("identity_not_authorized", `This Soul needs restored identity and device consent. Run 37soul login --host ${hostId}.`);
-      }
-      const credential = credentialForRuntime(selectCredentials(config, profileId, snap.owner_id, snap.cloud_device_uid, base), runtime);
-      if (!credential) throw new StoreError('login_required', `No credential for this account/server/runtime. Run 37soul login --host ${hostId}.`);
+      if (!soul || !consent) throw new StoreError("soul_not_selected", `This Soul is not connected yet. Use 37soul connect --host ${hostId} with the native session flags; your account login can be reused.`);
+      if (!consent.enabled || !consent.categories.includes("identity")) throw new StoreError("identity_not_authorized", 'This Soul has revoked or disabled identity consent. Re-enable it explicitly; do not repeat account login as a role selection.');
       return {token: credential.token, owner: snap.owner_id, device: snap.cloud_device_uid, soul: soul.soul_uid, categories: [...consent.categories]};
     } finally { await store.close(); }
   };
@@ -35,7 +34,8 @@ export async function readLocalIdentity(root: string, profileId: string, hostId:
     });
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      if (response.status === 401 || response.status === 403) throw new StoreError('login_required', `Connection needs authorization. Run 37soul login --host ${hostId}.`);
+      if (response.status === 401) throw new StoreError('login_required', 'Account credential expired or revoked. Run 37soul login.');
+      if (response.status === 403) throw new StoreError('identity_not_authorized', 'This Soul has revoked or disabled consent. Re-enable it explicitly; do not change to remote OAuth.');
       throw new StoreError('identity_unavailable', `Could not read the selected Soul (HTTP ${response.status}).`);
     }
     body = await response.json();
