@@ -37,7 +37,7 @@ import type {
   SourceRange,
 } from "../adapters/types.js";
 import { contentDigest, type AssetSource, type ProposedAsset } from "../assets/protocol.js";
-import { classifyProposalState, validateProposedAsset } from "../assets/validation.js";
+import { VALIDATION_REJECTION_REASONS, ValidationError, type ValidationRejectionCounts, classifyProposalState, validateProposedAsset } from "../assets/validation.js";
 import { captureSourcePointer, isSourceWindowIdentity, loadSourcePointer, pendingSourceCaptures, readObservedSourceWindow, MAX_SOURCE_BYTES, sourceMatchesBoundary, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
 import { hostSpec } from "../hosts/registry.js";
 import type { ExtractionDiagnostic } from "../adapters/types.js";
@@ -196,7 +196,7 @@ export async function runExtraction(
   }
 
   const counts = await commitResult(root, job.binding, job.range, result.proposals);
-  if (counts) options.diagnostic?.(counts);
+  for (const diagnostic of counts) options.diagnostic?.(diagnostic);
   return result;
 }
 
@@ -251,14 +251,18 @@ async function commitResult(
   binding: BindingSnapshot,
   range: SourceRange,
   proposals: ProposedAsset[],
-): Promise<ExtractionDiagnostic | undefined> {
+): Promise<ExtractionDiagnostic[]> {
   const result = await sendWriterCommand(root, binding.profile_id, "commit_extraction", {
     binding,
     range,
     proposals,
   });
   if (!result.ok) throw new StoreError(result.error.code, result.error.message);
-  return (result.result as {diagnostic?: ExtractionDiagnostic})?.diagnostic;
+  const value = result.result as {diagnostic?: ExtractionDiagnostic; rejections?: ValidationRejectionCounts};
+  return [
+    ...(value?.diagnostic ? [value.diagnostic] : []),
+    ...(value?.rejections && Object.keys(value.rejections).length > 0 ? [{stage: "reject" as const, reasons: value.rejections}] : []),
+  ];
 }
 
 async function failExtraction(
@@ -383,7 +387,7 @@ async function commitExtraction(
   range: SourceRange,
   proposals: ProposedAsset[],
   fs: StoreFs,
-): Promise<{ committed: boolean; reason?: string; diagnostic?: ExtractionDiagnostic }> {
+): Promise<{ committed: boolean; reason?: string; diagnostic?: ExtractionDiagnostic; rejections?: ValidationRejectionCounts }> {
   const key = watermarkKey(binding, range);
 
   let current = true;
@@ -406,13 +410,16 @@ async function commitExtraction(
     const snap = await store.read();
     const assets: LocalAsset[] = [];
     const ops: OutboxOperation[] = [];
+    const rejections: ValidationRejectionCounts = {};
 
     for (const raw of proposals) {
       let proposal: ProposedAsset;
       try {
         proposal = validateProposedAsset(raw);
-      } catch {
-        continue; // a malformed proposal is dropped locally, never uploaded
+      } catch (error) {
+        const reason = error instanceof ValidationError && VALIDATION_REJECTION_REASONS.includes(error.reason) ? error.reason : "unknown";
+        rejections[reason] = (rejections[reason] ?? 0) + 1;
+        continue; // preserve rejection policy; only fixed-label counts may leave here
       }
       const blockedByTombstone = tombstoneHit(snap, proposal);
       const state = classifyProposalState(proposal, { blockedByTombstone });
@@ -434,7 +441,7 @@ async function commitExtraction(
         request: wm?.request ?? freezeRequest(binding, range, randomUUID()),
       };
     });
-    return { committed: true, diagnostic: {stage: "commit", proposals_received: proposals.length, proposals_accepted: assets.length, proposals_rejected: proposals.length - assets.length, proposals_queued: ops.length} };
+    return { committed: true, rejections, diagnostic: {stage: "commit", proposals_received: proposals.length, proposals_accepted: assets.length, proposals_rejected: proposals.length - assets.length, proposals_queued: ops.length} };
   } finally {
     await store.close();
   }

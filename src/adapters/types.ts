@@ -7,6 +7,7 @@
  * the frozen ExtractionRequest / RuntimeProbe shapes. The source body itself is
  * read by the adapter's own local reader, not passed through these types.
  */
+import type { ValidationRejectionCounts } from "../assets/validation.js";
 import type { Binding, ContextBundle, ProposedAsset, RuntimeKind } from "../assets/protocol.js";
 
 /** Local binding key: never sent to the cloud (native_session_id stays local). */
@@ -101,6 +102,7 @@ export type NativeInvoker = (
 export type ExtractionDiagnostic =
   | {stage: "source"; user_messages: number; assistant_messages: number; tool_messages: number}
   | {stage: "parse"; proposals_received: number; proposals_parsed: number; proposals_dropped: number}
+  | {stage: "reject"; reasons: ValidationRejectionCounts}
   | {stage: "commit"; proposals_received: number; proposals_accepted: number; proposals_rejected: number; proposals_queued: number};
 
 export interface AdapterDeps {
