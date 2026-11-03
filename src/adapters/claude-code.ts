@@ -37,6 +37,7 @@ import type {
   Sensitivity,
   Verification,
 } from "../assets/protocol.js";
+import { LIMITS } from "../assets/protocol.js";
 import { isSkippedRecord, summarizeToolInput } from "../agentd/parsers/claude-code.js";
 import { serializeSourceTurn, type TurnMessage } from "./source-turn.js";
 
@@ -206,32 +207,51 @@ function contentText(content: unknown): string {
 
 /** The native invocation for extraction: structured JSON output, prompt on stdin.
  *  Exported so the "invoked only via deps.invoke" invariant stays auditable. */
-/** The strict output shape used by both the prompt and Claude's --json-schema. */
+/** Full local JSON Schema follows the same per-kind bounds as the wire validator.
+ * Keep experience content at 4000: the relationship limit must not narrow it.
+ */
+function proposalOutputSchema(kind: "relationship" | "experience") {
+  const contentMax = kind === "relationship" ? LIMITS.relationshipContentMaxCodePoints : LIMITS.experienceContentMaxCodePoints;
+  return {
+    type: "object",
+    properties: {
+      kind: {type: "string", enum: [kind]},
+      trait: {type: "string", enum: kind === "experience" ? ["fact"] : ["fact", "event", "preference", "promise"]},
+      content: {type: "string", maxLength: contentMax, description: `${kind} content: at most ${contentMax} Unicode code points. Faithfully summarize the durable memory concisely.`},
+      applicability: {type: "string", maxLength: LIMITS.applicabilityMaxCodePoints, description: `Applicability: at most ${LIMITS.applicabilityMaxCodePoints} Unicode code points.`},
+      tags: {
+        type: "array", maxItems: LIMITS.tagsMax,
+        description: `At most ${LIMITS.tagsMax} tags; each tag at most ${LIMITS.tagMaxCodePoints} Unicode code points.`,
+        items: {type: "string", maxLength: LIMITS.tagMaxCodePoints, description: `At most ${LIMITS.tagMaxCodePoints} Unicode code points per tag.`},
+      },
+      evidence: {type: "string", enum: ["explicit_user_statement", "inference", "observed_result"]},
+      verification: {type: "string", enum: ["unverified", "confirmed"]},
+      sensitivity: {type: "string", enum: ["normal", "sensitive"]},
+    },
+    required: ["kind", "trait", "content", "applicability", "tags", "evidence", "verification", "sensitivity"],
+    additionalProperties: false,
+  } as const;
+}
+
 export const EXTRACTION_OUTPUT_SCHEMA = {
   type: "object",
-  properties: {
-    proposals: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          kind: { type: "string", enum: ["relationship", "experience"] },
-          trait: { type: "string", enum: ["fact", "event", "preference", "promise"] },
-          content: { type: "string" },
-          applicability: { type: "string" },
-          tags: { type: "array", items: { type: "string" } },
-          evidence: { type: "string", enum: ["explicit_user_statement", "inference", "observed_result"] },
-          verification: { type: "string", enum: ["unverified", "confirmed"] },
-          sensitivity: { type: "string", enum: ["normal", "sensitive"] },
-        },
-        required: ["kind", "trait", "content", "applicability", "tags", "evidence", "verification", "sensitivity"],
-        additionalProperties: false,
-      },
-    },
-  },
+  properties: {proposals: {type: "array", items: {anyOf: [proposalOutputSchema("relationship"), proposalOutputSchema("experience")]}}},
   required: ["proposals"],
   additionalProperties: false,
 } as const;
+
+/** Claude documents maxLength/maxItems as unsupported by its structured-output
+ * API. As its SDK helpers do, retain these requirements in field descriptions
+ * for the model. The shared prompt communicates the limits and the unchanged
+ * wire validator enforces them. Never claim native constrained decoding guarantees these lengths.
+ * https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
+ */
+function nativeOutputSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(nativeOutputSchema);
+  if (schema === null || typeof schema !== "object") return schema;
+  return Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "maxLength" && key !== "maxItems").map(([key, value]) => [key, nativeOutputSchema(value)]));
+}
+const CLAUDE_EXTRACTION_OUTPUT_SCHEMA = nativeOutputSchema(EXTRACTION_OUTPUT_SCHEMA);
 
 export function buildExtractionInvocation(
   _request: ExtractionRequest,
@@ -243,6 +263,10 @@ export function buildExtractionInvocation(
     '"trait" ("fact"|"event"|"preference"|"promise"), "content", "applicability", "tags" (array of strings),',
     '"evidence" ("explicit_user_statement"|"inference"|"observed_result"), "verification" ("unverified"|"confirmed"),',
     '"sensitivity" ("normal"|"sensitive"). Do not include a "source": the client pins it locally.',
+    `Hard wire limits: relationship content at most ${LIMITS.relationshipContentMaxCodePoints} Unicode code points; experience content at most ${LIMITS.experienceContentMaxCodePoints} Unicode code points. Experience assets use trait "fact".`,
+    `Applicability at most ${LIMITS.applicabilityMaxCodePoints} Unicode code points; tags at most ${LIMITS.tagsMax} items, each at most ${LIMITS.tagMaxCodePoints} Unicode code points. Count Unicode code points, not bytes or UTF-16 code units.`,
+    'Faithfully summarize each durable memory into a concise statement that fits its kind-specific limit. Do not pad it with explanations or examples.',
+    'Before returning, verify all field lengths and tag counts fit these limits. If a memory cannot be represented faithfully within them, omit that proposal.',
     'Classify a stable, explicitly stated user preference about how they want to be answered or worked with as kind "relationship", trait "preference".',
     'Assistant suggestions are context, not user preferences, unless the user explicitly confirms them.',
     'The completed turn is one JSON object with format "37soul-source-turn/v1"; "messages" keeps every content item as {source, kind, text} where source is "user", "assistant" or "tool".',
@@ -265,7 +289,7 @@ export function buildExtractionInvocation(
       "--tools",
       "",
       "--json-schema",
-      JSON.stringify(EXTRACTION_OUTPUT_SCHEMA),
+      JSON.stringify(CLAUDE_EXTRACTION_OUTPUT_SCHEMA),
       "--no-session-persistence",
     ],
     input,
