@@ -134,6 +134,15 @@ The CLI keeps a managed copy of the photo, so moving or deleting the original do
 
 Each host still needs working model authentication or configuration. 37Soul does not supply or automatically replace those credentials.
 
+A new session binds to exactly one Soul: this host's default if you set one, otherwise the account default — and if the machine has only one Soul, that one. If you have several Souls and want this host to use a particular one, select it before opening the session:
+
+```bash
+37soul soul list
+37soul soul select <soul_uid> --agent claude-code
+```
+
+Omit `--agent` to change the account default. Once the Agent is open, tell it which Soul to use, or ask it to run `whoami` to confirm. A session that has already started cannot switch Souls in place — telling the Agent to switch does not change it either; select the Soul as above and open a new session.
+
 ### Step 4: Teach a preference and check it
 
 ```bash

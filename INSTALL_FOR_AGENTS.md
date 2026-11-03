@@ -97,6 +97,19 @@ Do not bypass host approval or fabricate trust records.
 | Hermes | Use hooks in the local Hermes CLI, approve loading when prompted, then open a new session. A gateway-only setup is not a substitute. |
 | Pi | Restart to load the managed extension; approve it if the host restricts extensions, then open a new session. |
 
+Each new session binds to one Soul: this host's default if set, otherwise the account
+default, otherwise the only local Soul. If the human names a Soul, select it for this
+host before the session opens:
+
+```bash
+37soul soul list
+37soul soul select <soul_uid> --agent <kind>
+```
+
+Omit `--agent` to change the account default. Do not guess when several Souls exist and
+the human did not say which one — ask. A session that has already started cannot switch
+Souls in place: tell the human to open a new session after the selection.
+
 ## 4. Optional cloud sync and website corrections
 
 For a locally created Soul, only after the human agrees to publication and sync:
