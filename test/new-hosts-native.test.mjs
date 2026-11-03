@@ -219,12 +219,12 @@ test('new hosts: native injection output never mislabels Cursor or Gemini Before
   assert.deepEqual(JSON.parse(cursor.formatContext('must not inject', 'UserPromptSubmit')), {});
 });
 
-test('new hosts: Gemini disabled managed hook names and commands remain disabled', async t => {
+test('new hosts: Gemini disabled managed hook names remain disabled', async t => {
   const f = await fixture(t, 'gemini-cli', { hooks: {} });
   await f.host.install.configure(f.deps, '');
   const doc = JSON.parse(await readFile(f.file, 'utf8'));
   const hook = doc.hooks.BeforeAgent[0].hooks[0];
-  for (const disabled of [hook.name, hook.command]) {
+  for (const disabled of [hook.name]) {
     doc.hooksConfig = { disabled: [disabled] };
     await writeFile(f.file, JSON.stringify(doc));
     await f.host.install.configure(f.deps, '');
@@ -261,3 +261,65 @@ for (const kind of kinds) {
     assert.equal(calls, 0);
   });
 }
+
+
+test('new hosts: Gemini reinstall preserves renamed and unnamed disabled identities across launcher updates', async t => {
+  for (const name of ['My local persona', undefined, '']) {
+    const f = await fixture(t, 'gemini-cli', { hooks: {} });
+    await f.host.install.configure(f.deps, '');
+    const doc = JSON.parse(await readFile(f.file, 'utf8'));
+    const hook = doc.hooks.BeforeAgent[0].hooks[0];
+    if (name === undefined) delete hook.name;
+    else hook.name = name;
+    const oldIdentity = hook.name || hook.command;
+    doc.hooksConfig = { disabled: ['keep-vendor-disabled', oldIdentity] };
+    await writeFile(f.file, JSON.stringify(doc));
+    // Keep the same logical hook disabled both on reinstall and on upgrade.
+    for (const launcher of [f.deps.launcher, '/new/runtime/bin/37soul']) {
+      const deps = { ...f.deps, launcher };
+      await f.host.install.configure(deps, '');
+      const updated = JSON.parse(await readFile(f.file, 'utf8'));
+      const hooks = updated.hooks.BeforeAgent.flatMap(group => group.hooks).filter(h => h.command.includes('37soul-managed:'));
+      assert.equal(hooks.length, 1);
+      const current = hooks[0];
+      assert.equal(current.name, name, 'user-chosen name/absence must survive reinstall');
+      assert.ok(updated.hooksConfig.disabled.includes(current.name || current.command), 'Gemini must still resolve the managed hook as disabled');
+      assert.ok(updated.hooksConfig.disabled.includes(oldIdentity), 'old disabled identity is user configuration');
+      assert.ok(updated.hooksConfig.disabled.includes('keep-vendor-disabled'));
+      const checks = await f.host.doctor({ ...deps, config: { launcher }, assetsMode: true });
+      const status = checks.find(c => c.name === 'gemini-cli: native hook configuration');
+      assert.equal(status.ok, false);
+      assert.match(status.detail, /disabled/);
+      const before = await readFile(f.file, 'utf8');
+      await f.host.install.configure(deps, '');
+      assert.equal(await readFile(f.file, 'utf8'), before, 'disabled identity migration must be idempotent');
+    }
+  }
+});
+
+test('new hosts: Gemini doctor matches exactly the native name-or-command disabled identity', async t => {
+  const f = await fixture(t, 'gemini-cli', { hooks: {} });
+  await f.host.install.configure(f.deps, '');
+  const doc = JSON.parse(await readFile(f.file, 'utf8'));
+  const hook = doc.hooks.BeforeAgent[0].hooks[0];
+  const originalName = hook.name;
+  for (const { name, disabled, expected } of [
+    { name: originalName, disabled: hook.command, expected: true },
+    { name: 'My local persona', disabled: hook.command, expected: true },
+    { name: 'My local persona', disabled: 'My local persona', expected: false },
+    { name: undefined, disabled: hook.command, expected: false },
+    { name: '', disabled: hook.command, expected: false },
+    { name: undefined, disabled: originalName, expected: true },
+  ]) {
+    if (name === undefined) delete hook.name;
+    else hook.name = name;
+    doc.hooksConfig = { disabled: [disabled] };
+    await writeFile(f.file, JSON.stringify(doc));
+    const before = await readFile(f.file, 'utf8');
+    const checks = await f.host.doctor({ ...f.deps, config: { launcher: f.deps.launcher }, assetsMode: true });
+    const status = checks.find(c => c.name === 'gemini-cli: native hook configuration');
+    assert.equal(status.ok, expected, JSON.stringify({ name, disabled }));
+    if (!expected) assert.match(status.detail, /disabled/);
+    assert.equal(await readFile(f.file, 'utf8'), before, 'doctor must not rewrite disabled identities');
+  }
+});

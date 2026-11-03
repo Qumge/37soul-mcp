@@ -91,7 +91,26 @@ export async function configureNativeHooks(deps: HostInstallDeps, spec: NativeHo
     document.hooks ??= {};
     if (spec.kind === "cursor") document.version ??= 1;
     for (const { event, entry } of subscriptions(deps, spec)) {
-      const list = withoutManaged(document.hooks[event.event] ?? [], spec, event);
+      const previous = document.hooks[event.event] ?? [];
+      if (spec.grouped) {
+        const own = previous.flatMap((group: any) => Array.isArray(group?.hooks) ? group.hooks : [])
+          .filter((hook: any) => managed(hook, spec, event));
+        if (own.length > 0) {
+          const hook = (entry as any).hooks[0];
+          // Gemini identifies hooks by name || command. Preserve user renames
+          // and deliberately unnamed hooks instead of assigning a new identity.
+          if (Object.hasOwn(own[0], "name")) hook.name = own[0].name;
+          else delete hook.name;
+          const disabled = document.hooksConfig?.disabled;
+          if (Array.isArray(disabled) && own.some((old: any) => disabled.includes(old.name || old.command))) {
+            const identity = hook.name || hook.command;
+            // An unnamed disabled command changes identity on launcher upgrades.
+            // Retain old/user entries and add only the new disabled identity.
+            if (!disabled.includes(identity)) disabled.push(identity);
+          }
+        }
+      }
+      const list = withoutManaged(previous, spec, event);
       document.hooks[event.event] = [...list, entry];
     }
     return JSON.stringify(document) !== before;
@@ -139,10 +158,12 @@ export async function doctorNativeHooks(deps: HostDoctorDeps, spec: NativeHookCo
     const document: unknown = JSON.parse(await readFile(file, "utf8"));
     validate(document, spec);
     const expected = subscriptions({ ...deps, launcher: deps.config.launcher }, spec);
-    const disabled = spec.kind === "gemini-cli" && (document.hooksConfig?.enabled === false || expected.some(({ entry }) => {
-      const hook = (entry as any).hooks[0];
-      return Array.isArray(document.hooksConfig?.disabled) &&
-        (document.hooksConfig.disabled.includes(hook.name) || document.hooksConfig.disabled.includes(hook.command));
+    const disabled = spec.kind === "gemini-cli" && (document.hooksConfig?.enabled === false || expected.some(({ event }) => {
+      const actual = document.hooks?.[event.event] ?? [];
+      const own = actual.flatMap((group: any) => Array.isArray(group?.hooks) ? group.hooks : [])
+        .filter((hook: any) => managed(hook, spec, event));
+      return Array.isArray(document.hooksConfig?.disabled) && own.some((hook: any) =>
+        document.hooksConfig.disabled.includes(hook.name || hook.command));
     }));
     current = !disabled && expected.every(({ event, entry }) => {
       const actual = document.hooks?.[event.event];
@@ -150,8 +171,7 @@ export async function doctorNativeHooks(deps: HostDoctorDeps, spec: NativeHookCo
       const flat = spec.grouped ? actual.flatMap(group => Array.isArray(group?.hooks) ? group.hooks : []) : actual;
       const wanted: any = spec.grouped ? (entry as any).hooks[0] : entry;
       const own = flat.filter(hook => managed(hook, spec, event));
-      return own.length === 1 && own[0].command === wanted.command && own[0].type === "command" &&
-        (!spec.grouped || own[0].name === wanted.name);
+      return own.length === 1 && own[0].command === wanted.command && own[0].type === "command";
     });
     detail = disabled ? "hooks disabled by user configuration; preserved unchanged" : current
       ? `Native subscriptions present at ${file}; configuration alone does not prove host loading or execution.`
