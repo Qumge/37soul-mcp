@@ -191,9 +191,9 @@ For a locally created Soul, log in and explicitly authorize the categories you w
 37soul sync
 ```
 
-Use the actual UID selected in Step 2. During login, do not select a different website Soul if your intent is to register this local one. Initial identity authorization registers its profile and photo together and **publishes its character profile on the website**; private chats and personal memories remain private. `--categories` replaces this device's complete authorization set for the Soul, rather than adding categories incrementally.
+Use the actual UID selected in Step 2. Account login only authenticates your account. Afterward, select this local Soul with `37soul soul select "$SOUL_UID"`, then use `37soul soul authorize` to authorize its registration and sync. Initial identity authorization registers its profile and photo together and **publishes its character profile on the website**; private chats and personal memories remain private. `--categories` replaces this device's complete authorization set for the Soul, rather than adding categories incrementally.
 
-On another computer, install the runtime and follow the existing-Soul login path to restore the same Soul. Only memories already synced from the first computer can arrive there. Existing website Souls with real photos do not need a new photo when restored.
+On another computer, install the runtime, log in to your account, and list owned Souls with `37soul hosts`. Have the Agent restore the same Soul using `37soul connect` with its exact native hook session flags. Only memories already synced from the first computer can arrive there. Existing website Souls with real photos do not need a new photo when restored.
 
 After editing an identity or memory on the website, run `37soul sync`, confirm there are no sync errors, and open a new host session. Background sync is periodic; content already loaded into an old session cannot be remotely withdrawn.
 
@@ -219,7 +219,7 @@ These commands pause, resume, and uninstall the local runtime. Uninstall removes
 | Command not found | Try `~/.local/bin/37soul status`, then add `~/.local/bin` to PATH. |
 | Background process is stopped or running another version | Reinstall through the same installer, then run `37soul doctor`. |
 | Host has not loaded or trusted the integration | Complete Step 3 and open a new session. Do not bypass host approval. |
-| Login cannot select a valid active profile | Run `37soul login` and review its reconnection confirmation. Existing local data stays separate and is not copied or merged. Select your website Soul in the browser. A noninteractive terminal prints a concrete separate-profile command instead. |
+| Login cannot select a valid active profile | Run `37soul login` and review its reconnection confirmation. Existing local data stays separate and is not copied or merged. After account approval, use `37soul hosts`, then have the Agent select the Soul with `37soul connect` and its exact native hook session flags. A noninteractive terminal prints a concrete separate-profile command instead. |
 | Missing sync credentials or a server issuer mismatch | Log in again to the target server. For a separate profile, use `37soul login --profile new-profile-name`. |
 | Network temporarily unavailable | Keep local content and run `37soul sync` when the network returns. Do not delete profiles or queues to reset them. |
 | No long-term memories yet | Complete a full turn with a durable preference; check the model, background service, and host loading in `doctor`. |
