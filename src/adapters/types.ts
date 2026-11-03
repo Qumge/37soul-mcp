@@ -98,7 +98,13 @@ export type NativeInvoker = (
   internal_job_uid: string,
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
+export type ExtractionDiagnostic =
+  | {stage: "source"; user_messages: number; assistant_messages: number; tool_messages: number}
+  | {stage: "parse"; proposals_received: number; proposals_parsed: number; proposals_dropped: number}
+  | {stage: "commit"; proposals_received: number; proposals_accepted: number; proposals_rejected: number; proposals_queued: number};
+
 export interface AdapterDeps {
+  diagnostic?: (counts: ExtractionDiagnostic) => void;
   home: string;
   invoke: NativeInvoker;
   readSource: (refs: readonly string[], turnRefs?: readonly string[]) => Promise<string>;

@@ -16,6 +16,7 @@
  * source is empty (see claude-code.ts / codex.ts / opencode.ts / hermes.ts
  * `extract`). The spawn invoker is reached only once a pointer resolves.
  */
+import { formatExtractionDiagnostic } from "../extraction/diagnostics.js";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
@@ -108,7 +109,7 @@ export function createExtractAdapters(home: string, log?: NativeInvokerLog, root
   const invoke = createNativeInvoker(log, undefined, { home });
   const readSource = async (refs: readonly string[], turnRefs?: readonly string[]) => readSourceRefs(root, refs, turnRefs);
   const emit = async () => {};
-  const deps: AdapterDeps = { home, invoke, readSource, emit };
+  const deps: AdapterDeps = { home, invoke, readSource, emit, diagnostic: counts => log?.info(formatExtractionDiagnostic(counts)) };
   return Object.fromEntries(
     HOSTS.flatMap((host) => host.invoke ? [[host.kind, host.invoke.createAdapter(deps)]] : []),
   );

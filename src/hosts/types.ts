@@ -1,3 +1,4 @@
+import type { TurnObservation } from "../adapters/claude-turn.js";
 import type { RuntimeKind } from "../assets/protocol.js";
 import type { AdapterDeps, RuntimeAdapter } from "../adapters/types.js";
 import type { RunCommand } from "../service.js";
@@ -83,6 +84,8 @@ export interface HostHookSpec {
   emitsRuntimeEvents: boolean;
   parsePayload(payload: Record<string, any>): HostHookPayload;
   completedTurnRefs?(transcript: string): string[];
+  /** Native completion inspector for a pinned Stop witness, including deferred flushes. */
+  observeTurn?(transcript: string, rootRef?: string): TurnObservation | null;
   /** Full native JSON response. Call only at injectionChannel; never equate output with model adoption. */
   formatContext?(text: string, event: "SessionStart" | "UserPromptSubmit"): string;
 }

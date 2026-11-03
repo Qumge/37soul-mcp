@@ -9,8 +9,9 @@
  *
  * Privacy invariants:
  *  - A pointer record is `{runtime_kind, native_session_id, path, captured_at}` plus
- *    an optional local `end_offset` (the frozen read boundary) — a file location and
- *    byte count, never conversation text, tool output, cwd guesses or tokens.
+ *    a frozen byte boundary and optional completion witness (root UUID, file
+ *    identity/digest and original binding) — never conversation text, tool output,
+ *    cwd guesses or tokens. Awaiting witnesses cannot be read as model sources.
  *  - The path is accepted only when it is an absolute, existing, regular file.
  *    `extractTranscriptPath` picks it out of the hook payload verbatim; nothing is
  *    ever synthesized for a runtime that does not hand one over.
@@ -47,6 +48,26 @@ const TRANSCRIPT_PATH_FIELDS = [
   "source_path",
 ] as const;
 
+/** Strong local witness over exactly the observed byte window. Never a wire DTO. */
+export interface SourceWindowIdentity {
+  start: number;
+  end: number;
+  device: number;
+  inode: number;
+  sha256: string;
+}
+export interface TurnSourceCapture {
+  root_ref: string;
+  observed: SourceWindowIdentity;
+  binding_uid: string;
+  binding_revision: number;
+  session_ref: string;
+  soul_uid: string;
+  device_id: string;
+  state: "awaiting" | "resolved" | "scheduled" | "invalid";
+  turn_refs?: string[];
+}
+
 export interface SourcePointerRecord {
   runtime_kind: RuntimeKind;
   native_session_id: string;
@@ -61,6 +82,10 @@ export interface SourcePointerRecord {
   end_offset?: number;
   /** Local-only lower bound for an explicitly attached native session. */
   source_boundary?: SessionSourceBoundary;
+  /** Awaiting Stop witness: no extraction request exists until it resolves. */
+  turn_capture?: TurnSourceCapture;
+  /** Immutable completed byte window, checked again at the adapter read. */
+  frozen_window?: SourceWindowIdentity;
 }
 
 function isByteOffset(value: unknown): value is number {
@@ -285,7 +310,8 @@ async function readSourceRef(root: string, eventRef: string, turnRefs?: readonly
     } catch {
       continue;
     }
-    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs, record.end_offset, record.source_boundary);
+    if (record.turn_capture && !["resolved", "scheduled"].includes(record.turn_capture.state)) return "";
+    return readSourceWindow(record.path, MAX_SOURCE_BYTES, turnRefs, record.end_offset, record.source_boundary, record.frozen_window);
   }
   return null;
 }
@@ -301,6 +327,9 @@ export interface SourceTailWindow {
   start: number;
   /** Exclusive byte offset the window ends at (the file size observed). */
   end: number;
+  identity: SourceWindowIdentity;
+  /** Same local read bytes, for exact hashing across a torn UTF-8 suffix. */
+  bytes: Buffer;
 }
 
 export async function readSourceTailWindow(
@@ -313,15 +342,18 @@ export async function readSourceTailWindow(
     const info = await handle.stat();
     if (!info.isFile()) return null;
     const end = info.size;
-    const start = Math.max(0, end - maxBytes);
+    let start = Math.max(0, end - maxBytes);
     const buffer = Buffer.alloc(Math.min(maxBytes, end));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-    let text = buffer.toString("utf8", 0, bytesRead);
+    if (bytesRead !== buffer.length) return null;
+    let bytes = buffer;
     if (start > 0) {
-      const newline = text.indexOf("\n");
-      text = newline >= 0 ? text.slice(newline + 1) : "";
+      const newline = bytes.indexOf(10);
+      const skip = newline >= 0 ? newline + 1 : bytes.length;
+      start += skip;
+      bytes = bytes.subarray(skip);
     }
-    return { text, start, end };
+    return { bytes, text: bytes.toString("utf8"), start, end, identity: {start, end, device: info.dev, inode: info.ino, sha256: createHash("sha256").update(bytes).digest("hex")} };
   } catch {
     return null;
   } finally {
@@ -372,16 +404,29 @@ async function readSourceWindow(
   turnRefs?: readonly string[],
   endOffset?: number,
   boundary?: SessionSourceBoundary,
+  frozenWindow?: SourceWindowIdentity,
 ): Promise<string | null> {
   // Legacy callers without frozen turn refs get the bounded tail (short files are
   // whole). Production extraction passes turnRefs and still verifies every ref.
-  if (!boundary && (!turnRefs || turnRefs.length === 0)) return readSourceTail(file, maxBytes);
+  if (!boundary && !frozenWindow && (!turnRefs || turnRefs.length === 0)) return readSourceTail(file, maxBytes);
   let handle: FileHandle | null = null;
   try {
     handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await handle.stat();
     if (!info.isFile()) return null;
     if (boundary && (file !== boundary.path || info.dev !== boundary.device || info.ino !== boundary.inode || info.size < boundary.start_offset || await boundaryAnchor(handle, boundary.start_offset) !== boundary.anchor_sha256)) return "";
+    if (frozenWindow) {
+      // Hash the SAME buffer returned to the adapter, never a separate preflight
+      // read followed by unchecked mutable bytes. This window starts on a complete
+      // pinned root line and has already been bounded before it became a job.
+      if (!isSourceWindowIdentity(frozenWindow) || info.dev !== frozenWindow.device || info.ino !== frozenWindow.inode || info.size < frozenWindow.end || endOffset !== frozenWindow.end) return "";
+      const bytes = Buffer.alloc(frozenWindow.end - frozenWindow.start);
+      const read = await handle.read(bytes, 0, bytes.length, frozenWindow.start);
+      if (read.bytesRead !== bytes.length || createHash("sha256").update(bytes).digest("hex") !== frozenWindow.sha256) return "";
+      if (boundary && frozenWindow.start < boundary.start_offset) return "";
+      const text = bytes.toString("utf8");
+      return windowContainsTurnRefs(text, turnRefs ?? []) ? text : "";
+    }
     // A frozen boundary is authoritative: read exactly the prefix the completed
     // turn was captured against. If the file shrank below it, the frozen bytes no
     // longer exist — fail honestly instead of silently reading a different tail.
@@ -428,4 +473,57 @@ async function readPrefix(file: string, maxBytes: number): Promise<string | null
   } finally {
     if (handle) await handle.close().catch(() => {});
   }
+}
+
+/** Parse only bounded metadata, with safe local pointer keys. */
+export async function loadSourcePointer(root: string, profile: string, ref: string): Promise<SourcePointerRecord | null> {
+  if (!isSafeProfileId(profile) || !isSafeEventRef(ref)) return null;
+  try { return JSON.parse(await readFile(pointerPath(root, profile, ref), "utf8")) as SourcePointerRecord; }
+  catch { return null; }
+}
+
+export async function pendingSourceCaptures(root: string, profile: string): Promise<string[]> {
+  if (!isSafeProfileId(profile)) return [];
+  const names = await readdir(profileDir(root, profile)).catch(() => []);
+  const refs: string[] = [];
+  for (const name of names) {
+    const ref = name.replace(/\.json$/, "");
+    if (!name.endsWith(".json") || !isSafeEventRef(ref)) continue;
+    const record = await loadSourcePointer(root, profile, ref);
+    if (record?.turn_capture && ["awaiting", "resolved"].includes(record.turn_capture.state)) refs.push(ref);
+  }
+  return refs;
+}
+
+export function isSourceWindowIdentity(value: unknown): value is SourceWindowIdentity {
+  if (!value || typeof value !== "object") return false;
+  const r = value as SourceWindowIdentity;
+  return isByteOffset(r.start) && isByteOffset(r.end) && r.end >= r.start && r.end - r.start <= MAX_SOURCE_BYTES &&
+    isByteOffset(r.device) && isByteOffset(r.inode) && typeof r.sha256 === "string" && /^[a-f0-9]{64}$/.test(r.sha256);
+}
+
+async function verifyWindow(handle: FileHandle, info: {isFile(): boolean; dev: number; ino: number; size: number}, guard: SourceWindowIdentity): Promise<boolean> {
+  if (!isSourceWindowIdentity(guard) || !info.isFile() || info.dev !== guard.device || info.ino !== guard.inode || info.size < guard.end) return false;
+  const bytes = Buffer.alloc(guard.end - guard.start);
+  const read = await handle.read(bytes, 0, bytes.length, guard.start);
+  return read.bytesRead === bytes.length && createHash("sha256").update(bytes).digest("hex") === guard.sha256;
+}
+
+/** Resolve from the ORIGINAL start, never from the latest tail. Unchanged observed
+ * bytes and inode are mandatory. Later bytes are bounded and not yet extractable.
+ */
+export async function readObservedSourceWindow(file: string, observed: SourceWindowIdentity): Promise<SourceTailWindow | null> {
+  let handle: FileHandle | null = null;
+  try {
+    if (!isSourceWindowIdentity(observed)) return null;
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    const info = await handle.stat();
+    if (!(await verifyWindow(handle, info, observed))) return null;
+    const end = Math.min(info.size, observed.start + MAX_SOURCE_BYTES);
+    const bytes = Buffer.alloc(end - observed.start);
+    const read = await handle.read(bytes, 0, bytes.length, observed.start);
+    if (read.bytesRead !== bytes.length || createHash("sha256").update(bytes.subarray(0, observed.end - observed.start)).digest("hex") !== observed.sha256) return null;
+    return {bytes, text: bytes.toString("utf8"), start: observed.start, end, identity: {start: observed.start, end, device: info.dev, inode: info.ino, sha256: createHash("sha256").update(bytes).digest("hex")}};
+  } catch { return null; }
+  finally { if (handle) await handle.close().catch(() => {}); }
 }

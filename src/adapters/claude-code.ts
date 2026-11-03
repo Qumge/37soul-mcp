@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 import type {
   AdapterDeps,
+  ExtractionDiagnostic,
   ExtractionRequest,
   ExtractionResult,
   InjectionResult,
@@ -341,6 +342,7 @@ export function parseExtractionOutput(
   stdout: string,
   request: ExtractionRequest,
   turnRefs: readonly string[],
+  diagnostic?: (counts: ExtractionDiagnostic) => void,
 ): ExtractionResult {
   const raw = stdout.trim();
   if (raw === "") return { error: { code: "unstructured_output", retryable: false } };
@@ -426,6 +428,7 @@ export function parseExtractionOutput(
       },
     });
   }
+  diagnostic?.({stage: "parse", proposals_received: list.length, proposals_parsed: proposals.length, proposals_dropped: list.length - proposals.length});
   return { proposals };
 }
 
@@ -461,11 +464,14 @@ export function createClaudeCodeAdapter(deps: AdapterDeps): RuntimeAdapter {
       //    readSource seam is hit once (bounded); the turn is a local subset of it.
       const turnText = renderSourceTurn(transcript, turnRefs);
       if (turnText.trim() === "") return { error: { code: "source_unavailable", retryable: true } };
+      const messages = JSON.parse(turnText).messages as Array<{source: string}>;
+      if (!messages.some(message => message.source === "user") || !messages.some(message => message.source === "assistant")) return {error: {code: "source_unavailable", retryable: true}};
+      deps.diagnostic?.({stage: "source", user_messages: messages.filter(m => m.source === "user").length, assistant_messages: messages.filter(m => m.source === "assistant").length, tool_messages: messages.filter(m => m.source === "tool").length});
       // 4. Invoke the native model through deps.invoke, tagged with the job uid.
       const { args, input } = buildExtractionInvocation(request, turnText);
       const result = await deps.invoke("claude-code", args, input, request.job_uid);
       if (result.code !== 0) return { error: { code: "model_error", retryable: true } };
-      return parseExtractionOutput(result.stdout, request, turnRefs);
+      return parseExtractionOutput(result.stdout, request, turnRefs, deps.diagnostic);
     },
 
     async inject(bundle: ContextBundle): Promise<InjectionResult> {

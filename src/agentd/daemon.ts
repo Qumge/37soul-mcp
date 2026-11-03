@@ -1,5 +1,6 @@
 /** Assets-only scheduler. Legacy transcript queues/spool remain local and untouched. */
 
+import { formatExtractionDiagnostic } from "../extraction/diagnostics.js";
 import path from "node:path";
 import { mkdir, open, readFile, readdir, rm } from "node:fs/promises";
 import { type readIncrement } from "./reader.js";
@@ -121,7 +122,7 @@ export function createDaemon(config: DaemonConfig, deps: DaemonDeps = {}): Daemo
 
   async function runDrain(): Promise<DrainStats> {
     if (Object.keys(extractAdapters).length === 0) return { started: 0, completed: 0, failed: 0 };
-    return drainPendingExtractions(config.root, extractAdapters);
+    return drainPendingExtractions(config.root, extractAdapters, {diagnostic: counts => log.info(formatExtractionDiagnostic(counts))});
   }
 
   /** Fire-and-forget the extraction drain: never blocks the capture loop on a model call. */

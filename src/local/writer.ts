@@ -43,6 +43,7 @@ export const WRITER_COMMANDS = [
   "review_asset",
   "delete_asset",
   "runtime_event",
+  "resolve_source_capture",
   "begin_extraction",
   "commit_extraction",
   "fail_extraction",

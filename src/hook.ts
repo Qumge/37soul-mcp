@@ -4,7 +4,7 @@
  */
 
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { GitStateResult } from "./agentd/git-state.js";
 import { dataRoot } from "./install.js";
 import { loadState } from "./agentd/state.js";
@@ -97,12 +97,21 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     const sourcePath = parsed.transcriptPath;
     let sourceTurnRefs: string[] | undefined = parsed.sourceTurnRefs;
     let sourceEndOffset: number | undefined;
+    let sourceObservation: {root_ref: string; observed: import("./agentd/source-index.js").SourceWindowIdentity} | undefined;
     if (deps.event === "Stop" && sourcePath) {
       try {
         const window = await readSourceTailWindow(sourcePath);
         if (window !== null) {
           const transcript = window.text;
-          if (host?.hook.completedTurnRefs) sourceTurnRefs = host.hook.completedTurnRefs(transcript);
+          if (host?.hook.observeTurn) {
+            const turn = host.hook.observeTurn(transcript);
+            sourceTurnRefs = []; // no model job until the writer resolves completion
+            if (turn) sourceObservation = {root_ref: turn.root_ref, observed: {
+              ...window.identity,
+              start: window.start + turn.root_offset,
+              sha256: createHash("sha256").update(window.bytes.subarray(turn.root_offset)).digest("hex"),
+            }};
+          } else if (host?.hook.completedTurnRefs) sourceTurnRefs = host.hook.completedTurnRefs(transcript);
           if (sourceTurnRefs && sourceTurnRefs.length === 0) sourceTurnRefs = [];
           // Freeze the endpoint this Stop actually read: the drain may run much
           // later, after the transcript has grown past the 4MiB tail window.
@@ -113,7 +122,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       }
     }
     const runtimeEvent = emitRuntimeEvent(
-      root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs, sourceEndOffset,
+      root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs, sourceEndOffset, sourceObservation,
     ).catch(() => {});
     // SessionStart needs the binding before injecting. Stop is the completed-turn
     // event whose source pointer must reach the writer before the host exits.
@@ -196,6 +205,7 @@ async function emitRuntimeEvent(
   sourcePath: string | null,
   sourceTurnRefs?: string[],
   sourceEndOffset?: number,
+  sourceObservation?: {root_ref: string; observed: import("./agentd/source-index.js").SourceWindowIdentity},
 ): Promise<void> {
   if (sessionId === "unknown" || !hostSpec(agentKind)?.hook.emitsRuntimeEvents) return;
   const kind = RUNTIME_EVENT_KINDS[hookEvent];
@@ -226,6 +236,8 @@ async function emitRuntimeEvent(
       event,
       ...(sourcePath !== null ? { source_path: sourcePath } : {}),
       ...(sourceEndOffset !== undefined ? { source_end_offset: sourceEndOffset } : {}),
+      ...(hookEvent === "Stop" && hostSpec(agentKind)?.hook.observeTurn ? {completion_capture_required: true} : {}),
+      ...(sourceObservation ? {source_observation: sourceObservation} : {}),
     },
   });
 }

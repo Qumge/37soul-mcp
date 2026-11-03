@@ -26,7 +26,7 @@
  * in-process writer started under the same writer lock — there is never a lockless
  * snapshot write from a non-writer process. The writer never waits on a model call.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import type {
   BindingSnapshot,
@@ -38,7 +38,9 @@ import type {
 } from "../adapters/types.js";
 import { contentDigest, type AssetSource, type ProposedAsset } from "../assets/protocol.js";
 import { classifyProposalState, validateProposedAsset } from "../assets/validation.js";
-import { captureSourcePointer, sourceMatchesBoundary, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
+import { captureSourcePointer, isSourceWindowIdentity, loadSourcePointer, pendingSourceCaptures, readObservedSourceWindow, MAX_SOURCE_BYTES, sourceMatchesBoundary, extractTranscriptPath, isSafeEventRef, isSafeProfileId, validateTranscriptPath } from "../agentd/source-index.js";
+import { hostSpec } from "../hosts/registry.js";
+import type { ExtractionDiagnostic } from "../adapters/types.js";
 import {
   defaultStoreFs,
   openStore,
@@ -79,6 +81,7 @@ export interface ExtractionOptions {
 }
 
 export interface RunOptions {
+  diagnostic?: (counts: ExtractionDiagnostic) => void;
   root?: string;
   fs?: Partial<StoreFs>;
 }
@@ -192,13 +195,14 @@ export async function runExtraction(
     return result;
   }
 
-  await commitResult(root, job.binding, job.range, result.proposals);
+  const counts = await commitResult(root, job.binding, job.range, result.proposals);
+  if (counts) options.diagnostic?.(counts);
   return result;
 }
 
 // --- write paths: every snapshot write goes through the single writer --------------
 
-type ExtractionCommand = "begin_extraction" | "commit_extraction" | "fail_extraction";
+type ExtractionCommand = "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
 
 /**
  * Send a writer command, retrying through a transient in-process writer when no
@@ -247,13 +251,14 @@ async function commitResult(
   binding: BindingSnapshot,
   range: SourceRange,
   proposals: ProposedAsset[],
-): Promise<void> {
+): Promise<ExtractionDiagnostic | undefined> {
   const result = await sendWriterCommand(root, binding.profile_id, "commit_extraction", {
     binding,
     range,
     proposals,
   });
   if (!result.ok) throw new StoreError(result.error.code, result.error.message);
+  return (result.result as {diagnostic?: ExtractionDiagnostic})?.diagnostic;
 }
 
 async function failExtraction(
@@ -378,7 +383,7 @@ async function commitExtraction(
   range: SourceRange,
   proposals: ProposedAsset[],
   fs: StoreFs,
-): Promise<{ committed: boolean; reason?: string }> {
+): Promise<{ committed: boolean; reason?: string; diagnostic?: ExtractionDiagnostic }> {
   const key = watermarkKey(binding, range);
 
   let current = true;
@@ -429,7 +434,7 @@ async function commitExtraction(
         request: wm?.request ?? freezeRequest(binding, range, randomUUID()),
       };
     });
-    return { committed: true };
+    return { committed: true, diagnostic: {stage: "commit", proposals_received: proposals.length, proposals_accepted: assets.length, proposals_rejected: proposals.length - assets.length, proposals_queued: ops.length} };
   } finally {
     await store.close();
   }
@@ -618,6 +623,17 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   // event ref — path only, never text. Validated here (absolute, existing regular
   // file); runtimes that omit a transcript location are never indexed.
   const binding = await resolveBinding(event.key, undefined, { root });
+  if (event.kind === "compact" || event.kind === "reset") {
+    // A lifecycle compaction may preserve/append the old prefix. Still retire its
+    // unresolved witnesses; a late flush cannot revive a pre-compaction turn.
+    for (const ref of await pendingSourceCaptures(root, event.key.profile_id)) {
+      const pointer = await loadSourcePointer(root, event.key.profile_id, ref);
+      if (pointer?.turn_capture && pointer.runtime_kind === event.key.runtime_kind && pointer.native_session_id === event.key.native_session_id) {
+        pointer.turn_capture.state = "invalid";
+        await captureSourcePointer(root, event.key.profile_id, ref, pointer);
+      }
+    }
+  }
   const candidate = extractTranscriptPath(request.payload);
   if (binding?.source_boundary && (candidate === null || !(await sourceMatchesBoundary(candidate, binding.source_boundary)))) {
     // Keep only the new hook's path so an explicit reattach can establish a fresh
@@ -629,6 +645,22 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
       });
     }
     return {scheduled: false, reason: "source_boundary_unavailable"};
+  }
+  if (request.payload.completion_capture_required === true) {
+    const observation = request.payload.source_observation as {root_ref?: unknown; observed?: unknown} | undefined;
+    if (event.kind !== "turn_completed" || !binding || candidate === null || !observation || typeof observation.root_ref !== "string" || observation.root_ref.length === 0 || observation.root_ref.length > 256 || !isSourceWindowIdentity(observation.observed) || !hostSpec(event.key.runtime_kind)?.hook.observeTurn) {
+      return {scheduled: false, reason: "completion_source_unavailable"};
+    }
+    if (!(await validateTranscriptPath(candidate))) return {scheduled: false, reason: "completion_source_unavailable"};
+    await captureSourcePointer(root, event.key.profile_id, event.event_ref, {
+      runtime_kind: event.key.runtime_kind, native_session_id: event.key.native_session_id,
+      path: candidate, captured_at: new Date().toISOString(), end_offset: observation.observed.end,
+      ...(binding.source_boundary ? {source_boundary: binding.source_boundary} : {}),
+      turn_capture: {root_ref: observation.root_ref, observed: observation.observed,
+        binding_uid: binding.binding_uid, binding_revision: binding.revision, session_ref: binding.session_ref, soul_uid: binding.soul_uid,
+        device_id: binding.device_id, state: "awaiting"},
+    });
+    return resolveSourceCaptureDirect(root, event.key.profile_id, event.event_ref);
   }
   if (candidate !== null) {
     const valid = await validateTranscriptPath(candidate);
@@ -657,6 +689,59 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   const jobUid = randomUUID();
   const result = await enqueueExtractionDirect(root, binding, rangeForEvent(event), jobUid, defaultStoreFs);
   return { ...result, job_uid: jobUid };
+});
+
+/** Resolve a Stop witness before a model range exists. All writes are serialized
+ * with connect/detach; the original binding is never re-resolved or relabeled.
+ * A resolved pointer is durable before enqueue, making a crash between them safe.
+ */
+async function resolveSourceCaptureDirect(root: string, profile: string, ref: string): Promise<{scheduled: boolean; reason?: string}> {
+  const pointer = await loadSourcePointer(root, profile, ref);
+  const capture = pointer?.turn_capture;
+  if (!pointer || !capture || capture.state === "invalid" || capture.state === "scheduled") return {scheduled: false, reason: "capture_inactive"};
+  const store = await openStore(root, profile);
+  let binding: BindingSnapshot | undefined;
+  try {
+    const snap = await store.read();
+    binding = findBindingByUid(snap, capture.binding_uid);
+    if (binding && (binding.revision !== capture.binding_revision || binding.session_ref !== capture.session_ref || binding.soul_uid !== capture.soul_uid || binding.device_id !== capture.device_id || binding.native_session_id !== pointer.native_session_id || binding.runtime_kind !== pointer.runtime_kind)) binding = undefined;
+  } finally { await store.close(); }
+  const invalidate = async (reason: string) => {
+    capture.state = "invalid";
+    await captureSourcePointer(root, profile, ref, pointer);
+    return {scheduled: false, reason};
+  };
+  if (!binding) return invalidate("stale_binding");
+  if (capture.state === "awaiting") {
+    const window = await readObservedSourceWindow(pointer.path, capture.observed);
+    if (!window) return invalidate("source_changed");
+    if (binding.source_boundary && !(await sourceMatchesBoundary(pointer.path, binding.source_boundary))) return invalidate("source_changed");
+    const turn = hostSpec(pointer.runtime_kind)?.hook.observeTurn?.(window.text, capture.root_ref);
+    if (!turn || turn.state === "invalid" || (binding.source_boundary && window.start + turn.root_offset < binding.source_boundary.start_offset)) return invalidate("turn_boundary_unavailable");
+    if (turn.state !== "completed" || turn.end_offset === undefined) {
+      if (window.end - window.start >= MAX_SOURCE_BYTES) return invalidate("source_window_exhausted");
+      return {scheduled: false, reason: "awaiting_completion"};
+    }
+    const end = window.start + turn.end_offset;
+    const bytes = window.bytes.subarray(0, turn.end_offset);
+    pointer.end_offset = end;
+    pointer.frozen_window = {...window.identity, end, sha256: createHash("sha256").update(bytes).digest("hex")};
+    capture.turn_refs = turn.refs.slice();
+    capture.state = "resolved";
+    await captureSourcePointer(root, profile, ref, pointer);
+  }
+  if (!capture.turn_refs?.length || !pointer.frozen_window) return invalidate("completion_source_unavailable");
+  const event: RuntimeEvent = {key: {profile_id: profile, device_id: capture.device_id, runtime_kind: pointer.runtime_kind, native_session_id: pointer.native_session_id}, event_ref: ref, kind: "turn_completed", source_turn_refs: capture.turn_refs, internal_job_uid: null};
+  const result = await enqueueExtractionDirect(root, binding, rangeForEvent(event), randomUUID(), defaultStoreFs);
+  capture.state = "scheduled";
+  await captureSourcePointer(root, profile, ref, pointer);
+  return result;
+}
+
+registerWriterCommand("resolve_source_capture", async ({root, request}) => {
+  const ref = request.payload.event_ref;
+  if (typeof ref !== "string" || !isSafeEventRef(ref) || !isSafeProfileId(request.profile_id)) throw new StoreError("invalid_payload", "resolve_source_capture requires a safe local pointer ref");
+  return resolveSourceCaptureDirect(root, request.profile_id, ref);
 });
 
 registerWriterCommand("begin_extraction", async ({ root, request }) => {
@@ -696,7 +781,7 @@ registerWriterCommand("fail_extraction", async ({ root, request }) => {
 export async function drainPendingExtractions(
   root: string,
   adapters: Partial<Record<string, RuntimeAdapter>>,
-  options: { fs?: Partial<StoreFs> } = {},
+  options: { fs?: Partial<StoreFs>; diagnostic?: (counts: ExtractionDiagnostic) => void } = {},
 ): Promise<{ started: number; completed: number; failed: number }> {
   const rootDir = resolveRoot(root);
   const fs = openFs(options);
@@ -704,6 +789,11 @@ export async function drainPendingExtractions(
 
   const profileIds = await listProfiles(rootDir);
   for (const profileId of profileIds) {
+    // Incomplete Stop witnesses are not jobs and cannot spend an attempt. Resolve
+    // only their original root/source/binding through the writer before claiming.
+    for (const ref of await pendingSourceCaptures(rootDir, profileId)) {
+      await sendWriterCommand(rootDir, profileId, "resolve_source_capture", {event_ref: ref});
+    }
     const store = await openStore(rootDir, profileId, { fs });
     let pending: Array<{ binding: BindingSnapshot; range: SourceRange; request: ExtractionRequest }> = [];
     try {
@@ -728,7 +818,7 @@ export async function drainPendingExtractions(
       const jobUid = job.request.job_uid;
       registerInternalJob({ jobUid, root: rootDir, profileId, binding: job.binding, range: job.range, request: job.request });
       try {
-        const result = await runExtraction(jobUid, adapter, { root: rootDir });
+        const result = await runExtraction(jobUid, adapter, { root: rootDir, diagnostic: options.diagnostic });
         stats.started += 1;
         if ("error" in result) stats.failed += 1;
         else stats.completed += 1;

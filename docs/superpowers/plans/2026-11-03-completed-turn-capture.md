@@ -1,0 +1,35 @@
+# Completed-turn capture implementation plan
+
+Goal: a Claude Stop observed before assistant transcript flush must never extract or complete a user-only turn. A later bounded drain may resolve only that exact native user turn, with its original binding and source identity, then freeze its completed endpoint before any model claim.
+
+Architecture: keep an awaiting-completion witness in the local source pointer index, not in the wire protocol or a model job. Pin the observed root user UUID, observed byte window and SHA-256, device/inode, and canonical binding UID/revision/Soul. The writer resolves this witness from its fixed starting offset (at most 4 MiB), follows only the matching main-chain turn, requires terminal assistant text, and freezes exact refs/end offset. Future human turns terminate the search. Source replacement, prefix rewrite, overflow and stale bindings permanently invalidate the witness. No sleeps, polling loop in Stop, model fallback, raw transcript persistence or upload.
+
+Evidence: synthetic live acceptance saw Stop end_offset 31187 with one real user ref; the final 44462-byte transcript added assistant thinking then assistant text. Both assistant records carry end_turn. The original extractor output was not retained, so this race is confirmed but is not proven to be the sole reason for zero assets.
+
+Global constraints: branch fix/completed-turn-capture from main 6b9b5eb; edits only in this MCP worktree; no model, account, installation, merge, push or release calls. Keep existing public source/adapter contracts and extraction authorization guards. Legacy completion fixtures without stop_reason retain their Stop witness compatibility; explicit null/nonterminal stop reasons are incomplete. No cross-turn, cross-binding or cross-CLI retries.
+
+1. Add offline regressions first; run RED. Replay 31187 -> 44462, user-only and thinking-only deferral, exact completed refs, future turns, torn writes, source rewrite/replacement/overflow, retired and switched-back binding, duplicate Stop and crash recovery, and sanitized diagnostics.
+2. Implement pure Claude completion inspection plus source-pointer witness capture/resolution. Integrate hook, serialized writer and pre-claim daemon drain. Guard resolved reads against source mutation. Run focused GREEN including existing hook/source/binding/adapter/scheduler tests.
+3. Add metadata-only diagnostics for source message counts, parsed/dropped proposal counts and commit acceptance/rejection counts, using only fixed labels and numbers. Never log native output, raw text, path, credentials or identifiers. Re-run focused tests.
+4. Review the complete diff and boundary cases; run npm test, build/bundle. Bump 0.15.2 with scripts/bump-version.sh only after offline verification. Commit source, build fresh actual runtime with scripts/pack-runtime.sh, then SOUL37_REQUIRE_PACKED_RELEASE=1 npm test. Verify package payload, manifest/version/digest, copy four artifacts to the root ignored release directory, and write public release notes in /private/tmp. Parent owns integration and live verification.
+
+Review focus: ambiguous native branches and duplicate IDs fail closed; partial final JSONL lines cannot witness completion; assistant thinking/tool calls cannot complete a turn; immutable root and binding remain immutable across deferred resolution and crash recovery; no future-user window or automatic model attempts while source is incomplete; pointer-only metadata never enters sync envelopes; hook latency remains bounded by fixed reads with no wait.
+
+## Execution ledger
+- Worktree verified clean at 6b9b5ebd7cd11b0b11a3f96e582588631514e829. Read AGENTS.md and full relevant hook/source-index/scheduler paths.
+- Ruling: retain legacy Stop+assistant-text compatibility when native stop_reason is absent, but never accept explicit nonterminal/null reasons or thinking-only completion. This preserves existing transcript contracts; an unrecognized future schema fails closed if it supplies a nonterminal reason.
+
+- RED: initial 15 regressions -> 1 pass / 14 fail; observed user-only watermark and incomplete model invocation. First implementation -> 15/15 green; focused existing/new coverage -> 110/110 green.
+- Review RED: explicit compaction could leave an awaiting witness alive. Added lifecycle invalidation; focused -> 113/113 green, including real mocked binding ACK. ACK changes cloud_revision/unconfirmed and retains local revision, so the original binding remains eligible.
+- Review: source identity now starts exactly at the native user root (with raw-byte hashing), leaving bounded completion headroom in long transcripts. Resolved reads hash the very same buffer returned to the adapter.
+- Review RED: a malformed interior JSONL record could conceal a boundary. Reject the affected pinned turn; torn final lines remain deferred. Added interrupted-enqueue recovery and numeric-only production log formatting coverage.
+
+- Full-suite compatibility RED: complete final JSON without a newline was incorrectly deferred (740 pass / 1 fail / 2 skip, 743 total). New EOF regression reproduces it. Ruling: a successfully parsed complete EOF object is a native record; only genuinely torn JSON must wait. This preserves the existing reader/Stop contract without allowing incomplete JSON or nonterminal assistant output.
+- Parent release gate: deliver committed 0.15.2 candidate and exact tar for isolated B acceptance first; no merge/tag/publication before the parent observes complete-source native/model/proposal metadata. Installed public 0.15.1 remains unchanged.
+
+- Independent Sagan review confirmed P2: nontext future users were incorrectly treated as continuations. RED added image/audio/attachment-only future users -> 3 fail, 23 pass; tool_result-only continuation control passed. Separate human boundary detection from text extractability, and never fall back from a nontext latest human to an earlier text root.
+- Offline replay against the actual synthetic native source: 31187 bytes -> incomplete / 1 ref; final 44462 bytes -> completed / 3 refs, exact terminal endpoint 36279, rendered user 1 / assistant 1. No native/model invocation or raw output.
+
+- Final source verification: focused 136/136 pass; full npm test 748 total / 746 pass / 0 fail / 2 skip (missing local Node 18, and no packed tree yet), plus 64/64 smoke checks. Build and bundle passed. New completion tests: 26/26 pass.
+- Final review: self-review (no subagent tool), plus parent-provided independent Sagan review; confirmed nontext boundary P2 fixed with three RED->GREEN cases. Reviewed exact-byte hashing, canonical binding/session/revision pinning, ACK eligibility, crash recovery, future-turn isolation, compaction and replacement rejection, and numeric-only logging. No remaining confirmed P1/P2; no deferred minor findings. Legacy EOF and absent-stop_reason compatibility are the recorded rulings above.
+- Release validation pending at source commit: fresh 0.15.2 actual tar, forced packed-release npm test and artifact digest comparison. Exact results/provenance will be handed off separately; no publication claim.

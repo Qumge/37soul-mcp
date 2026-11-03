@@ -1,3 +1,4 @@
+import { observeClaudeTurn } from "../adapters/claude-turn.js";
 import path from "node:path";
 import { readRuntimeEvidence, runtimeEvidenceChecks } from "./runtime-evidence.js";
 import { editJsonFile, editManagedFragment, removeManagedFragment } from "../config-editor.js";
@@ -158,6 +159,7 @@ export const host: HostSpec = {
     emitsRuntimeEvents: true,
     parsePayload: parseHookPayload,
     completedTurnRefs: latestCompletedTurnSourceRefs,
+    observeTurn: observeClaudeTurn,
   },
   install: {
     plan: ({ home }) => [claudeSettingsPath(home), claudeInstructionsPath(home)],
