@@ -4,8 +4,9 @@
  * `startWriter(root)` acquires the exclusive writer lock (one writer process),
  * then serves newline-delimited JSON over a Unix socket in a 0700 directory with
  * a 0600 socket. Requests are capped at 1 MiB and validated against the command
- * whitelist. Commands are dispatched through a registry, one at a time (serialized
- * commits); Tasks 3–5 register their own commands, and an unregistered command
+ * whitelist. Stateful commands are dispatched through a registry, one at a time
+ * (serialized commits). Only fixed process-metadata health bypasses that FIFO.
+ * Tasks 3–5 register their own commands, and an unregistered command
  * returns a well-defined `unsupported_command` error instead of crashing.
  *
  * This is NOT an external HTTP service: it only accepts the local user, and the
@@ -86,7 +87,9 @@ export function registerWriterCommand(command: string, handler: WriterCommandHan
 // --- the only command Task 2 ships -----------------------------------------------
 
 // Cheap liveness/version probe: no profile read, mutation, network or model call.
-registerWriterCommand("health", async () => ({ writer_pid: process.pid, entrypoint: process.argv[1] ?? null, agentd: process.argv[2] === "agentd" }));
+function healthMetadata() {
+  return { writer_pid: process.pid, entrypoint: process.argv[1] ?? null, agentd: process.argv[2] === "agentd" };
+}
 
 registerWriterCommand("status", async ({ root }) => {
   const ids = await listProfiles(root);
@@ -215,7 +218,11 @@ export async function startWriter(
         const request = parseRequest(line);
         const pending = request === null
           ? Promise.resolve<WriterResult>({ ok: false, error: { code: "invalid_request", message: "malformed writer request frame" } })
-          : enqueue(() => dispatch(root, request));
+          // Only this built-in metadata response may bypass the FIFO: never run
+          // a registry handler, snapshot read or network operation on this path.
+          : request.command === "health"
+            ? Promise.resolve<WriterResult>({ ok: true, result: healthMetadata() })
+            : enqueue(() => dispatch(root, request));
         pending
           .then((result) => {
             if (!socket.destroyed) socket.write(`${JSON.stringify(result)}\n`);
