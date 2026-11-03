@@ -21,3 +21,5 @@ An installed machine can retain a cloud-owned profile with an unknown issuer, no
 - Three-language README and agent guide updated. The website guide is synchronized independently; website business pages and the user's actual profile/configuration were not modified by these tests.
 
 Publication, public download and optional real-user authorization are distinct from the above local results; report them separately in the delivery.
+
+Release matrix CI 41607764112 passed Node18/20/24 on code commit bf320c182650036e20beab84bff62cd3e162f695. A read-only invocation against the actual existing local metadata offered confirmation, made zero network requests when declined, and preserved config/index/snapshot hashes. This follow-up changes evidence only, not runtime code.
