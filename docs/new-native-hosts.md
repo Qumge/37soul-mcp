@@ -188,7 +188,7 @@ push/merge/release, or raw transcript upload was performed.
 
 ## Offline verification
 
-The new host tests cover 30 cases: 26 host/config/adapter cases and four real
+The new host tests cover 32 cases: 28 host/config/adapter cases and four real
 local-writer integration cases. They pass with zero skips. The combined focused
 registry/install/hook/native-invoker/source-output regression run passes 129/129.
 TypeScript build and bundled runtime build also pass. The original host tests
@@ -201,3 +201,9 @@ Cursor's generation ID has no assumed transcript-record mapping and records
 `source_unavailable`. Both remain incomplete/error, with zero completed model
 extractions. Separate nonempty-source seam tests verify Cursor's explicit tool
 safety blocker. This is offline evidence, not live host/model acceptance.
+
+Post-review verification also covers preserving a renamed or unnamed disabled Gemini
+hook across launcher upgrades, and matching disabled identities using Gemini's exact
+`name || command` rule. Both regressions failed before the fix in `08351cc` and pass
+after it. The final packaged full suite has 698 tests: 697 pass, 0 fail, and one
+local Node 18 availability skip; the MCP smoke checks pass.

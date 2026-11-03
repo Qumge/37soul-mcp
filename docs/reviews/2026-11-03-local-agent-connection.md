@@ -19,21 +19,22 @@ Gemini CLI、Cursor 新增原生 hook 配置、事件解析、身份上下文和
 ## 验证
 
 - 严格先失败后实现：初始连接测试 11 项、9 失败；来源压缩/原地重写补测 2 失败；原生格式/未知会话补测 2 失败；独立复核的同意/账号竞态/恢复补测 4 失败；响应期间撤权/收窄补测 2 失败。最终连接文件 24 项全部通过。初始已有的参数拒绝用例可在缺少命令时通过，未把它们计作修复证据。
-- 最终运行时 `npm test`：696 tests，695 pass，0 fail，1 skip（本机没有 Node 18 二进制）；MCP smoke 全部通过。打包后产物校验已执行，未跳过。
+- 最终运行时 `npm test`：698 tests，697 pass，0 fail，1 skip（本机没有 Node 18 二进制）；MCP smoke 全部通过。打包后产物校验已执行，未跳过。
 - 独立 bundle 验证：复制单文件 CLI 到无 node_modules 的目录，真实子进程访问合成 HTTP 服务，并通过真实本地 writer IPC 接入准确会话。1 test，0 failures。此证据不是生产 API 或真实宿主模型验收。
 - 网站最终 15 个定向 spec：341 examples，0 failures；Ruby 4.0.1，隔离数据库 yu_test_soul_growth，Redis /13。未跑全量 rspec 或共用 yu_test。
 - skill：10 个文档契约测试全部通过；skill 验证器通过。
+- 父进程使用 Node v24.18.0。网站定向复跑首次被沙箱禁止连接本机 PostgreSQL；授予本机测试库访问后，同一组 15 个文件得到 341/0。这是环境准备失败，不是产品断言失败。
 - 三种语言、接入页和批准页、1440px/390px 共 12 个渲染检查，无横向溢出、缺翻译或错误目标选择。批准表单确认为 host 277、required=true。父 Agent 用 ego-browser 再核对最终中文桌面页及手机批准页；均为合成数据，没有批准真实账号。
-- 独立代码复核发现的问题均已补回归并修复；核心修复最终没有剩余的已确认 P1/P2。新宿主另有最终复核，结论在后续记录。
+- 独立代码复核发现的问题均已补回归并修复；核心修复最终没有剩余的已确认 P1/P2。新宿主复核发现的 Gemini 禁用状态保留及 doctor 名称规则问题，已在 `08351cc` 补先失败后通过的回归；复核确认这两处问题关闭，没有剩余的已确认 P1/P2。
 
 ## 提交与候选包
 
 - Runtime 原生宿主：`48fd3144b00e5acbe52c97d52dd99dfc2de3d043`。
-- Runtime 核心修复：`6a47a77`。
+- Runtime 核心修复：`6a47a77`；Gemini 禁用状态复核修复：`08351cc72339aec49747645ecf2b1bc1fc5e8f65`。
 - 网站功能：`05eddb7ebaf97f8e61139fd9f5e3f111aeb50237`；计划记录：`2db9c8a3`。
 - skill 最终：`3d920c8ab5fd7625ddc5f290b315f5fd3ff9715f`，版本 6.12.3。
 - 候选包：`/Users/jiangxin/projects/37soul-mcp/.worktrees/local-agent-connect/release/37soul-runtime.tgz`。
-- SHA-256：`0c7238c1e6940d2eeb40a2df162301d28c7aa4dfc102f71743e0448373d5470a`。
+- SHA-256：`bb30472ffc2d728b4178c54ed341c13b82cfb6db8e62a3c9f6644f4e09502c31`。
 
 ## 验收边界与后续发布顺序
 
@@ -137,4 +138,3 @@ Gemini CLI、Cursor 新增原生 hook 配置、事件解析、身份上下文和
 - `/Users/jiangxin/projects/37soul-skill/.worktrees/local-agent-connect/references/operator-mode.md`
 - `/Users/jiangxin/projects/37soul-skill/.worktrees/local-agent-connect/references/persona-http.md`
 - `/Users/jiangxin/projects/37soul-skill/.worktrees/local-agent-connect/tests/test_local_agent_contract.py`
-
