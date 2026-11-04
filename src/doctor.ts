@@ -83,7 +83,8 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       continue;
     }
     try {
-      const store = await openStore(root, entry.profile_id);
+      // Match recall's read-only path: validate snapshots without bootstrapping device identity.
+      const store = await openStore(root, entry.profile_id, { deviceId: "doctor-read-only" });
       try {
         const snap = await store.read();
         assertProfileCloudIssuer(snap, config.api_base_url, index);
@@ -113,7 +114,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
   });
 
   if(localProfile){
-    const store=await openStore(root,localProfile.profile_id);
+    const store=await openStore(root,localProfile.profile_id,{deviceId:"doctor-read-only"});
     try{const snap=await store.read();const pendingMemory=Object.values(snap.extraction_watermarks).filter(w=>!w.completed);
       const stale=pendingMemory.filter(w=>!Object.values(snap.bindings).some(b=>!b.retired&&b.state==="bound"&&b.binding_uid===w.request.binding_uid&&b.revision===w.request.binding_revision)).length;
       if(snap.extraction_usage!==undefined&&(!snap.extraction_usage||typeof snap.extraction_usage!=="object"||Array.isArray(snap.extraction_usage)))throw new Error("resource_budget_corrupt");

@@ -3,7 +3,7 @@
 Approved behavior: diagnose missing hook context, preserve the requested Soul, and explain the actual recovery action rather than asking the user to repeat the selection. No changes to Codex trust decisions, native identity/source checks, authentication, defaults, or healthy connection round trips.
 
 ## Scope
-Runtime: src/cli.ts, src/hosts/codex.ts, test/native-context-recovery.test.mjs.
+Runtime: src/cli.ts, src/hosts/codex.ts, src/doctor.ts, test/native-context-recovery.test.mjs; update obsolete Codex restart wording in the existing install/setup guidance tests.
 Skill: SKILL.md, references/persona-http.md, three READMEs, tests/test_local_agent_contract.py, tests/test_hook_recovery.py.
 Implementation in the two repos' .worktrees/native-context-recovery directories. Main checkouts and installed trust/configuration remain unchanged. Existing skill-main __pycache__ stays untouched.
 
@@ -21,3 +21,5 @@ Implementation in the two repos' .worktrees/native-context-recovery directories.
 
 ## Review focus
 Never guess native flags; no network/credential/binding mutation on missing source; preserve explicit target; never auto-approve trust; missing runtime evidence is unknown trust/loading, not proof of rejection; normal connection and consent behavior unchanged.
+
+Review repair: the now-automatic doctor command inherited device-bootstrap writes. Two complete-CLI file-tree regressions proved RED; both doctor read sites now use the existing recall-style explicit read-only device sentinel without transactions or trust changes.

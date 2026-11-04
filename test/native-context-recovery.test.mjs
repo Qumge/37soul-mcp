@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {main} from '../dist/cli.js';
@@ -32,3 +32,25 @@ test('recovery: missing flags keeps an exact named Soul without directory/authen
 test('recovery: flags without a valid source leave all local state intact and retain the target',async t=>{const f=await fixture(t);const r=await f.run(['connect','--host','276','--agent','codex','--session','synthetic-session']);assert.equal(r.code,1);assert.equal(r.stdout,'');assert.match(r.stderr,/host 276/);recovery(r.stderr);await f.unchanged();});
 test('recovery: installed Codex hooks need native review/loading, not a blanket restart or repeated choice',async t=>{const f=await fixture(t);writeCodexHookConfig(f.home,{command:f.config.launcher});const checks=await hostSpec('codex').doctor({home:f.home,config:f.config,assetsMode:true});const row=checks.find(c=>c.name==='codex: SessionStart hook');assert.equal(row.ok,false);assert.equal(row.waiting,true);assert.match(row.detail,/\/hooks/);assert.match(row.detail,/load/i);assert.doesNotMatch(row.detail,/start a new session|send another message/i);assert.match(row.detail,/choice|selection|requested Soul/i);assert.match(row.detail,/trust.*not.*(?:verified|inferred)|not.*proof.*trust/i);await f.unchanged();});
 test('recovery control: absent Codex hooks retain the install diagnosis and do not alter native trust',async t=>{const f=await fixture(t);const row=(await hostSpec('codex').doctor({home:f.home,config:f.config,assetsMode:true})).find(c=>c.name==='codex: SessionStart hook');assert.equal(row.ok,false);assert.match(row.detail,/install/i);await f.unchanged();});
+
+async function fileTree(dir){
+ const rows=[];
+ for(const entry of (await readdir(dir,{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))){
+  const file=path.join(dir,entry.name);
+  rows.push([entry.name,entry.isDirectory()?'directory':(await readFile(file)).toString('base64')]);
+  if(entry.isDirectory())for(const [name,data] of await fileTree(file))rows.push([entry.name+'/'+name,data]);
+ }
+ return rows;
+}
+test('review recovery: full CLI doctor never recreates missing device identity beside an existing snapshot',async t=>{
+ const f=await fixture(t);await rm(path.join(f.root,'profiles/p1/device.json'));
+ const before=await fileTree(f.home),r=await f.run(['doctor']);
+ assert.equal(r.code,1);assert.match(r.stdout,/local profile/);
+ assert.deepEqual(await fileTree(f.home),before,'read-only diagnosis must not create or pin a device identity');
+});
+test('review recovery: full CLI doctor does not initialize a profile named only in the account index',async t=>{
+ const f=await fixture(t);await rm(path.join(f.root,'profiles/p1'),{recursive:true});
+ const before=await fileTree(f.home),r=await f.run(['doctor']);
+ assert.equal(r.code,1);assert.match(r.stdout,/local profile/);
+ assert.deepEqual(await fileTree(f.home),before,'diagnosis must not create profile directories or files');
+});
