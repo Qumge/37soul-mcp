@@ -105,6 +105,7 @@ export type NativeInvoker = (
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export type ExtractionDiagnostic =
+  | {stage: "resource"; pending: number; budget_deferred: number; stale_pending: number; source_deferred: number}
   | {stage: "source"; user_messages: number; assistant_messages: number; tool_messages: number}
   | {stage: "parse"; proposals_received: number; proposals_parsed: number; proposals_dropped: number}
   | {stage: "reject"; reasons: ValidationRejectionCounts}

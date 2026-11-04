@@ -26,14 +26,14 @@ Only runtime worktree; preserve all auth/consents/source boundaries/hosts, no ra
 - [ ] Run named specs plus extraction-output,extraction-limits,native-invoker and adapter focused specs GREEN; commit.
 
 ### Task2: Durable batching gate and atomic resource budgets
-**Files:** create src/extraction/resource-budget.ts,test/lightweight-scheduler.test.mjs; modify src/extraction/scheduler.ts,src/local/store.ts,src/agentd/daemon.ts.
+**Files:** create src/extraction/resource-budget.ts,test/lightweight-scheduler.test.mjs; modify src/extraction/scheduler.ts,src/local/store.ts,src/local/writer.ts,src/adapters/types.ts,src/extraction/diagnostics.ts.
 **Interfaces:** optional watermark queued_at; optional snapshot resource_usage metadata. reserve_extraction_batch writer command validates/claims group and reserves atomically; production metadata-aware adapters batch at3/90s/explicit, legacy injected adapters retain immediate behavior.
 - [ ] Write real writer tests RED: first ordinary remains pending,3batch onecall,90sflush,explicit immediate, cross-session separation, budget deferral noattempt,UTCrollover/restart,concurrentclaim,stalebinding and source. Expected missing behavior, not test harness errors.
 - [ ] Implement gates, bounded daily ledger, resume old pending entries, diagnostic aggregates; no model in writer.
 - [ ] Run new tests plus extraction and daemon targeted suites GREEN; commit.
 
 ### Task3: Incremental bounded hook delivery with restoration
-**Files:** create src/agentd/context-delivery.ts,test/lightweight-context.test.mjs; modify src/hook.ts.
+**Files:** create src/agentd/context-delivery.ts,test/lightweight-context.test.mjs; modify src/hook.ts,src/assets/context.ts.
 **Interfaces:** exact binding-scoped context digest/source epoch cache, atomic0600 metadata; record only after stdout succeeds. Invalidating lifecycle events permit next full delivery.
 - [ ] Write real hook tests RED for unchanged prompt suppression, changed memory delivery, SessionStart/resume/compact restore, session isolation, output failure retry,4096bytebound and no mutation of stored assets.
 - [ ] Implement per-session cache and hook budget4096/identity2048 using selector optional limits without changing cloud contract defaults.

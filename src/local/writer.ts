@@ -46,6 +46,7 @@ export const WRITER_COMMANDS = [
   "runtime_event",
   "resolve_source_capture",
   "begin_extraction",
+  "reserve_extraction_batch",
   "commit_extraction",
   "fail_extraction",
   "sync_once",

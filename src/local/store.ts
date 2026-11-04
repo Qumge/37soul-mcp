@@ -1,3 +1,4 @@
+import type {ResourceUsage} from '../extraction/resource-budget.js';
 /**
  * Task 2: single-writer transactional local soul store.
  *
@@ -73,6 +74,8 @@ export interface ExtractionWatermark {
   last_error: string | null;
   /** Set when a worker atomically claims the range; stale claims may be reclaimed. */
   claimed_at?: string | null;
+  /** Durable enqueue time; old watermarks without it are immediately eligible. */
+  queued_at?: string;
   /** The frozen extraction request this watermark belongs to. */
   request: ExtractionRequest;
 }
@@ -105,6 +108,8 @@ export interface StoreSnapshot {
   pull_cursor: string | null;
   extraction_watermarks: Record<string, ExtractionWatermark>;
   receipts: Record<string, Receipt>;
+  /** Local aggregate reservations; never uploaded or confused with billed usage. */
+  extraction_usage?: ResourceUsage;
 }
 
 export interface LocalStore {

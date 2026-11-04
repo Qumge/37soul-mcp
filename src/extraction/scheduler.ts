@@ -1,3 +1,4 @@
+import {canReserve,reserve} from './resource-budget.js';
 import {rememberPendingSessionSource} from "../agentd/session-source-hints.js";
 /**
  * Task 4: bounded extraction scheduling.
@@ -203,7 +204,7 @@ export async function runExtraction(
 
 // --- write paths: every snapshot write goes through the single writer --------------
 
-type ExtractionCommand = "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
+type ExtractionCommand = "reserve_extraction_batch" | "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
 
 /**
  * Send a writer command, retrying through a transient in-process writer when no
@@ -303,6 +304,7 @@ async function enqueueExtractionDirect(
         state: "pending",
         last_error: null,
         claimed_at: null,
+        queued_at: new Date().toISOString(),
         request: freezeRequest(binding, range, jobUid),
       };
     });
@@ -791,56 +793,86 @@ registerWriterCommand("fail_extraction", async ({ root, request }) => {
  * also works for `pending` watermarks written by the writer process (whose registry
  * is a different process). Never runs a model call on an exhausted range.
  */
-export async function drainPendingExtractions(
-  root: string,
-  adapters: Partial<Record<string, RuntimeAdapter>>,
-  options: { fs?: Partial<StoreFs>; diagnostic?: (counts: ExtractionDiagnostic) => void } = {},
-): Promise<{ started: number; completed: number; failed: number }> {
-  const rootDir = resolveRoot(root);
-  const fs = openFs(options);
-  const stats = { started: 0, completed: 0, failed: 0 };
+type PendingJob={binding:BindingSnapshot;range:SourceRange;request:ExtractionRequest;queued_at?:string};
 
-  const profileIds = await listProfiles(rootDir);
-  for (const profileId of profileIds) {
-    // Incomplete Stop witnesses are not jobs and cannot spend an attempt. Resolve
-    // only their original root/source/binding through the writer before claiming.
-    for (const ref of await pendingSourceCaptures(rootDir, profileId)) {
-      await sendWriterCommand(rootDir, profileId, "resolve_source_capture", {event_ref: ref});
-    }
-    const store = await openStore(rootDir, profileId, { fs });
-    let pending: Array<{ binding: BindingSnapshot; range: SourceRange; request: ExtractionRequest }> = [];
-    try {
-      const snap = await store.read();
-      for (const [key, wm] of Object.entries(snap.extraction_watermarks)) {
-        if (wm.completed || wm.attempts >= MAX_AUTO_ATTEMPTS) continue;
-        const binding = findBindingByUid(snap, wm.request.binding_uid);
-        if (!binding || binding.revision !== wm.request.binding_revision) continue; // stale: explicit handling only
-        pending.push({ binding, range: rangeFromKeyAndRequest(key, wm.request), request: wm.request });
-      }
-    } finally {
-      await store.close();
-    }
-
-    for (const job of pending) {
-      const adapter = adapters[job.request.runtime_kind];
-      if (!adapter) continue;
-      // Reserve the attempt through the same writer command the schedule path uses,
-      // so a range drained concurrently with a checkpoint cannot exceed its budget.
-      const begin = await beginExtraction(rootDir, job.binding, job.range, job.request.job_uid);
-      if (!begin.scheduled) continue; // completed or budget exhausted since the read
-      const jobUid = job.request.job_uid;
-      registerInternalJob({ jobUid, root: rootDir, profileId, binding: job.binding, range: job.range, request: job.request });
-      try {
-        const result = await runExtraction(jobUid, adapter, { root: rootDir, diagnostic: options.diagnostic });
-        stats.started += 1;
-        if ("error" in result) stats.failed += 1;
-        else stats.completed += 1;
-      } finally {
-        unregisterInternalJob(jobUid);
-      }
-    }
+registerWriterCommand("reserve_extraction_batch",async({root,request})=>{
+ const jobs=request.payload.jobs as PendingJob[];const units=request.payload.reserved_units;
+ if(!Array.isArray(jobs)||jobs.length<1||jobs.length>3||typeof units!=="number"||!Number.isSafeInteger(units)||units<1||units>25600||jobs.some(j=>!isBindingSnapshot(j?.binding)||!isSourceRange(j?.range)||j.binding.profile_id!==request.profile_id))throw new StoreError("invalid_payload","Invalid extraction reservation");
+ const first=jobs[0].binding;
+ if(jobs.some(j=>j.binding.binding_uid!==first.binding_uid||j.binding.revision!==first.revision||j.binding.soul_uid!==first.soul_uid||j.binding.native_session_id!==first.native_session_id||j.binding.runtime_kind!==first.runtime_kind||j.binding.device_id!==first.device_id))throw new StoreError("invalid_payload","A batch must use one exact native binding");
+ const keys=jobs.map(j=>watermarkKey(j.binding,j.range));if(new Set(keys).size!==keys.length)throw new StoreError("invalid_payload","Duplicate extraction job");
+ const store=await openStore(root,request.profile_id);
+ try{
+  const snap=await store.read();
+  for(let i=0;i<jobs.length;i++){
+   const j=jobs[i],wm=snap.extraction_watermarks[keys[i]];
+   if(!isCurrentBinding(snap,j.binding)||!wm||wm.completed||wm.attempts>=MAX_AUTO_ATTEMPTS||wm.request.job_uid!==j.request?.job_uid||wm.request.binding_revision!==first.revision||wm.request.binding_uid!==first.binding_uid||wm.request.soul_uid!==first.soul_uid)return {claimed:false,reason:"unavailable"};
+   if(wm.state==="running"&&wm.claimed_at&&Date.now()-Date.parse(wm.claimed_at)<10*60000)return {claimed:false,reason:"claimed"};
   }
-  return stats;
+  try{if(!canReserve(snap.extraction_usage,first,units))return {claimed:false,reason:"resource_budget"};}
+  catch{return {claimed:false,reason:"resource_budget_corrupt"};}
+  await store.transact(d=>{
+   d.extraction_usage=reserve(d.extraction_usage,first,units);
+   for(const key of keys){const wm=d.extraction_watermarks[key];wm.state="running";wm.attempts++;wm.claimed_at=new Date().toISOString();}
+  });return {claimed:true};
+ }finally{await store.close();}
+});
+
+export async function drainPendingExtractions(
+ root:string,adapters:Partial<Record<string,RuntimeAdapter>>,options:{fs?:Partial<StoreFs>;diagnostic?:(counts:ExtractionDiagnostic)=>void}={},
+):Promise<{started:number;completed:number;failed:number}>{
+ const rootDir=resolveRoot(root),fs=openFs(options),stats={started:0,completed:0,failed:0};
+ const resource={stage:"resource" as const,pending:0,budget_deferred:0,stale_pending:0,source_deferred:0};
+ for(const profileId of await listProfiles(rootDir)){
+  for(const ref of await pendingSourceCaptures(rootDir,profileId))await sendWriterCommand(rootDir,profileId,"resolve_source_capture",{event_ref:ref});
+  const store=await openStore(rootDir,profileId,{fs});const pending:PendingJob[]=[];
+  try{const snap=await store.read();for(const [key,wm]of Object.entries(snap.extraction_watermarks)){
+   if(wm.completed||wm.attempts>=MAX_AUTO_ATTEMPTS)continue;resource.pending++;
+   const binding=findBindingByUid(snap,wm.request.binding_uid);
+   if(!binding||binding.revision!==wm.request.binding_revision){resource.stale_pending++;continue;}
+   pending.push({binding,range:rangeFromKeyAndRequest(key,wm.request),request:wm.request,queued_at:wm.queued_at});
+  }}finally{await store.close();}
+  const groups=new Map<string,PendingJob[]>();
+  for(const job of pending){const id=JSON.stringify([job.binding.binding_uid,job.binding.revision]);const group=groups.get(id)??[];group.push(job);groups.set(id,group);}
+  for(const group of groups.values()){
+   const adapter=adapters[group[0].request.runtime_kind];if(!adapter)continue;
+   if(!adapter.prepare){
+    // Keep the direct/injected adapter API immediate; production adapters are wrapped.
+    for(const job of group){const begin=await beginExtraction(rootDir,job.binding,job.range,job.request.job_uid);if(!begin.scheduled)continue;
+     registerInternalJob({jobUid:job.request.job_uid,root:rootDir,profileId,binding:job.binding,range:job.range,request:job.request});
+     try{const result=await runExtraction(job.request.job_uid,adapter,{root:rootDir,diagnostic:options.diagnostic});stats.started++;if("error"in result)stats.failed++;else stats.completed++;}
+     finally{unregisterInternalJob(job.request.job_uid);}
+    }continue;
+   }
+   // Budget exhaustion must also stop expensive local source preparation.
+   const budgetStore=await openStore(rootDir,profileId,{fs});let hasBudget=false;
+   try{const current=await budgetStore.read();try{hasBudget=canReserve(current.extraction_usage,group[0].binding,1);}catch{hasBudget=false;}}
+   finally{await budgetStore.close();}
+   if(!hasBudget){resource.budget_deferred+=group.length;continue;}
+   const prepared=[];
+   for(const job of group){try{const meta=await adapter.prepare(job.request);if(meta.available)prepared.push({job,meta});else resource.source_deferred++;}catch{resource.source_deferred++;}}
+   while(prepared.length){
+    const urgent=prepared.findIndex(row=>row.meta.urgent);if(urgent>0)prepared.unshift(...prepared.splice(urgent,1));
+    const oldest=Math.min(...prepared.map(row=>row.job.queued_at?Date.parse(row.job.queued_at):0));
+    if(prepared.length<3&&urgent<0&&Date.now()-oldest<90000)break;
+    const batch=[];let inputBytes=0;const max=adapter.batchSupported&&adapter.extractBatch?3:1;
+    while(prepared.length&&batch.length<max){const row=prepared[0];if(inputBytes+row.meta.input_bytes+512>24576)break;batch.push(prepared.shift()!);inputBytes+=row.meta.input_bytes;}
+    if(!batch.length){resource.source_deferred++;prepared.shift();continue;}
+    const jobs=batch.map(r=>r.job);const claimed=await sendWriterCommand(rootDir,profileId,"reserve_extraction_batch",{jobs,reserved_units:inputBytes+1024});
+    if(!claimed.ok||!(claimed.result as {claimed?:boolean})?.claimed){if(claimed.ok&&String((claimed.result as {reason?:string}).reason).startsWith("resource_budget"))resource.budget_deferred+=jobs.length;continue;}
+    for(const job of jobs)registerInternalJob({jobUid:job.request.job_uid,root:rootDir,profileId,binding:job.binding,range:job.range,request:job.request});
+    try{
+     let results:ExtractionResult[];try{results=adapter.extractBatch?await adapter.extractBatch(jobs.map(j=>j.request)):await Promise.all(jobs.map(j=>adapter.extract(j.request)));}catch{results=jobs.map(()=>({error:{code:"adapter_failed",retryable:true}}));}
+     for(let i=0;i<jobs.length;i++){
+      const job=jobs[i],result=results[i]??{error:{code:"batch_result_missing",retryable:true}};stats.started++;
+      if("error"in result){await failExtraction(rootDir,profileId,watermarkKey(job.binding,job.range),result.error.code);stats.failed++;}
+      else{try{for(const d of await commitResult(rootDir,job.binding,job.range,result.proposals))options.diagnostic?.(d);stats.completed++;}catch{await failExtraction(rootDir,profileId,watermarkKey(job.binding,job.range),"stale_binding");stats.failed++;}}
+     }
+    }finally{for(const job of jobs)unregisterInternalJob(job.request.job_uid);}
+   }
+  }
+ }
+ options.diagnostic?.(resource);return stats;
 }
 
 /** Sync may enumerate retired records; extraction must use only the canonical key. */
