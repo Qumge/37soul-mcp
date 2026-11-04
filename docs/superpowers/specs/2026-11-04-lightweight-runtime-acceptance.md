@@ -1,8 +1,8 @@
 # 37Soul 轻量运行时验收（2026-11-04）
 
-本轮实现普通记忆批处理、提炼输入压缩、独立资源预算、Claude 重复上下文省略和精简连接结果。实现位于 `feat/lightweight-runtime`，基线 `7b40073faba043f259aa44aed096022038620d1f`（0.15.5）。主 checkout、本机安装、网站和原始账号数据未修改。本轮尚未合并、推送或发布。
+本轮实现普通记忆批处理、提炼输入压缩、独立资源预算、Claude 重复上下文省略和精简连接结果。实现位于 `feat/lightweight-runtime`，基线 `7b40073faba043f259aa44aed096022038620d1f`（0.15.5）。实施验收阶段未修改主 checkout、本机安装、网站或原始账号数据。随后按用户明确授权完成合并、推送、公开发布与本机升级，最终状态见本文末尾。
 
-最终代码提交：0fc272cb609e7f92fca1f5f7c418f7b5cb338f5c。本文另有文档提交。打包是候选产物验证，仍标记 0.15.5，不能覆盖已发布的同版本资产；正式发布须独立更新版本并检查分发链路。
+最终代码提交：0fc272cb609e7f92fca1f5f7c418f7b5cb338f5c。本文另有文档提交。该阶段的打包仅为候选产物验证，仍标记0.15.5，未覆盖同版本公开资产。正式发布另行更新版本并验证分发链路，最终版本为0.16.1。
 
 ## 实现结果
 
@@ -113,7 +113,7 @@ Node18官方工具链仅下载至临时目录；darwin-arm64.tar.gz SHA256 为 `
 
 临时证据位于 `/private/tmp/37soul-lightweight-delivery-20261104/`（模型合成结果、RED/GREEN日志、基准脚本/数据、最终检查日志及SHA256SUMS）；此路径不是git worktree。源码归档也不含.git，不是额外worktree。持久结论在本文；临时证据可能随系统清理消失。
 
-实现/本地候选打包验证与发布分开：本次没有merge/push/tag/GitHub Release/npm publish，没有安装到真实HOME。用户当前安装不因本次测试自动升级。若后续授权发布，应按仓库既有GitHub Release + install.sh流程发布新版本，验证公开manifest/校验和/安装与运行版本后再宣称用户已可安装。
+实现/本地候选打包验证与发布分开：上述实施阶段未merge/push/tag/GitHub Release/npm publish，也未安装到真实HOME。用户随后明确授权合并、发布并更新本机，实际发布结果如下。分发全程未使用npm publish。
 
 ## 文件清单（相对基线，共37个）
 
@@ -154,3 +154,28 @@ Node18官方工具链仅下载至临时目录；darwin-arm64.tar.gz SHA256 为 `
 - `test/lightweight-scheduler.test.mjs`
 - `test/lightweight-tool-hooks.test.mjs`
 - `docs/superpowers/specs/2026-11-04-lightweight-runtime-acceptance.md`
+
+## 正式发布与本机升级补充
+
+2026-11-04，用户明确要求“合并并且发布更新 本机安装”。已完成：
+
+- 核心优化合并到main；最终发布tag **v0.16.1** 指向 **8d7028585314cd5cf8b0836cf47cff10324ae8c1**，main/tag均已推送。后续发布记录提交不改变发行包。
+- [公开Release](https://github.com/Qumge/37soul-mcp/releases/tag/v0.16.1) 为latest，包含runtime、SHA256、manifest、VERSION四个资产。
+- 官网 `https://37soul.com/install.sh` 的实际plan指向 `runtime/0.16.1`；公开latest、manifest、包内版本与本地产物一致，SHA256 **fd2a7b7dbf81760f324f69ea41f1473f55f9050d4027ae9c03802553f0a85f2b**。官方MCP Registry已读回0.16.1。
+- [tag CI](https://github.com/Qumge/37soul-mcp/actions/runs/41770822994) 全绿。[公开安装验收](https://github.com/Qumge/37soul-mcp/actions/runs/41771042222) 六个job全绿，结果如下。
+
+| 最终公开验收 | 实际结果 |
+| --- | --- |
+| Node18 | 937 tests，937 pass，0 fail，0 skip；smoke全通过 |
+| Node20 | 937 tests，936 pass，0 fail，1 skip；smoke全通过 |
+| Node24 | 937 tests，936 pass，0 fail，1 skip；smoke全通过 |
+| Ubuntu24.04公开安装/原生systemd服务 | PASS |
+| macOS14公开安装/原生launchd服务 | PASS |
+
+Node20/24跳过的是“另一个本地Node18二进制存在时运行下限检查”，其job没有该二进制；独立Node18 job实际执行并通过全部937项。公开服务验收使用干净GitHub-hosted VM和真正的官网curl命令，覆盖0.15.5→0.16.1升级、重复安装、服务重启、卸载、重新安装；每一步核对实际PID/IPC/运行路径及数据保留。两平台下载包的SHA与公开产物一致。没有调用真实模型。
+
+发布过程发现并修正一项平台夹具偏差：原v0.16.0三组Linux CI各4个测试在setup因硬编码macOS `/private/tmp` 而ENOENT；本地macOS未捕获。`7933ae5`改用`os.tmpdir()`，保留所有行为断言；该文件4/4及完整937/937本地通过，然后新tag验证全绿。v0.16.0始终未公开Release，未更新用户安装；未发布草稿已删除，原tag未改写。正式交付版本为0.16.1。
+
+本机已通过同一官网公开脚本从0.15.5升级0.16.1，doctor确认新agentd经IPC响应，launcher、LaunchAgent和运行版本都为0.16.1。安装CLI字节与公开归档完全一致。前后校验全部通过：账号索引、凭证、活动profile、owner/device归属、已有Soul与记忆资产保留；非37Soul的Claude设置与混合用户hooks保留；旧37Soul逐工具订阅已移除，新SessionStart指向0.16.1。
+
+本机doctor仍有升级前就存在的Gemini CLI/Cursor宿主信任/加载待确认项，未把配置写入当作宿主已执行。未新增付费模型验收调用。两个本轮worktree均在各自合并并push后确认干净、当场移除，分支保留。最终发布/本机验收证据位于 `/private/tmp/37soul-0.16.1-public/`、`37soul-0.16.1-install-verified.json` 及两平台CI产物；不包含任何公开提交的本机凭证。
