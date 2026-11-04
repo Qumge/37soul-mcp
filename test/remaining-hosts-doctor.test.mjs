@@ -10,7 +10,7 @@ import {host as opencode} from '../dist/hosts/opencode.js';
 import {writeCodexHookConfig,codexHookConfigPath} from '../dist/adapters/codex.js';
 import {writeHermesPlugin,hermesPluginPath,hermesConfigPath} from '../dist/adapters/hermes.js';
 import {writeOpenCodePlugin,openCodePluginPath,openCodeConfigPath,OPENCODE_PLUGIN_FILENAME} from '../dist/adapters/opencode.js';
-const hosts=[codex,hermes,opencode];
+const hosts=[hermes,opencode];
 async function fixture(host,run) {
  const home=await mkdtemp(path.join(os.tmpdir(),'remaining-doctor-'));const root=path.join(home,'.37soul'),dir=path.join(root,'profiles/work');await mkdir(dir,{recursive:true});
  await writeFile(path.join(root,'config.json'),JSON.stringify({api_base_url:'https://issuer.test',machine_id:'m',tokens:{},active_profile_id:'work'}));
@@ -24,7 +24,7 @@ async function fixture(host,run) {
  const save=()=>writeFile(path.join(dir,'snapshot.json'),JSON.stringify(snapshot));await save();
  if(host.kind==='codex')writeCodexHookConfig(home);else if(host.kind==='hermes')writeHermesPlugin(home);else writeOpenCodePlugin(home);
  const check=()=>host.doctor({home,config:{},assetsMode:true,nodePath:'/node',cliScriptPath:'/cli'});
- const bridgeName=host.kind==='codex'?'codex: SessionStart hook':host.kind+': plugin bridge';
+ const bridgeName=host.kind==='codex'?'codex: local session bridge':host.kind+': plugin bridge';
  try{await run({home,snapshot,binding,receipt,wm,save,check,bridgeName});}finally{await rm(home,{recursive:true,force:true});}
 }
 for(const host of hosts) {
@@ -69,13 +69,11 @@ for(const scenario of ['malformed','Stop-only','old-launcher','wrong-event','wro
   if(scenario==='wrong-type')doc.hooks.SessionStart[0].hooks[0].type='prompt';
   await writeFile(file,scenario==='malformed'?'{broken':JSON.stringify(doc));
   const checks=await codex.doctor({home:f.home,config:{launcher},assetsMode:true,nodePath:'/node',cliScriptPath:'/cli'});
-  const row=checks.find(c=>c.name===f.bridgeName);assert.equal(row.ok,false);assert.notEqual(row.waiting,true);assert.match(row.detail,/37soul install/);
+  const row=checks.find(c=>c.name===f.bridgeName);assert.equal(row.ok,false);assert.notEqual(row.waiting,true);assert.match(row.detail,/No 37Soul hook approval required/);
   assert.ok(!checks.some(c=>c.name==='codex: hook output'&&c.ok));
  }));
 }
-test('Codex current installer-quoted launcher waits without evidence and observes matching evidence',()=>fixture(codex,async f=>{
- const launcher="/current/owner's runtime";writeCodexHookConfig(f.home,{command:launcher});
- const check=()=>codex.doctor({home:f.home,config:{launcher},assetsMode:true,nodePath:'/node',cliScriptPath:'/cli'});
- let row=(await check()).find(c=>c.name===f.bridgeName);assert.equal(row.ok,false);assert.equal(row.waiting,true);
- f.snapshot.receipts.r=f.receipt;await f.save();row=(await check()).find(c=>c.name===f.bridgeName);assert.equal(row.ok,true);
+test('Codex native bridge is independent of legacy hook definitions and receipts',()=>fixture(codex,async f=>{
+ await codex.install.configure({home:f.home,runCommand:async()=>({code:0,stdout:'',stderr:''})},'');
+ const check=()=>codex.doctor({home:f.home,config:{},assetsMode:true});let row=(await check()).find(c=>c.name===f.bridgeName);assert.equal(row.ok,true);assert.notEqual(row.waiting,true);f.snapshot.receipts.r=f.receipt;await f.save();assert.deepEqual((await check()).find(c=>c.name===f.bridgeName),row);
 }));

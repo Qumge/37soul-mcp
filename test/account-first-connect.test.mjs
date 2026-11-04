@@ -75,3 +75,20 @@ test('retrying an interrupted first restore keeps the pull checkpoint instead of
  const store=await openStore(f.root,'p1');await store.transact(d=>{d.pull_cursor='resume-42';});await store.close();
  failPull=false;const out=output();assert.equal(await main(['connect','--name','Sophia Ramirez',...flags],out),0,out.out.stderr);assert.equal(resumedCursor,'resume-42');
 });
+
+test('Codex connects a chosen Soul from its native environment without any hook or source pointer',async t=>{
+ const f=await fixture(t);const old=process.env.CODEX_THREAD_ID;const sid='10000000-0000-4000-8000-000000000001';process.env.CODEX_THREAD_ID=sid;
+ t.after(()=>{if(old===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=old;});
+ f.config.credentials[0].runtime_kind='codex';await writeFile(path.join(f.root,'config.json'),JSON.stringify(f.config));
+ const dir=path.join(f.home,'.codex','sessions','2026','11','04');await mkdir(dir,{recursive:true});const file=path.join(dir,`rollout-test-${sid}.jsonl`);
+ await writeFile(file,JSON.stringify({type:'session_meta',payload:{id:sid}})+'\n');
+ const out=output();assert.equal(await main(['connect','--name','Sophia Ramirez'],out),0,out.out.stderr);
+ assert.equal(JSON.parse(out.out.stdout).connection.state,'attached');const b=Object.values((await read(f.root)).bindings).find(x=>!x.retired);assert.equal(b.native_session_id,sid);assert.equal(b.source_boundary.path,file);assert.equal(b.source_mode,'codex-native');assert.equal(b.codex_cursor.offset,b.source_boundary.start_offset);
+ const before=f.calls.length;const context=output();assert.equal(await main(['context'],context),0,context.out.stderr);assert.match(context.out.stdout,/Sophia Ramirez/);assert.equal(f.calls.length,before,'context restoration stays local');
+});
+
+test('Codex native ID conflicts cannot select another session or grant consent',async t=>{
+ const f=await fixture(t);const old=process.env.CODEX_THREAD_ID;process.env.CODEX_THREAD_ID='10000000-0000-4000-8000-000000000001';
+ t.after(()=>{if(old===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=old;});
+ for(const agent of ['codex','claude-code']){const out=output();assert.notEqual(await main(['connect','--host','277','--agent',agent,'--session','10000000-0000-4000-8000-000000000002'],out),0);assert.match(out.out.stderr,/conflict|does not match/i);}assert.equal(f.calls.length,0);assert.equal(f.selected.size,0);
+});

@@ -259,14 +259,19 @@ export async function sessionSourceBoundary(root: string, key: NativeSessionKey)
   const latest = records[0];
   const record = pending && (!latest || pending.captured_at >= latest.captured_at) ? pending : latest;
   if (!record || !path.isAbsolute(record.path)) return null;
+  return sourceBoundaryForFile(record.path);
+}
+
+/** Open one explicitly proven local file and freeze its current EOF boundary. */
+export async function sourceBoundaryForFile(file: string): Promise<SessionSourceBoundary | null> {
   let handle: FileHandle | null = null;
   try {
-    handle = await open(record.path, constants.O_RDONLY | constants.O_NONBLOCK);
+    handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     const info = await handle.stat();
     if (!info.isFile()) return null;
     const byte = Buffer.alloc(1);
     if (info.size > 0) await handle.read(byte, 0, 1, info.size - 1);
-    return {path: record.path, start_offset: info.size, device: info.dev, inode: info.ino, starts_line: info.size === 0 || byte[0] === 10, anchor_sha256: await boundaryAnchor(handle, info.size)};
+    return {path: file, start_offset: info.size, device: info.dev, inode: info.ino, starts_line: info.size === 0 || byte[0] === 10, anchor_sha256: await boundaryAnchor(handle, info.size)};
   } catch { return null; }
   finally { if (handle) await handle.close().catch(() => {}); }
 }
@@ -400,6 +405,7 @@ function windowContainsTurnRefs(text: string, turnRefs: readonly string[]): bool
     } catch {
       continue; // a partial boundary line is not evidence
     }
+    if (record.type === "event_msg" && (record.payload as any)?.type === "task_complete" && typeof (record.payload as any).turn_id === "string") found.add("codex-turn:" + (record.payload as any).turn_id);
     for (const key of ["uuid", "id", "ordinal"]) {
       const value = record[key];
       if (typeof value === "string" || typeof value === "number") found.add(String(value));

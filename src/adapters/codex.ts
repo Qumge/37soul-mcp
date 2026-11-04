@@ -152,34 +152,30 @@ export function writeCodexHookConfig(
 /** Remove only our handlers; preserve every other vendor hook in hooks.json. */
 export function removeCodexHookConfig(home: string): boolean {
   const file = codexHookConfigPath(home);
-  if (!existsSync(file)) return false;
   try {
-    const document = JSON.parse(readFileSync(file, "utf8")) as Record<string, any>;
-    if (document && typeof document.hooks === "object" && !Array.isArray(document.hooks)) {
-      let remaining = 0;
-      for (const [event, groups] of Object.entries(document.hooks as Record<string, any>)) {
-        if (!Array.isArray(groups)) continue;
-        const kept = groups.filter((group: any) =>
-          !(Array.isArray(group?.hooks) && group.hooks.some((handler: any) =>
-            typeof handler?.command === "string" && handler.command.includes("hook --agent codex"),
-          )),
-        );
-        if (kept.length > 0) { (document.hooks as Record<string, any>)[event] = kept; remaining += kept.length; }
-        else delete (document.hooks as Record<string, any>)[event];
+    const original = readFileSync(file, "utf8");
+    const document = JSON.parse(original);
+    if (!document || typeof document.hooks !== "object" || Array.isArray(document.hooks)) return false;
+    let changed = false;
+    for (const [event, groups] of Object.entries(document.hooks)) {
+      if (!Array.isArray(groups)) continue;
+      const kept = [];
+      for (const group of groups) {
+        if (!Array.isArray(group?.hooks)) {kept.push(group); continue;}
+        const handlers = group.hooks.filter((handler: any) => !(typeof handler?.command === "string" && /(?:^|[\s/\'"])37soul[\'"]?\s+hook --agent codex\b/.test(handler.command)));
+        if (handlers.length === group.hooks.length) kept.push(group);
+        else {changed = true; if (handlers.length) kept.push({...group, hooks: handlers});}
       }
-      if (remaining === 0 && Object.keys(document.hooks).length === 0) {
-        rmSync(file, { force: true });
-      } else {
-        writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
-      }
-      return true;
+      if (kept.length) document.hooks[event] = kept;
+      else if (groups.length) delete document.hooks[event];
     }
-  } catch {
-    // malformed file: leave it untouched rather than deleting user data
-    return false;
-  }
-  rmSync(file, { force: true });
-  return true;
+    if (!changed) return false;
+    const backup = `${file}.37soul-${new Date().toISOString().replace(/[:.]/g, "-")}.bak`;
+    writeFileSync(backup, original, {mode: 0o600, flag: "wx"});
+    if (Object.keys(document).length === 1 && Object.keys(document.hooks).length === 0) rmSync(file);
+    else writeFileSync(file, JSON.stringify(document, null, 2) + "\n", {mode: 0o600});
+    return true;
+  } catch {return false;} // malformed/foreign files are never overwritten
 }
 
 function parseJsonl(jsonl: string): Array<Record<string, any>> {
@@ -241,9 +237,20 @@ export function latestCodexCompletedTurnRefs(jsonl: string): { session_id: strin
 
 export function renderCodexTurn(jsonl: string, refs: readonly string[]): string {
   const wanted = new Set(refs);
-  const records = parseJsonl(jsonl).filter(
-    (record) => typeof record.ordinal === "number" && wanted.has(String(record.ordinal)),
-  );
+  let records: Array<Record<string, any>> = [];
+  if (refs.some(ref => ref.startsWith("codex-turn:"))) {
+    let active: string | null = null, pending: Array<Record<string, any>> = [];
+    for (const record of parseJsonl(jsonl)) {
+      const p = record.payload;
+      if (record.type === "compacted") {active = null; pending = []; continue;}
+      if (record.type === "event_msg" && p?.type === "task_started") {active = typeof p.turn_id === "string" ? p.turn_id : null; pending = [];}
+      else if (record.type === "event_msg" && ["task_aborted", "turn_aborted", "task_interrupted"].includes(p?.type)) {active = null; pending = [];}
+      else if (record.type === "event_msg" && p?.type === "task_complete") {
+        if (active === p.turn_id && wanted.has("codex-turn:" + active)) records.push(...pending);
+        active = null; pending = [];
+      } else if (active && record.type === "response_item") pending.push(record);
+    }
+  } else records = parseJsonl(jsonl).filter(record => typeof record.ordinal === "number" && wanted.has(String(record.ordinal)));
   const parser = createCodexParser();
   const events: ParsedEvent[] = [];
   for (const record of records) events.push(...parser.push(record));

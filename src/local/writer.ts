@@ -44,6 +44,7 @@ export const WRITER_COMMANDS = [
   "review_asset",
   "delete_asset",
   "runtime_event",
+  "observe_codex",
   "resolve_source_capture",
   "begin_extraction",
   "reserve_extraction_batch",

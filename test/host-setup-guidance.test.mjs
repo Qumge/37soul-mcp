@@ -7,7 +7,7 @@ import { host as codex } from '../dist/hosts/codex.js';
 import { host as opencode } from '../dist/hosts/opencode.js';
 import { host as hermes } from '../dist/hosts/hermes.js';
 
-for (const host of [codex, opencode, hermes]) {
+for (const host of [opencode, hermes]) {
   test(`${host.kind}: installed without runtime evidence waits with setup guidance and separate observation boundaries`, async () => {
     const home = mkdtempSync(path.join(tmpdir(), 'feedback-host-'));
     try {
@@ -42,3 +42,8 @@ for (const host of [codex, opencode, hermes]) {
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
 }
+
+ test('codex: installer exposes a local session bridge without pending hook trust', async () => {
+ const home=mkdtempSync(path.join(tmpdir(),'codex-native-guide-'));
+ try {mkdirSync(path.join(home,'.codex'),{recursive:true});const result=await codex.install.configure({home,runCommand:async()=>{throw Error('forbidden');}},'');assert.equal(result.hook,false);assert.equal(result.report,undefined);const checks=await codex.doctor({home,config:{},assetsMode:true});const row=checks.find(c=>c.name==='codex: local session bridge');assert.equal(row.ok,true);assert.match(row.detail,/No 37Soul hook approval required/);assert.match(row.detail,/does not prove model adoption/);assert.ok(!checks.some(c=>c.name==='codex: SessionStart hook'));}finally{rmSync(home,{recursive:true,force:true});}
+ });

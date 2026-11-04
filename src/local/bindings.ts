@@ -1,3 +1,4 @@
+import {verifyCodexRollout, freshCodexBoundary} from '../agentd/codex-native.js';
 import {sessionSourceBoundary, sourceMatchesBoundary} from "../agentd/source-index.js";
 import {preserveAvatar,registrationAvatar} from './avatars.js';
 import { loadConfig } from "../agentd/state.js";
@@ -305,6 +306,14 @@ async function rebindExisting(
     cloud_revision: existing.cloud_revision ?? existing.revision,
     unconfirmed: true,
   };
+  if (existing.source_mode === "codex-native") {
+    const boundary = await freshCodexBoundary(existing);
+    if (!boundary) throw new StoreError("session_context_unavailable", "Use 37soul connect to establish a fresh Codex source boundary.");
+    next.source_boundary = boundary;
+    next.codex_cursor = {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line};
+    next.codex_consent_revision = snap.consents[`${snap.cloud_device_uid}:${soulUid}`]?.revision;
+    next.codex_capture_paused = false;
+  }
   const op = bindingOutboxOp(next, "bound", existing.revision, pred ? [pred] : []);
   const written = await store.transact((draft) => {
     draft.bindings[k] = next;
@@ -789,9 +798,14 @@ registerWriterCommand("connect_session", async ({root, request}) => {
     const k = bindingKey(key);
     const existing = snap.bindings[k];
     const boundary = await sessionSourceBoundary(root, key);
-    if (existing?.state === "bound" && existing.soul_uid === soulUid && existing.source_boundary && boundary?.path === existing.source_boundary.path && await sourceMatchesBoundary(boundary.path, existing.source_boundary)) return toBinding(existing);
+    const nativeMode = p.source_mode === "codex-native" && key.runtime_kind === "codex";
+    if (nativeMode && (!boundary || !await verifyCodexRollout(boundary.path, key.native_session_id))) throw new StoreError("session_context_unavailable", "Codex rollout does not match the exact native session.");
+    if (existing?.state === "bound" && existing.soul_uid === soulUid && existing.source_boundary && boundary?.path === existing.source_boundary.path && await sourceMatchesBoundary(boundary.path, existing.source_boundary)) {
+      if (nativeMode && existing.source_mode !== "codex-native") await store.transact(d => {d.bindings[k].source_mode = "codex-native"; d.bindings[k].codex_cursor = {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line}; d.bindings[k].codex_consent_revision = consent.revision;});
+      return toBinding(existing);
+    }
     if (!boundary) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message so its managed hook can report the native session; never choose another terminal by recency.");
-    const next = {...createBinding(key, soulUid), source_boundary: boundary};
+    const next: BindingSnapshot = {...createBinding(key, soulUid), source_boundary: boundary, ...(nativeMode ? {source_mode: "codex-native", codex_consent_revision: consent.revision, codex_cursor: {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line}} : {})};
     const op = bindingOutboxOp(next, "bound", 0, []);
     await store.transact(draft => {
       // Keep the old cloud state and frozen provenance resolvable for pending

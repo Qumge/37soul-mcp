@@ -1,3 +1,4 @@
+import {observeCodexBinding, freshCodexBoundary} from '../agentd/codex-native.js';
 import {canReserve,reserve} from './resource-budget.js';
 import {rememberPendingSessionSource} from "../agentd/session-source-hints.js";
 /**
@@ -205,7 +206,7 @@ export async function runExtraction(
 
 // --- write paths: every snapshot write goes through the single writer --------------
 
-type ExtractionCommand = "defer_extraction" | "reserve_extraction_batch" | "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
+type ExtractionCommand = "observe_codex" | "defer_extraction" | "reserve_extraction_batch" | "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
 
 /**
  * Send a writer command, retrying through a transient in-process writer when no
@@ -615,6 +616,59 @@ function isSourceRange(value: unknown): value is SourceRange {
  * binding and writes a `pending` watermark — it never waits on a model call. The
  * worker process picks the pending job up through `drainPendingExtractions`.
  */
+/** The observer reads bound sources only, inside the same writer FIFO as detach/rebind. */
+const codexObserverRotation = new Map<string, number>();
+registerWriterCommand("observe_codex", async ({root, request}) => {
+  const profile = request.profile_id;
+  const store = await openStore(root, profile);
+  let bindings: BindingSnapshot[];
+  try {
+    const snap = await store.read();
+    bindings = Object.values(snap.bindings).filter(b => {
+      const consent = snap.consents[`${snap.cloud_device_uid}:${b.soul_uid}`];
+      return b.source_mode === "codex-native" && b.runtime_kind === "codex" && isCurrentBinding(snap, b);
+    });
+  } finally {await store.close();}
+  let scheduled = 0;
+  const rotationKey = root + "\0" + profile;
+  const offset = (codexObserverRotation.get(rotationKey) ?? 0) % (bindings.length || 1);
+  const selected = [...bindings.slice(offset), ...bindings.slice(0, offset)].slice(0, 16);
+  codexObserverRotation.set(rotationKey, offset + selected.length);
+  for (const binding of selected) {
+    const consentStore = await openStore(root, profile); let consent;
+    try {const snap = await consentStore.read(); consent = snap.consents[`${snap.cloud_device_uid}:${binding.soul_uid}`];}
+    finally {await consentStore.close();}
+    const authorized = consent?.enabled && consent.categories.includes("identity") && consent.categories.some(c => c === "relationship" || c === "experience");
+    if (!authorized && binding.codex_capture_paused) continue;
+    if (!authorized || binding.codex_capture_paused || (binding.codex_consent_revision !== undefined && binding.codex_consent_revision !== consent?.revision)) {
+      const boundary = authorized ? await freshCodexBoundary(binding) : null;
+      const update = await openStore(root, profile);
+      try {await update.transact(d => {
+        if (!isCurrentBinding(d, binding)) return;
+        const current = d.bindings[bindingKey(binding)]; current.codex_capture_paused = !authorized || !boundary;
+        if (boundary) {current.source_boundary = boundary; current.codex_cursor = {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line}; current.codex_consent_revision = consent!.revision;}
+      });} finally {await update.close();}
+      continue;
+    }
+    const observed = await observeCodexBinding(binding);
+    if (!observed) continue;
+    for (const completed of observed.completed) {
+      const digest = createHash("sha256").update(JSON.stringify([binding.binding_uid, binding.revision, completed.ref])).digest("hex");
+      const ref = `${digest.slice(0,8)}-${digest.slice(8,12)}-${digest.slice(12,16)}-${digest.slice(16,20)}-${digest.slice(20,32)}`;
+      await captureSourcePointer(root, profile, ref, {runtime_kind: "codex", native_session_id: binding.native_session_id, path: binding.source_boundary!.path, captured_at: new Date().toISOString(), end_offset: completed.window.end, source_boundary: binding.source_boundary, frozen_window: completed.window});
+      const event: RuntimeEvent = {key: binding, event_ref: ref, kind: "turn_completed", source_turn_refs: [completed.ref], internal_job_uid: null};
+      const result = await enqueueExtractionDirect(root, binding, rangeForEvent(event), randomUUID(), defaultStoreFs);
+      if (result.scheduled) scheduled++;
+    }
+    if (JSON.stringify(binding.codex_cursor) !== JSON.stringify(observed.cursor)) {
+      const currentStore = await openStore(root, profile);
+      try {await currentStore.transact(d => {if (isCurrentBinding(d, binding)) d.bindings[bindingKey(binding)].codex_cursor = observed.cursor;});}
+      finally {await currentStore.close();}
+    }
+  }
+  return {scheduled};
+});
+
 registerWriterCommand("runtime_event", async ({ root, request }) => {
   const event = request.payload.event;
   if (!isRuntimeEvent(event)) {
@@ -842,6 +896,7 @@ export async function drainPendingExtractions(
  const rootDir=resolveRoot(root),fs=openFs(options),stats={started:0,completed:0,failed:0};
  const resource={stage:"resource" as const,pending:0,budget_deferred:0,stale_pending:0,source_deferred:0};
  for(const profileId of await listProfiles(rootDir)){
+  await sendWriterCommand(rootDir,profileId,"observe_codex",{});
   for(const ref of await pendingSourceCaptures(rootDir,profileId))await sendWriterCommand(rootDir,profileId,"resolve_source_capture",{event_ref:ref});
   const store=await openStore(rootDir,profileId,{fs});const pending:PendingJob[]=[];
   try{const snap=await store.read();for(const [key,wm]of Object.entries(snap.extraction_watermarks)){

@@ -137,7 +137,7 @@ The CLI keeps a managed copy of the photo, so moving or deleting the original do
 | Host | What to do after installation |
 | --- | --- |
 | Claude Code | Close the old session and open a new one to load the managed hooks and guidance. |
-| Codex | Open `/hooks`, review and approve 37Soul's hook, then open a new session. The installer cannot approve it for you. |
+| Codex | Runtime 0.17.0+: tell the Agent which Soul to connect. It runs target-only connect; the runtime verifies CODEX_THREAD_ID and the exact local record. No hook approval, restart or repeated prompt is needed. |
 | OpenCode | Restart to load the managed plugin. Resolve any plugin loading errors reported by the host. |
 | Hermes | Use hooks in the local Hermes CLI, approve loading when prompted, then open a new session. A gateway-only configuration cannot replace the CLI. |
 | Pi | Restart to load the managed extension. Approve it if the host restricts extensions, then open a new session. |

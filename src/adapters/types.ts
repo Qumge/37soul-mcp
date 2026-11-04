@@ -134,6 +134,10 @@ export interface SessionSourceBoundary {
 }
 export type BindingSnapshot = Binding & NativeSessionKey & {
   source_boundary?: SessionSourceBoundary;
+  source_mode?: "codex-native";
+  codex_consent_revision?: number;
+  codex_capture_paused?: boolean;
+  codex_cursor?: import("../agentd/codex-native.js").CodexCursor;
   /** Local delivery generation; never sent as binding wire data. */
   context_epoch?: string;
   /** Local sync/provenance archive; never a current native binding or a wire field. */

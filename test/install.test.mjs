@@ -622,72 +622,22 @@ test("install: records an install manifest and persists no transcript fallback i
   assert.ok(kinds.includes("fragment"));
   assert.ok(kinds.includes("config"));
   assert.ok(kinds.includes("service"));
-  assert.ok(kinds.includes("codex_hooks"), "the managed Codex hook-config file is recorded in the manifest");
+  assert.ok(!kinds.includes("codex_hooks"), "Codex native session bridge installs no hook handler");
   const hooksEntry = manifest.entries.find((entry) => entry.kind === "hooks");
   assert.ok(hooksEntry.events.includes("SessionStart") && hooksEntry.events.includes("SessionEnd"));
-  const codexHooksEntry = manifest.entries.find((entry) => entry.kind === "codex_hooks");
-  assert.ok(codexHooksEntry.events.includes("SessionStart") && codexHooksEntry.events.includes("SessionEnd"));
+
 
   const config = await loadConfig(dataRoot(h.home));
   assert.deepEqual(config.transcript_fallback, [], "assets mode persists no legacy transcript fallback");
   h.cleanup();
 });
 
-test("install: reports Codex hooks as installed-but-unverified and the AGENTS fragment carries no persona", async () => {
-  const h = harness();
-
-  const result = await install(h.deps, { agents: ["codex"] });
-  const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
-
-  // Five separate states; our own write never makes trust/events/injection green.
-  assert.equal(codexEntry.hook, false);
-  assert.deepEqual(codexEntry.report, {
-    installed: true,
-    trusted: false,
-    events_seen: false,
-    extraction_capable: false,
-    injection_capable: false,
-  });
-  assert.ok(
-    h.logs.some((line) => line.includes("codex") && line.includes("trusted=pending") && line.includes("injection=no")),
-    "the honest five-state line is logged",
-  );
-
-  // Official hooks.json shape. Installing it is not evidence of trust/execution.
-  const hookConfig = JSON.parse(readFileSync(codexHookConfigPath(h.home), "utf8"));
-  assert.ok(hookConfig.hooks.SessionStart, "official SessionStart group exists");
-  assert.ok(hookConfig.hooks.UserPromptSubmit, "official UserPromptSubmit group exists");
-  assert.ok(hookConfig.hooks.Stop, "official Stop group exists");
-  assert.match(hookConfig.hooks.SessionStart[0].hooks[0].command, /hook --agent codex --event SessionStart/);
-
-  // The global AGENTS fragment carries no Soul identity — persona lives only in the
-  // per-session ContextBundle.
-  const fragment = readFileSync(codexInstructionsPath(h.home), "utf8");
-  assert.ok(fragment.includes("37soul:begin"));
-  assert.ok(!fragment.includes("soul_uid"));
-  assert.ok(!fragment.includes("character:"));
-  assert.ok(!fragment.includes("greeting:"));
-  assert.ok(!fragment.includes("Growth"));
-
-  h.cleanup();
+test("install: Codex uses native identity without hook trust and its global fragment carries no persona", async () => {
+ const h=harness();try {const result=await install(h.deps,{agents:["codex"]});const entry=result.installed.find(e=>e.agentKind==="codex");assert.equal(entry.hook,false);assert.equal(entry.report,undefined);assert.equal(existsSync(codexHookConfigPath(h.home)),false);assert.ok(h.logs.some(l=>l.includes("no 37Soul hook approval required")));const fragment=readFileSync(codexInstructionsPath(h.home),"utf8");assert.match(fragment,/CODEX_THREAD_ID/);assert.match(fragment,/37soul context/);for(const secret of ["soul_uid","character:","greeting:","Growth"])assert.ok(!fragment.includes(secret));}finally{h.cleanup();}
 });
 
-test("install: Codex official hooks are installed but trust stays unclaimed", async () => {
-  const h = harness();
-  const result = await install(h.deps, { agents: ["codex"] });
-  const codexEntry = result.installed.find((entry) => entry.agentKind === "codex");
-  assert.deepEqual(codexEntry.report, {
-    installed: true,
-    trusted: false,
-    events_seen: false,
-    extraction_capable: false,
-    injection_capable: false,
-  });
-  assert.ok(
-    h.logs.some((line) => line.includes("codex") && line.includes("trusted=pending") && line.includes("injection=no")),
-    "the honest five-state line is logged",
-  );
-  h.cleanup();
+test("install: repeated Codex installs leave foreign hooks unchanged", async () => {
+ const h=harness();try{const file=codexHookConfigPath(h.home);const foreign=JSON.stringify({custom:true,hooks:{SessionStart:[{hooks:[{type:"command",command:"other-tool"}]}]}});writeFileSync(file,foreign);await install(h.deps,{agents:["codex"]});await install(h.deps,{agents:["codex"]});assert.equal(readFileSync(file,"utf8"),foreign);}finally{h.cleanup();}
 });
 test("uninstall: clears our entries from every Claude hook event, not just SessionStart", async () => {
   const h = harness();
@@ -903,30 +853,8 @@ test("doctor: OpenCode plugin bridge reports a specific honest state", async () 
   h.cleanup();
 });
 
-test("doctor: Codex hook reports an honest trust state, never a blanket ok", async () => {
-  const h = harness();
-  await install(h.deps, { agents: ["codex"] });
-
-  const fetchImpl = async () => ({ ok: true, status: 200, async json() { return { text: "brief" }; } });
-  const byName = (r) => Object.fromEntries(r.checks.map((c) => [c.name, c]));
-
-  // The managed hook-config file exists, but Codex has not authorized it: the
-  // doctor must say "not trusted", not the old `ok: true` hand-wave.
-  const check = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
-  assert.ok(check, "the codex SessionStart hook check is present");
-  assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
-  assert.match(check.detail, /not observed.*\/hooks.*approve.*load.*same request/);
-  assert.equal(check.waiting, true);
-  assert.doesNotMatch(check.detail, /remain unverified/);
-
-  // Retired raw spool is not current runtime evidence or a trust claim.
-  mkdirSync(path.join(h.home, ".37soul", "spool", "codex"), { recursive: true });
-  writeFileSync(path.join(h.home, ".37soul", "spool", "codex", "s.jsonl"), "{}\n", { mode: 0o600 });
-  const observed = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
-  assert.equal(observed.ok, false, "observation is not persistent trust");
-  assert.equal(observed.detail, check.detail, "old spool must not change current diagnostics");
-
-  h.cleanup();
+test("doctor: Codex bridge readiness does not invent model adoption or change with old spool", async () => {
+ const h=harness();try{await install(h.deps,{agents:["codex"]});const check=async()=>{const r=await runDoctor({...h.deps,fetch:async()=>({ok:true,status:200,json:async()=>({text:"brief"})})});return r.checks.find(c=>c.name==="codex: local session bridge");};const before=await check();assert.equal(before.ok,true);assert.match(before.detail,/does not prove model adoption/);mkdirSync(path.join(h.home,".37soul","spool","codex"),{recursive:true});writeFileSync(path.join(h.home,".37soul","spool","codex","s.jsonl"),"{}\n");assert.deepEqual(await check(),before);}finally{h.cleanup();}
 });
 
 // ---------------------------------------------------------------------------

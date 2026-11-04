@@ -40,7 +40,7 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
   const plan = await planInstall(deps);
   const hostFiles = [
     [".claude/settings.json", ".claude/CLAUDE.md"],
-    [".codex/AGENTS.md", ".codex/hooks.json"],
+    [".codex/AGENTS.md"],
     [".config/opencode/plugins/37soul-soul.js"],
     [".hermes/agent-hooks/37soul-hook.py"],
     [".pi/agent/extensions/37soul-soul.ts"],

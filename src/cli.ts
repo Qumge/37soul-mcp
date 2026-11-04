@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import {codexEnvironmentSession, findCodexRollout} from './agentd/codex-native.js';
+import {captureSourcePointer} from './agentd/source-index.js';
 import {ownedHosts} from './local/cloud-account.js';
 import {configureCloudSelectionHttp} from './local/cloud-selection.js';
 import {sessionSourceBoundary} from './agentd/source-index.js';
@@ -36,6 +38,9 @@ import { runHookCommand } from "./hook.js";
 import { startWriter, sendWriter, type WriterCommand, type WriterResult } from "./local/writer.js";
 import { resolveLocalAssetsProfileSync } from "./local/profiles.js";
 import { openStore, profilesDir, snapshotPath, StoreError } from "./local/store.js";
+import {selectContext} from "./assets/context.js";
+import {ownerContextInput} from "./sync/client.js";
+import {bindingKey} from "./local/bindings.js";
 import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./local/bindings.js";
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
@@ -83,7 +88,8 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul login [--host <id>] [--profile <id>]                  login to your account; choose a Soul later in your Agent
   37soul hosts [--name <name>] [--limit <n>] [--offset <n>]   list your owned Souls
   37soul whoami --host <id> [--agent <kind>]    read identity using this local login
-  37soul connect --name <name>|--host <id> --agent <kind> --session <native-id>   attach this session
+  37soul connect --name <name>|--host <id> [--agent <kind> --session <native-id>]   Codex resolves its native session automatically
+  37soul context                               restore this Codex session’s selected Soul locally
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
   37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
                                                 profile commands default to the valid active profile
@@ -222,6 +228,8 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
       return startAgentd(io, home);
     case "soul":
       return soulCommand(root, rest, io, deps);
+    case "context":
+      return currentContextCommand(root, rest, io);
     case "recall":
       return recallCommand(root, rest, io);
     case "bind":
@@ -847,6 +855,23 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
   return 2;
 }
 
+/** Local context restoration for the exact executing Codex session; never creates a binding. */
+async function currentContextCommand(root: string, rest: string[], io: CliIO): Promise<number> {
+  const session = codexEnvironmentSession();
+  if (!session) {io.stderr("Current Codex native session ID is unavailable. No context was read.\n"); return 2;}
+  const profile = await profileIdFromArgs(root, rest, io); if (profile === null) return 1;
+  const store = await openStore(root, profile);
+  try {
+    const snap = await store.read();
+    const key = {profile_id: profile, device_id: snap.device_id, runtime_kind: "codex" as const, native_session_id: session};
+    const binding = snap.bindings[bindingKey(key)];
+    if (!binding || binding.state !== "bound" || binding.retired) {io.stderr("This Codex session has no selected Soul. Use 37soul connect with the chosen name or Host ID.\n"); return 1;}
+    const bundle = selectContext({...ownerContextInput(snap, binding.soul_uid, binding, "session"), budgetBytes: 4096}, {identityBudgetBytes: 2048});
+    io.stdout(bundle.rendered_text + "\n"); return 0;
+  } catch (error) {io.stderr(error instanceof StoreError ? error.message + "\n" : "Could not read this session's local Soul context.\n"); return 1;}
+  finally {await store.close();}
+}
+
 async function hostsCommand(root: string, rest: string[], io: CliIO, deps: {apiBase: string; fetch: typeof fetch}): Promise<number> {
   const runtime = flagValue(rest, "--agent");
   const limitArg = flagValue(rest, "--limit") ?? "50";
@@ -868,8 +893,13 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
   const hostArg = flagValue(rest, "--host");
   let hostId = hostArg && /^[1-9]\d*$/.test(hostArg) ? Number(hostArg) : NaN;
   const name = flagValue(rest, "--name")?.trim();
-  const runtime = flagValue(rest, "--agent");
-  const session = flagValue(rest, "--session");
+  let runtime = flagValue(rest, "--agent");
+  let session = flagValue(rest, "--session");
+  const nativeSession = attach ? codexEnvironmentSession() : null;
+  if (nativeSession) {
+    if ((runtime !== undefined && runtime !== "codex") || (session && session !== nativeSession)) {io.stderr("The requested session conflicts with the current Codex native session.\n"); return 2;}
+    runtime = "codex"; session = nativeSession;
+  }
   if ((rest.includes("--agent") && !(RUNTIME_KINDS as readonly string[]).includes(runtime ?? "")) || (attach && name && rest.includes("--host")) || (!Number.isSafeInteger(hostId) && !(attach && name && !rest.includes("--host")))) {
     io.stderr("Choose a positive --host, or connect --name with an exact displayed name; --agent must be a supported runtime.\n"); return 2;
   }
@@ -889,6 +919,11 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
     if (attach) {
       await requireActive();
       const deviceId = await readProfileDeviceId(root, profile);
+      if (runtime === "codex" && nativeSession === session) {
+        const file = await findCodexRollout(path.dirname(root), session!, process.env.CODEX_HOME);
+        if (!file) throw new StoreError("session_context_unavailable", "The current Codex native rollout is missing or ambiguous. Keep the chosen Soul and retry when its local session record is available; no hook approval or new login is required.");
+        await captureSourcePointer(root, profile, randomUUID(), {runtime_kind: "codex", native_session_id: session!, path: file, captured_at: new Date().toISOString()});
+      }
       const source = await sessionSourceBoundary(root, {profile_id: profile,device_id: deviceId,runtime_kind: runtime as RuntimeKind,native_session_id: session!});
       if (!source) throw new StoreError("session_context_unavailable", nativeContextRecoveryMessage("The current session has no valid hook source context yet.", hostId, name));
       if (name) {
@@ -937,7 +972,7 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
       try {snap=await store.read();} finally {await store.close();}
       const soul = Object.values(snap.souls).find(s=>s.legacy_host_id===hostId);
       if (!soul) throw new StoreError("restore_pending", "The selected Soul has not downloaded. Retry 37soul connect; do not log in again.");
-      const result = await runWriterCommand(root, profile, "connect_session", {device_id:snap.device_id,runtime_kind:runtime,native_session_id:session,soul_uid:soul.soul_uid});
+      const result = await runWriterCommand(root, profile, "connect_session", {device_id:snap.device_id,runtime_kind:runtime,native_session_id:session,soul_uid:soul.soul_uid,...(runtime === "codex" && nativeSession === session ? {source_mode:"codex-native"} : {})});
       if (!result.ok) throw new StoreError(result.error.code,result.error.message);
       await requireActive();identity.connection={...(result.result as Record<string,unknown>),state:"attached"};
     }
