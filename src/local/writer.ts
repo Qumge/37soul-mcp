@@ -200,6 +200,11 @@ export async function startWriter(
   };
 
   const server = net.createServer((socket) => {
+    // A foreground hook can reach its deadline while this process is busy. Its
+    // peer-close event may not be observed before the reply microtask writes,
+    // so `socket.destroyed` alone cannot prevent EPIPE. Close only that client;
+    // commands already accepted into the mutation FIFO must still complete.
+    socket.on("error", () => socket.destroy());
     let buffer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
