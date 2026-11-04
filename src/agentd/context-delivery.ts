@@ -6,7 +6,7 @@ const hash=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).d
 export const contextDigest=(text:string)=>hash(text);
 function directory(root:string,profile:string){if(!profile||/[\\/\0]/.test(profile)||profile.includes('..'))throw new Error('invalid delivery profile');return path.join(root,'context-delivery',profile);}
 function target(root:string,binding:BindingSnapshot){return path.join(directory(root,binding.profile_id),hash([binding.device_id,binding.runtime_kind,binding.native_session_id])+'.json');}
-const scope=(binding:BindingSnapshot,source:string)=>hash([binding.binding_uid,binding.revision,binding.soul_uid,binding.source_boundary??null,source]);
+const scope=(binding:BindingSnapshot,source:string)=>hash([binding.binding_uid,binding.revision,binding.soul_uid,binding.context_epoch??null,binding.source_boundary??null,source]);
 export async function contextAlreadyDelivered(root:string,binding:BindingSnapshot,digest:string,source:string):Promise<boolean>{
  try{const row=JSON.parse(await readFile(target(root,binding),'utf8'));return row.scope===scope(binding,source)&&row.digest===digest&&Number.isFinite(row.at)&&Date.now()-row.at<7*86400000;}catch{return false;}
 }

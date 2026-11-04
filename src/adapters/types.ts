@@ -134,6 +134,8 @@ export interface SessionSourceBoundary {
 }
 export type BindingSnapshot = Binding & NativeSessionKey & {
   source_boundary?: SessionSourceBoundary;
+  /** Local delivery generation; never sent as binding wire data. */
+  context_epoch?: string;
   /** Local sync/provenance archive; never a current native binding or a wire field. */
   retired?: true;
 };

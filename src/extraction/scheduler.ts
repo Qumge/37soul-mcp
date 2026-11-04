@@ -633,6 +633,11 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
   // event ref — path only, never text. Validated here (absolute, existing regular
   // file); runtimes that omit a transcript location are never indexed.
   const binding = await resolveBinding(event.key, undefined, { root });
+  if(binding && ["compact","reset","resume"].includes(event.kind)){
+    const store=await openStore(root,event.key.profile_id);
+    try{await store.transact(d=>{if(isCurrentBinding(d,binding))d.bindings[bindingKey(event.key)].context_epoch=randomUUID();});}
+    finally{await store.close();}
+  }
   if (event.kind === "compact" || event.kind === "reset") {
     // A lifecycle compaction may preserve/append the old prefix. Still retire its
     // unresolved witnesses; a late flush cannot revive a pre-compaction turn.
@@ -793,7 +798,7 @@ registerWriterCommand("fail_extraction", async ({ root, request }) => {
  * also works for `pending` watermarks written by the writer process (whose registry
  * is a different process). Never runs a model call on an exhausted range.
  */
-type PendingJob={binding:BindingSnapshot;range:SourceRange;request:ExtractionRequest;queued_at?:string};
+type PendingJob={binding:BindingSnapshot;range:SourceRange;request:ExtractionRequest;queued_at?:string;attempts?:number};
 
 registerWriterCommand("reserve_extraction_batch",async({root,request})=>{
  const jobs=request.payload.jobs as PendingJob[];const units=request.payload.reserved_units;
@@ -830,7 +835,7 @@ export async function drainPendingExtractions(
    if(wm.completed||wm.attempts>=MAX_AUTO_ATTEMPTS)continue;resource.pending++;
    const binding=findBindingByUid(snap,wm.request.binding_uid);
    if(!binding||binding.revision!==wm.request.binding_revision){resource.stale_pending++;continue;}
-   pending.push({binding,range:rangeFromKeyAndRequest(key,wm.request),request:wm.request,queued_at:wm.queued_at});
+   pending.push({binding,range:rangeFromKeyAndRequest(key,wm.request),request:wm.request,queued_at:wm.queued_at,attempts:wm.attempts});
   }}finally{await store.close();}
   const groups=new Map<string,PendingJob[]>();
   for(const job of pending){const id=JSON.stringify([job.binding.binding_uid,job.binding.revision]);const group=groups.get(id)??[];group.push(job);groups.set(id,group);}
@@ -855,7 +860,7 @@ export async function drainPendingExtractions(
     const urgent=prepared.findIndex(row=>row.meta.urgent);if(urgent>0)prepared.unshift(...prepared.splice(urgent,1));
     const oldest=Math.min(...prepared.map(row=>row.job.queued_at?Date.parse(row.job.queued_at):0));
     if(prepared.length<3&&urgent<0&&Date.now()-oldest<90000)break;
-    const batch=[];let inputBytes=0;const max=adapter.batchSupported&&adapter.extractBatch?3:1;
+    const batch=[];let inputBytes=0;const max=prepared.slice(0,3).some(row=>(row.job.attempts??0)>0)?1:adapter.batchSupported&&adapter.extractBatch?3:1;
     while(prepared.length&&batch.length<max){const row=prepared[0];if(inputBytes+row.meta.input_bytes+512>24576)break;batch.push(prepared.shift()!);inputBytes+=row.meta.input_bytes;}
     if(!batch.length){resource.source_deferred++;prepared.shift();continue;}
     const jobs=batch.map(r=>r.job);const claimed=await sendWriterCommand(rootDir,profileId,"reserve_extraction_batch",{jobs,reserved_units:inputBytes+1024});
