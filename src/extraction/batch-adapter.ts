@@ -22,7 +22,10 @@ function nativeSchema(value:any):any{
  return Object.fromEntries(Object.entries(value).filter(([k])=>!['maxLength','maxItems'].includes(k)).map(([k,v])=>[k,nativeSchema(v)]));
 }
 export function withBatchExtraction(factory:(deps:AdapterDeps)=>RuntimeAdapter,deps:AdapterDeps):RuntimeAdapter{
- const base=factory(deps);const cached=new Map<string,Invocation|ExtractionResult>();
+ const base=factory(deps);
+ // A blocked native host has no model surface to batch. Preserve its existing diagnostic path.
+ if(typeof base.extract!=="function"||["cursor","gemini-cli"].includes(base.runtime_kind))return base;
+ const baseExtract=base.extract.bind(base);const cached=new Map<string,Invocation|ExtractionResult>();
  // Only these native surfaces currently have an explicit tools-denial path.
  const batchSupported=base.runtime_kind==='claude-code'||base.runtime_kind==='pi';
  const prepare=async(request:ExtractionRequest):Promise<PreparedExtraction>=>{
@@ -42,7 +45,7 @@ export function withBatchExtraction(factory:(deps:AdapterDeps)=>RuntimeAdapter,d
   return {available:false,urgent:false,input_bytes:0,error_code:'error'in entry?entry.error.code:'source_unavailable'};
  };
  const extract=async(request:ExtractionRequest):Promise<ExtractionResult>=>{
-  try{return await base.extract(request);}catch(error){return failure((error as {code?:string}).code??'source_preparation_failed');}
+  try{return await baseExtract(request);}catch(error){return failure((error as {code?:string}).code??'source_preparation_failed');}
   finally{cached.delete(request.job_uid);}
  };
  const extractBatch=async(requests:readonly ExtractionRequest[]):Promise<ExtractionResult[]>=>{
@@ -72,5 +75,5 @@ export function withBatchExtraction(factory:(deps:AdapterDeps)=>RuntimeAdapter,d
    }));
   }finally{for(const r of requests)cached.delete(r.job_uid);}
  };
- return {...base,prepare,extract,extractBatch,batchSupported};
+ return Object.assign(base,{prepare,extract,extractBatch,batchSupported});
 }
