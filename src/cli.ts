@@ -859,6 +859,11 @@ async function hostsCommand(root: string, rest: string[], io: CliIO, deps: {apiB
   catch (error) { io.stderr(`${error instanceof StoreError ? error.message : "Could not list owned Souls: network or timeout error."}\n`); return 1; }
 }
 
+function nativeContextRecoveryMessage(reason: string, hostId: number, name?: string): string {
+  const target = name ? `name ${JSON.stringify(name)}` : `host ${hostId}`;
+  return `${reason} Requested Soul: ${target}. Run 37soul doctor to check runtime and hook approval/loading; in Codex, review the current hook in /hooks. Keep this choice and resume the same request once managed context is available, without asking the user to repeat their selection. Never guess another session or repeat login/OAuth.`;
+}
+
 async function localIdentityCommand(root: string, rest: string[], io: CliIO, deps: {apiBase: string; fetch: typeof fetch}, attach: boolean): Promise<number> {
   const hostArg = flagValue(rest, "--host");
   let hostId = hostArg && /^[1-9]\d*$/.test(hostArg) ? Number(hostArg) : NaN;
@@ -869,7 +874,7 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
     io.stderr("Choose a positive --host, or connect --name with an exact displayed name; --agent must be a supported runtime.\n"); return 2;
   }
   if (attach && (!runtime || !session || session.startsWith("--"))) {
-    io.stderr("connect requires --agent and --session from the current native hook context; never guess another session\n"); return 2;
+    io.stderr(`${nativeContextRecoveryMessage("connect requires --agent and --session from the current native hook context.", hostId, name)}\n`); return 2;
   }
   const profile = await profileIdFromArgs(root, rest, io); if (profile === null) return 1;
   const requireActive = async () => {
@@ -885,7 +890,7 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
       await requireActive();
       const deviceId = await readProfileDeviceId(root, profile);
       const source = await sessionSourceBoundary(root, {profile_id: profile,device_id: deviceId,runtime_kind: runtime as RuntimeKind,native_session_id: session!});
-      if (!source) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message; never guess a different terminal.");
+      if (!source) throw new StoreError("session_context_unavailable", nativeContextRecoveryMessage("The current session has no valid hook source context yet.", hostId, name));
       if (name) {
         const localStore=await openStore(root,profile);let candidate:number|undefined;
         try{const local=await localStore.read();const matches=Object.values(local.souls).filter(s=>s.identity.name.trim().toLowerCase()===name.toLowerCase());

@@ -125,7 +125,7 @@ async function doctor(deps: HostDoctorDeps): Promise<Array<HostDoctorCheck & { w
 
 function codexHookDetail(observed: boolean): string {
   if (observed) return "Installed hooks with matching local runtime evidence observed; persistent Codex trust is not inferred. Review trust in Codex /hooks; these observations do not prove model adoption.";
-  return "Installed in .codex/hooks.json; matching local runtime evidence not observed — open /hooks in Codex, review and approve the 37soul hook, then start a new session. Persistent trust is not inferred from installation. Run `37soul doctor` again.";
+  return "Installed in .codex/hooks.json; matching local runtime evidence not observed — open /hooks in Codex to review the current 37soul hook, enable/approve it if prompted, and load the hook configuration through Codex. Keep the requested Soul choice and resume the same request once managed context is available. Persistent trust is not inferred from installation or missing receipts.";
 }
 
 export const host: HostSpec = {

@@ -30,7 +30,7 @@ async function fixture(host,run) {
 for(const host of hosts) {
  test(host.kind+' installed file alone waits with actionable host approval and never claims trust',()=>fixture(host,async f=>{
   const checks=await f.check(),bridge=checks.find(c=>c.name===f.bridgeName);assert.equal(bridge.ok,false);assert.equal(bridge.waiting,true);assert.notEqual(bridge.fatal,true);
-  assert.match(bridge.detail,host.kind==='codex'?/\/hooks.*approve.*new session/i:host.kind==='hermes'?/official.*consent|consent.*official/i:/restart OpenCode/i);
+  assert.match(bridge.detail,host.kind==='codex'?/\/hooks.*approve.*load.*requested Soul.*same request/i:host.kind==='hermes'?/official.*consent|consent.*official/i:/restart OpenCode/i);
   assert.doesNotMatch(checks.map(c=>c.detail).join(' '),/no model call authorized|extraction stays off|remain unverified/i);
   assert.equal(checks.find(c=>c.name===host.kind+': extraction')?.waiting,true);
  }));

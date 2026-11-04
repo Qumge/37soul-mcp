@@ -915,7 +915,7 @@ test("doctor: Codex hook reports an honest trust state, never a blanket ok", asy
   const check = byName(await runDoctor({ ...h.deps, fetch: fetchImpl }))["codex: SessionStart hook"];
   assert.ok(check, "the codex SessionStart hook check is present");
   assert.equal(check.ok, false, "an untrusted Codex hook must not report ok");
-  assert.match(check.detail, /not observed.*\/hooks.*approve.*new session/);
+  assert.match(check.detail, /not observed.*\/hooks.*approve.*load.*same request/);
   assert.equal(check.waiting, true);
   assert.doesNotMatch(check.detail, /remain unverified/);
 

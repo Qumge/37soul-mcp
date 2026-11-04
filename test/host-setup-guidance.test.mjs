@@ -24,7 +24,7 @@ for (const host of [codex, opencode, hermes]) {
       assert.equal(check.ok, false);
       assert.equal(check.waiting, true);
       assert.notEqual(check.fatal, true);
-      assert.match(check.detail, /restart|new session|reopen/i, 'explain when manual setup takes effect');
+      assert.match(check.detail, host.kind === 'codex' ? /load the hook configuration.*same request/i : /restart|new session|reopen/i, 'explain when manual setup takes effect');
       assert.match(check.detail, /approve/i, 'setup requires host-owned approval');
       assert.match(check.detail, /trust.*not inferred|not inferred.*trust/i, 'installation does not establish host trust');
       assert.doesNotMatch(check.detail, /extraction stays off|no model call authorized/i);
