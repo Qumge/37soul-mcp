@@ -15,3 +15,5 @@ Keep only the native hook's reported absolute path/session metadata when stat re
 Baseline local-agent-connect+source-index40/40. Newfirstmessage3tests:2RED/1pass; fieldprojectionregression1RED. Focusedsource/connect/boundary49/49 before fieldtest; final counts recorded in delivery. A temporarynativeClaudeCLI harness withlocalhostAPIstub provesbaseline0.15.4firstsource_exists=false/connectexit1 vsfixedfirstsource_exists=false/connectattached in same turn; no externalmodel/account calls.
 
 Reviewfocus: malformed/stale/duplicate prospective metadata; device/profile/native isolation; source replacement atconnect andcompletedturn; latewriterbudget; pendinghints cannotbe read as extraction sources. No site/businessflow changes. User's continuing releaseauthorization applies to the verified corrective release; preserve original WIPandcredentials.
+
+Independent review found oneP2:equal timestamp olderpendingpath couldoverridea later validpointer. Deterministic realwriter/connect regression1RED; validlaternativeevents now retireoldpendingmetadata inwriterorder, before normalpointercapture. No change toexistingmodel,consent,profile/sessionchoiceor extractionformat.

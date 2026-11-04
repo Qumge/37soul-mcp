@@ -30,8 +30,13 @@ function filename(root: string, key: NativeSessionKey): string {
 /** Only ENOENT is deferred. Relative paths, directories and access errors are not hints. */
 export async function rememberPendingSessionSource(root: string, key: NativeSessionKey, candidate: string): Promise<void> {
   if (!safeKey(key) || !path.isAbsolute(candidate) || candidate.includes('\0')) return;
-  try { await stat(candidate); return; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return; }
+  try {
+    const info = await stat(candidate);
+    // This later native event supersedes a pending path in writer order, even
+    // when both events receive the same millisecond timestamp.
+    if (info.isFile()) await rm(filename(root, key), { force: true });
+    return;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return; }
   const dir = directory(root, key);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const target = filename(root, key), temp = target + '.' + randomUUID() + '.tmp';

@@ -183,3 +183,20 @@ test('first-message: pending source metadata never copies extra event-key conver
   assert.equal(Object.keys((await snapshot(root)).extraction_watermarks).length,0);
  } finally {await writer.close();}
 });
+
+test('first-message: a later valid native source retires a same-millisecond pending path', async t => {
+ const {root,home}=await fixture(t);cloudRead();
+ const NativeDate=globalThis.Date, fixed=NativeDate.now();
+ globalThis.Date=class extends NativeDate {constructor(...args){if(args.length)super(...args);else super(fixed);}static now(){return fixed;}};
+ const writer=await startWriter(root);
+ const emit=async file=>{const response=await sendWriter(root,{request_uid:randomUUID(),profile_id:'p1',command:'runtime_event',payload:{event:{key,event_ref:randomUUID(),kind:'request',internal_job_uid:null},source_path:file}});assert.equal(response.ok,true);};
+ try {
+  const pending=path.join(home,'earlier-pending.jsonl'), current=path.join(home,'later-current.jsonl');
+  await emit(pending);await writeFile(current,'CURRENT SOURCE\n');await emit(current);
+  const result=io();assert.equal(await main(['connect',...argv,'--session',key.native_session_id],result),0,result.out.stderr);
+  assert.equal((await snapshot(root)).bindings[bindingKey(key)].source_boundary.path,current);
+  await writeFile(pending,'LATE SUPERSEDED SOURCE\n');
+  const again=io();assert.equal(await main(['connect',...argv,'--session',key.native_session_id],again),0,again.out.stderr);
+  assert.equal((await snapshot(root)).bindings[bindingKey(key)].source_boundary.path,current,'a superseded pending path cannot resurrect when it appears later');
+ } finally {globalThis.Date=NativeDate;await writer.close();}
+});
