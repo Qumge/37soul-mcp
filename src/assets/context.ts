@@ -121,20 +121,20 @@ function renderIdentity(identity: Identity, budget: number): { text: string; tri
     IDENTITY_HEADER + identityLine({ ...fields, sex: identity.sex, age: identity.age }) + "\n";
 
   let text = build();
-  let trimmed = false;
-  while (utf8Bytes(text) > budget) {
-    let removed = false;
-    for (const key of trimOrder) {
-      if (fields[key].length === 0) continue;
-      const points = Array.from(fields[key]);
-      points.pop();
-      fields[key] = points.join("");
-      removed = true;
-      break;
+  const trimmed = utf8Bytes(text) > budget;
+  if (trimmed) for (const key of trimOrder) {
+    if (utf8Bytes(text) <= budget) break;
+    const points = Array.from(fields[key]);
+    fields[key] = ""; text = build();
+    if (utf8Bytes(text) > budget) continue;
+    // Same trailing-code-point policy as before, without quadratic re-rendering.
+    let low = 0, high = points.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      fields[key] = points.slice(0, mid).join("");
+      if (utf8Bytes(build()) <= budget) low = mid; else high = mid - 1;
     }
-    if (!removed) break;
-    trimmed = true;
-    text = build();
+    fields[key] = points.slice(0, low).join(""); text = build();
   }
   return { text, trimmed };
 }
@@ -255,9 +255,9 @@ function clampBudget(budgetBytes?: number): number {
   return Math.min(LIMITS.budgetMax, Math.max(LIMITS.budgetMin, Math.floor(budgetBytes)));
 }
 
-export function selectContext(input: ContextInput): ContextBundle {
+export function selectContext(input: ContextInput, options: {identityBudgetBytes?: number} = {}): ContextBundle {
   const budget = clampBudget(input.budgetBytes);
-  const identityBudget = Math.min(LIMITS.identityBudgetMax, budget);
+  const identityBudget = Math.min(LIMITS.identityBudgetMax, budget, options.identityBudgetBytes !== undefined && Number.isFinite(options.identityBudgetBytes) ? Math.max(128, options.identityBudgetBytes) : LIMITS.identityBudgetMax);
 
   const identity = renderIdentity(input.soul.identity, identityBudget);
   let remaining = budget - utf8Bytes(identity.text);

@@ -1,3 +1,4 @@
+import {contextAlreadyDelivered,contextDigest,recordContextDelivery,invalidateContextDelivery} from './agentd/context-delivery.js';
 /** Native hooks deliver local soul-assets context and source pointers only.
  * Legacy raw spool and remote/cached repository brief injection are retired.
  * Errors stay off stdout and never prevent the host session from starting.
@@ -169,6 +170,10 @@ async function runWithinBudget(deps: HookCommandDeps, budget: HookBudget): Promi
 
     const channel = host?.hook.injectionChannel ?? "none";
     const assetsForHint = resolveLocalAssetsProfileSync(root);
+    if (deps.agentKind === "claude-code" && assetsForHint && sessionId && ["PreCompact", "PostCompact", "SessionStart", "SessionEnd"].includes(deps.event)) {
+      await invalidateContextDelivery(root,{profile_id:assetsForHint.profile_id,device_id:assetsForHint.device_id,runtime_kind:deps.agentKind,native_session_id:sessionId});
+      budget.check();
+    }
     const hint = assetsForHint && sessionId && sessionId !== "unknown" && sessionId.length <= 256 && (RUNTIME_KINDS as readonly string[]).includes(deps.agentKind)
       ? `[37Soul local connection] Native session context (local only): --agent ${deps.agentKind} --session '${sessionId.replace(/'/g, "'\\''")}'. Use 37soul hosts to list owned Souls after account login. When the user chooses one, run 37soul connect --name <displayed-name> or --host <numeric-host-id> with these exact flags. Read identity through 37soul whoami only after selection; do not start remote MCP OAuth or expose credentials.`
       : "";
@@ -194,7 +199,7 @@ async function runWithinBudget(deps: HookCommandDeps, budget: HookBudget): Promi
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
         const allowHint = await injectSoulContext(
-          root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, "session", "SessionStart",
+          root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, "session", "SessionStart", sourcePath ?? "", 4096 - Buffer.byteLength(hint, "utf8") - 2,
         );
         if (allowHint) deliverHint("SessionStart");
         return 0;
@@ -209,7 +214,7 @@ async function runWithinBudget(deps: HookCommandDeps, budget: HookBudget): Promi
         const prompt = parsed.prompt ?? "";
         if (prompt.trim() !== "") {
           const allowHint = await injectSoulContext(
-            root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, prompt, "UserPromptSubmit",
+            root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, prompt, "UserPromptSubmit", sourcePath ?? "", 4096 - Buffer.byteLength(hint, "utf8") - 2,
           );
           if (allowHint) deliverHint("UserPromptSubmit");
           return 0;
@@ -309,6 +314,8 @@ async function injectSoulContext(
   budget: HookBudget,
   taskHint = "session",
   outputEvent: "SessionStart" | "UserPromptSubmit" = "SessionStart",
+  sourceEpoch = "",
+  contextBudgetBytes = 4096,
 ): Promise<boolean> {
   budget.check();
   const store = await openStore(root, assets.profile_id);
@@ -334,13 +341,17 @@ async function injectSoulContext(
       if (error instanceof StoreError && error.code === "identity_not_authorized") return true;
       throw error;
     }
-    const bundle = selectContext(input);
+    const bundle = selectContext({...input,budgetBytes:Math.max(128,contextBudgetBytes)},{identityBudgetBytes:2048});
     budget.check();
     if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return true;
 
+    const digest = contextDigest(bundle.rendered_text);
+    if (agentKind === "claude-code" && outputEvent === "UserPromptSubmit" && await contextAlreadyDelivered(root,binding,digest,sourceEpoch)) { budget.check(); return false; }
+    budget.check();
     // Deliver first, then record the receipt — an injected receipt must only exist
     // after the context actually reached the session.
     stdout(`${wrapAdditionalContext(bundle.rendered_text, outputEvent)}\n`);
+    if (agentKind === "claude-code") { await recordContextDelivery(root,binding,digest,sourceEpoch); budget.check(); }
     await sendWriter(root, {
       request_uid: randomUUID(),
       profile_id: assets.profile_id,
