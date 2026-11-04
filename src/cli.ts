@@ -88,6 +88,9 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
                                                 profile commands default to the valid active profile
   37soul soul create --name <n> --sex <male|female|other> --age <16-65> --character <50+ chars> --avatar <path> [--profile <id>]
   37soul soul list [--profile <id>]              list local Souls
+  37soul recall [--soul <uid>|--host <id>|--name <exact name>|--all] [--profile <id>] [--history] [--kind relationship|experience] [--limit <1-100>] [--] [terms...]
+                                                print local memories; one Soul auto-selects, multiple require a choice
+                                                --all labels every hit with its Soul name and UID; terms use AND, default limit 10
   37soul soul select <uid> [--agent <kind>] [--profile <id>]   set the default Soul
   37soul soul edit <uid> [--name <n> ...] [--avatar <path>] [--profile <id>]   edit a local (unregistered) Soul
   37soul soul authorize <uid> [--categories identity,relationship,experience] [--profile <id>]
@@ -455,42 +458,136 @@ async function readProfileDeviceId(root: string, profileId: ProfileId): Promise<
  * 用到的动作（"我上次说过什么"），但我们的答案带状态与来源，而不是一堆片段。
  */
 async function recallCommand(root: string, rest: string[], io: CliIO): Promise<number> {
-  const profileId = await profileIdFromArgs(root, rest, io);
-  if (profileId === null) return 1;
-  const terms = parseTerms(rest.filter((arg) => !arg.startsWith("--") && arg !== profileId).join(" "));
-  const includeHistory = rest.includes("--history");
-  const kindFlag = flagValue(rest, "--kind");
-  const limitFlag = flagValue(rest, "--limit");
-  const kind = kindFlag === "relationship" || kindFlag === "experience" ? kindFlag : undefined;
-  const limit = limitFlag ? Number(limitFlag) : undefined;
-  if (kindFlag && !kind) {
+  // Consume option values here so only positional/literal query terms are searched.
+  const values = new Map<string, string>();
+  const seen = new Set<string>();
+  const query: string[] = [];
+  const valueFlags = ["--profile", "--soul", "--host", "--name", "--kind", "--limit"];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (arg === "--") {
+      query.push(...rest.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("-")) {
+      query.push(arg);
+      continue;
+    }
+    if (!valueFlags.includes(arg) && arg !== "--history" && arg !== "--all") {
+      io.stderr(`unknown recall option: ${arg}; use -- before literal query terms starting with -\n`);
+      return 2;
+    }
+    if (seen.has(arg)) {
+      io.stderr(`${arg} may only be specified once\n`);
+      return 2;
+    }
+    seen.add(arg);
+    if (valueFlags.includes(arg)) {
+      const value = rest[++i];
+      if (value === undefined || !value.trim() || value.startsWith("--")) {
+        io.stderr(`${arg} requires a non-empty value\n`);
+        return 2;
+      }
+      values.set(arg, value);
+    }
+  }
+
+  const selectors = ["--soul", "--host", "--name", "--all"].filter(flag => seen.has(flag));
+  if (selectors.length > 1) {
+    io.stderr("--soul, --host, --name and --all are mutually exclusive; choose one\n");
+    return 2;
+  }
+  const kindFlag = values.get("--kind");
+  if (kindFlag !== undefined && kindFlag !== "relationship" && kindFlag !== "experience") {
     io.stderr('--kind must be "relationship" or "experience"\n');
     return 2;
   }
+  const limitFlag = values.get("--limit");
+  const limit = limitFlag === undefined ? 10 : Number(limitFlag);
+  if (limitFlag !== undefined && (!/^\d+$/.test(limitFlag) || limit < 1 || limit > 100)) {
+    io.stderr("--limit must be a positive integer from 1 to 100\n");
+    return 2;
+  }
+  const hostFlag = values.get("--host");
+  const hostId = hostFlag === undefined ? undefined : Number(hostFlag);
+  if (hostFlag !== undefined && (!/^\d+$/.test(hostFlag) || !Number.isSafeInteger(hostId) || hostId! < 1)) {
+    io.stderr("--host must be a positive safe integer ID\n");
+    return 2;
+  }
+  const profileFlag = values.get("--profile");
+  if (profileFlag !== undefined && (profileFlag === "." || profileFlag === ".." || /[/\\\0]/.test(profileFlag))) {
+    io.stderr("--profile contains an invalid profile id\n");
+    return 2;
+  }
+  const profileId = profileFlag ?? resolveLocalAssetsProfileSync(root)?.profile_id;
+  if (!profileId) {
+    io.stderr("No valid unambiguous active profile. Use --profile <id> to explicitly choose local data.\n");
+    return 1;
+  }
 
-  const store = await openStore(root, profileId, {});
-  let assets: Array<{ asset_uid: string; kind: string; trait: string; content: string; applicability: string; tags: string[]; evidence: string; verification: string; sensitivity: string; state: string; revision: number; supersedes_uid: string | null; pinned: boolean; source: any; soul_uid: string }> = [];
+  // Bypass device bootstrap: read() still validates snapshots and reads backups, but no
+  // device metadata is created when recalling from an uninitialized profile.
+  const store = await openStore(root, profileId, { deviceId: "recall-read-only" });
+  let snap: Awaited<ReturnType<typeof store.read>>;
   try {
-    const snap = await store.read();
-    assets = Object.values(snap.assets).map((asset) => asset as unknown as (typeof assets)[number]);
+    snap = await store.read();
+  } catch (error) {
+    io.stderr(`Could not read local profile ${profileId}: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
   } finally {
     await store.close();
   }
 
-  const hits = recallAssets(assets as never, {
-    terms,
-    ...(kind ? { kind } : {}),
-    ...(includeHistory ? { includeHistory } : {}),
-    ...(limit ? { limit } : {}),
-  });
+  const souls = Object.values(snap.souls);
+  type LocalSoul = (typeof souls)[number];
+  const label = (soul: LocalSoul): string =>
+    `${JSON.stringify(soul.identity.name)} (UID: ${soul.soul_uid}${soul.legacy_host_id == null ? "" : `, host: ${soul.legacy_host_id}`})`;
+  const listSouls = (choices: LocalSoul[]): void => {
+    for (const soul of choices) io.stderr(`  ${label(soul)}\n`);
+    io.stderr("Choose 37soul recall --soul <uid>, --host <id> or --name <exact name>; --all explicitly searches all local Souls in this profile.\n");
+  };
+  if (souls.length === 0) {
+    io.stderr(`No local Souls in profile ${profileId}. Use 37soul soul list --profile ${profileId} to check local data.\n`);
+    return 1;
+  }
 
+  const all = seen.has("--all");
+  let selected = souls;
+  const selector = selectors[0];
+  if (selector === "--soul") selected = souls.filter(soul => soul.soul_uid === values.get("--soul"));
+  if (selector === "--host") selected = souls.filter(soul => soul.legacy_host_id === hostId);
+  if (selector === "--name") selected = souls.filter(soul => soul.identity.name === values.get("--name"));
+  if (!all && selected.length !== 1) {
+    if (selected.length === 0) {
+      io.stderr(`No local Soul found for ${selector} ${JSON.stringify(values.get(selector))} in profile ${profileId}.\n`);
+      listSouls(souls);
+    } else {
+      io.stderr(selector === "--name"
+        ? "Multiple local Souls have that exact name. Use --soul <uid> or --host <id> to disambiguate.\n"
+        : "Multiple local Souls found. Select one before recalling memories.\n");
+      listSouls(selected);
+    }
+    return 1;
+  }
+
+  const selectedByUid = new Map(selected.map(soul => [soul.soul_uid, soul]));
+  // Scope before matching/ranking/limiting; orphan assets are never eligible.
+  const assets = Object.values(snap.assets).filter(asset => selectedByUid.has(asset.soul_uid));
+  const terms = parseTerms(query.join(" "));
+  const includeHistory = seen.has("--history");
+  const hits = recallAssets(assets, { terms, kind: kindFlag, includeHistory, limit });
+
+  if (!all) io.stdout(`Soul: ${label(selected[0])}\n`);
   if (hits.length === 0) {
     io.stdout(terms.length > 0
       ? `nothing matches ${terms.join(" ").replace(/\n/g, " ")}\n`
-      : "she has not recorded anything yet\n");
+      : all ? "no memories recorded for local Souls yet\n" : "she has not recorded anything yet\n");
     return 0;
   }
-  for (const hit of hits) io.stdout(`${formatRecallHit(hit)}\n`);
+  for (const hit of hits) {
+    const prefix = all ? `Soul: ${label(selectedByUid.get(hit.asset.soul_uid)!)} · ` : "";
+    io.stdout(`${prefix}${formatRecallHit(hit)}\n`);
+  }
   if (!includeHistory) io.stdout(`(${hits.length} hit(s); add --history to include replaced/deleted versions)\n`);
   return 0;
 }

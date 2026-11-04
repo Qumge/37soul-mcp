@@ -110,7 +110,19 @@ SOUL_UID='実際の Soul UID をここに貼り付ける'
 
 ```bash
 37soul recall "協力"
+# ローカルに複数の Soul がある場合は一つを選択：
+37soul recall --soul "$SOUL_UID" "協力"
+37soul recall --host 243 "協力"
+37soul recall --name "正確な名前" "協力"
+# 現在の profile のローカル Soul を明示的に横断検索：
+37soul recall --all "協力"
+37soul recall --soul "$SOUL_UID" --profile PROFILE_ID --kind experience --limit 20 --history "協力"
+37soul recall --soul "$SOUL_UID" -- "--文字列"
 ```
+
+`recall` はローカルデータを読み、記憶をターミナルに表示します。モデル・ネットワーク・writer は呼び出しません。現在の profile にローカル Soul が一つだけある場合は自動選択します。複数ある場合は名前・UID・利用可能な host ID を表示し、記憶を表示せず非ゼロで終了します。アカウントやツールの既定値、セッションの接続先から Soul を選択することはありません。`--soul`、`--host`、`--name`、`--all` は同時に指定できません。名前は完全一致で、同名の場合は UID または host ID を使います。一つを選択した場合はヘッダーに名前と UID を、`--all` では各結果に所属 Soul を表示します。対応する Soul がないアセットは対象外です。
+
+キーワードは AND 検索です。`--kind` は `relationship` または `experience`、`--history` は置換・拒否・削除された履歴を状態付きで含めます。出典と一致した項目も表示します。件数は結果全体で既定 10 件、`--limit` は 1〜100 の整数です。`--profile` でローカル profile を明示できます。`--` で始まる検索語の前には独立した `--` を置いてください。不明・不正・重複・競合するオプションはエラーになります。
 
 ローカル利用に同期は不要です。ログインしてこの Soul の同期を許可した後で、`37soul sync` を実行してクラウド同期を確認してください。
 

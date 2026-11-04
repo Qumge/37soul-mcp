@@ -174,7 +174,20 @@ Complete the conversation turn and allow the runtime to extract the memory. Insp
 ```bash
 37soul recall
 37soul recall "document"
+# With several local Souls, select exactly one:
+37soul recall --soul "$SOUL_UID" "document"
+37soul recall --host 243 "document"
+37soul recall --name "Exact Soul name" "document"
+# Explicitly search across local Souls in the current profile:
+37soul recall --all "document"
+# Other filters and literal terms starting with --:
+37soul recall --soul "$SOUL_UID" --profile PROFILE_ID --kind experience --limit 20 --history "document"
+37soul recall --soul "$SOUL_UID" -- "--literal"
 ```
+
+`recall` prints memories in the terminal using only local data, with no model, network, or writer calls. It automatically selects a Soul only when the current profile has exactly one local Soul. With several Souls it exits with a list of names, UIDs and available host IDs, without showing memories; account/tool defaults and session bindings do not choose a Soul for recall. `--soul`, `--host`, `--name` and `--all` are mutually exclusive. Names must match exactly; duplicate names require a UID or host ID. A selected Soul's name and UID appear in the header; `--all` identifies the Soul on every hit and excludes orphan assets.
+
+Terms use AND matching. `--kind` accepts `relationship` or `experience`; `--history` includes replaced/rejected/deleted versions with their states. Hits retain source and match metadata. The default limit is 10 across the result set; `--limit` accepts integers from 1 to 100. `--profile` explicitly chooses local profile data. Use `--` before literal query terms beginning with `--`; unknown, malformed, repeated or conflicting options fail.
 
 Then open a fresh session bound to the same Soul and give it a relevant task. An extracted memory is evidence that extraction worked; the agent's actual behavior shows whether it used that memory. Temporary requests and one-off tasks may not produce long-term memories.
 

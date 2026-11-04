@@ -174,7 +174,20 @@ Gemini CLI 与 Cursor 目前提供原生 hook 和身份接入，暂不自动提�
 ```bash
 37soul recall
 37soul recall "文档"
+# 本地有多个 Soul 时，明确选择一个：
+37soul recall --soul "$SOUL_UID" "文档"
+37soul recall --host 243 "文档"
+37soul recall --name "完整角色名" "文档"
+# 明确允许跨当前 profile 的本地 Soul 检索：
+37soul recall --all "文档"
+# 其他筛选项，以及以 -- 开头的字面查询：
+37soul recall --soul "$SOUL_UID" --profile PROFILE_ID --kind experience --limit 20 --history "文档"
+37soul recall --soul "$SOUL_UID" -- "--字面关键词"
 ```
+
+`recall` 直接在终端输出记忆，只读本地数据，不调用模型、网络或 writer。只有当前 profile 恰好有一个本地 Soul 时才自动选择；有多个时，以非零退出码列出名称、UID 和已有的 host ID，不显示任何记忆。账号或工具的默认 Soul、会话绑定都不会替 recall 选择角色。`--soul`、`--host`、`--name`、`--all` 互斥。名称必须完整精确匹配；重名时必须用 UID 或 host ID。选中单个 Soul 后，标题会显示名称和 UID；`--all` 的每条命中都标明所属 Soul，并排除没有对应角色的孤立资产。
+
+多个关键词按 AND 匹配。`--kind` 只接受 `relationship` 或 `experience`；`--history` 包含已替换、拒绝、删除的历史版本并标明状态，命中仍保留来源与匹配信息。默认整个结果集最多 10 条，`--limit` 接受 1–100 的整数；`--profile` 明确指定本地 profile。查询词以 `--` 开头时，先加独立的 `--`；未知、格式错误、重复或冲突的选项会报错。
 
 再开一个绑定同一个 Soul 的新会话，交给它一个相关任务。出现记忆能证明提炼完成；Agent 实际怎样做，才说明它是否使用了这条记忆。临时要求和一次性任务可能不会产生长期记忆。
 
