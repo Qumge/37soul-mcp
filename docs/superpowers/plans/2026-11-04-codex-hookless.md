@@ -27,4 +27,4 @@ Conflicting native IDs; duplicate rollout files; torn completion records; rebind
 - [x] Failing acceptance: migration removes only our handlers in mixed groups; repeated install keeps foreign config unchanged.
 - [x] Update Codex installer/diagnostics, installed guidance and website prompts, add local bound context restoration.
 - [x] Run full runtime suite, relevant skill/website checks; review fixed diff.
-- [ ] Back up and remove only local 37Soul Codex handlers; retest with absent handlers and report native-model acceptance separately.
+- [x] Back up and remove only local 37Soul Codex handlers; retest with absent handlers and report native-model acceptance separately.
