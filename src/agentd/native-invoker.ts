@@ -1,3 +1,5 @@
+import {withBatchExtraction} from '../extraction/batch-adapter.js';
+export {withBatchExtraction} from '../extraction/batch-adapter.js';
 /**
  * Task 10: the runtime adapters wired behind agentd's assets-mode drain, with a
  * spawn-based `NativeInvoker` as the only native model surface.
@@ -73,7 +75,7 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
     if (!command) return { code: 1, stdout: "", stderr: `native ${runtime} executable unavailable; install the current host CLI` };
     const run = (argv: readonly string[], stdin: string) => new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(command, argv,
-        { timeout: 60_000, env: { ...env, SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
+        { timeout: 60_000, env: { ...env, ...(runtime === "claude-code" ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_DISABLE_THINKING: "1"} : {}), SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
         (error, stdout, stderr) => {
           const exitCode = (error as { code?: unknown } | null)?.code;
           const code = error ? (typeof exitCode === "number" ? exitCode : 1) : 0;
@@ -111,6 +113,6 @@ export function createExtractAdapters(home: string, log?: NativeInvokerLog, root
   const emit = async () => {};
   const deps: AdapterDeps = { home, invoke, readSource, emit, diagnostic: counts => log?.info(formatExtractionDiagnostic(counts)) };
   return Object.fromEntries(
-    HOSTS.flatMap((host) => host.invoke ? [[host.kind, host.invoke.createAdapter(deps)]] : []),
+    HOSTS.flatMap((host) => host.invoke ? [[host.kind, withBatchExtraction(host.invoke.createAdapter, deps)]] : []),
   );
 }

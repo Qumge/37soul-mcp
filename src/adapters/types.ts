@@ -85,7 +85,12 @@ export interface InjectionResult {
   error?: string;
 }
 
+export interface PreparedExtraction { available: boolean; urgent: boolean; input_bytes: number; error_code?: string; }
+
 export interface RuntimeAdapter {
+  prepare?(request: ExtractionRequest): Promise<PreparedExtraction>;
+  extractBatch?(requests: readonly ExtractionRequest[]): Promise<ExtractionResult[]>;
+  batchSupported?: boolean;
   runtime_kind: RuntimeKind;
   probe(): Promise<RuntimeProbe>;
   extract(request: ExtractionRequest): Promise<ExtractionResult>;
