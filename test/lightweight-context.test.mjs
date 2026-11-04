@@ -15,3 +15,15 @@ test('lightweight hook: bounded identity leaves room for memory without modifyin
 test('lightweight hook: a late pre-compaction cache write cannot suppress post-compaction restoration',async t=>{
  const f=await fixture(t);await f.hook();const fs=await import('node:fs/promises');const dir=path.join(f.root,'context-delivery/p1');const file=path.join(dir,(await fs.readdir(dir)).find(n=>n.endsWith('.json')));const old=await fs.readFile(file);await f.hook('PreCompact');await fs.writeFile(file,old);assert.match(context(await f.hook()),/Test Soul/);
 });
+test('lightweight hook: deadline return leaves no detached cache writes',async t=>{
+ const f=await fixture(t),fs=(await import('node:fs/promises')).default,{syncBuiltinESMExports}=await import('node:module');
+ const original={mkdir:fs.mkdir,writeFile:fs.writeFile,rename:fs.rename};let release,finished,entered=false,returned=false,lateWrites=0;
+ const gate=new Promise(resolve=>{release=resolve;}),done=new Promise(resolve=>{finished=resolve;});
+ fs.mkdir=async function(file,...args){if(String(file).includes('/context-delivery/')){entered=true;await gate;}return original.mkdir.call(this,file,...args);};
+ fs.writeFile=async function(file,...args){if(String(file).includes('/context-delivery/')&&returned)lateWrites++;return original.writeFile.call(this,file,...args);};
+ fs.rename=async function(...args){try{return await original.rename.apply(this,args);}finally{if(String(args[0]).includes('/context-delivery/'))finished();}};
+ syncBuiltinESMExports();
+ try{await f.hook();returned=true;release();if(entered){let timer;try{await Promise.race([done,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('cache operation did not settle')),2000);})]);}finally{clearTimeout(timer);}}
+  assert.equal(lateWrites,0,'a hook that already returned must not initiate cache file writes');
+ }finally{release();Object.assign(fs,original);syncBuiltinESMExports();}
+});

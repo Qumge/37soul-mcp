@@ -38,9 +38,16 @@ export function compactTurnText(turnText:string):string{
  if(bytes(result)<=TURN_INPUT_BYTES)return result;
  for(const m of messages)if(m.source!=='user')m.text=clipMaterial(m.text,384);
  result=serializeSourceTurn(messages);
- while(bytes(result)>TURN_INPUT_BYTES){
-  const index=messages.findIndex(m=>m.source==='tool');if(index<0)throw new ExtractionInputTooLarge();
-  messages.splice(index,1);result=serializeSourceTurn(messages);
+ // Select optional material once, with exact encoded sizes; never reserialize N shrinking arrays.
+ const mandatory=messages.filter(m=>m.source!=='tool');
+ const base=serializeSourceTurn(mandatory);
+ if(bytes(base)>TURN_INPUT_BYTES)throw new ExtractionInputTooLarge();
+ let remaining=TURN_INPUT_BYTES-bytes(base);let count=mandatory.length;
+ const keep=new Set(mandatory);
+ const shell=bytes(JSON.stringify({format:'37soul-source-turn/v1',messages:[]}));
+ for(let i=messages.length-1;i>=0;i--){const m=messages[i];if(m.source!=='tool')continue;
+  const cost=bytes(serializeSourceTurn([m]))-shell+(count>0?1:0);
+  if(cost<=remaining){keep.add(m);remaining-=cost;count++;}
  }
- return result;
+ return serializeSourceTurn(messages.filter(m=>keep.has(m)));
 }

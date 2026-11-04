@@ -11,6 +11,7 @@ function counter(c:ResourceCounter|undefined):ResourceCounter{
  if(!c||!valid(c.calls)||!valid(c.reserved_units))throw new Error('resource_budget_corrupt');return c;
 }
 export function canReserve(usage:ResourceUsage|undefined,binding:BindingSnapshot,units:number,now=Date.now()):boolean{
+ if(usage!==undefined&&(!usage||typeof usage!=="object"||Array.isArray(usage)))throw new Error("resource_budget_corrupt");
  if(!valid(units)||units<1||units>25600)return false;
  const d=usage?.[new Date(now).toISOString().slice(0,10)];
  if(d&&(!d.sessions||typeof d.sessions!=='object'||Array.isArray(d.sessions)))throw new Error('resource_budget_corrupt');

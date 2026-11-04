@@ -206,8 +206,8 @@ test("install: backs up with a timestamp before every change, keeps unrelated ho
     1,
   );
   assert.equal(document.hooks.SessionStart[0].hooks[0].command, "echo mine");
-  // v2 §6.1：Claude Code 订阅整套事件（SessionStart/UserPromptSubmit/PostToolUse/Stop/PreCompact/SessionEnd）。
-  for (const event of ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "PreCompact", "SessionEnd"]) {
+  // Lightweight capture keeps native turn boundaries, not one subprocess per tool.
+  for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd"]) {
     const mine = (document.hooks[event] ?? []).filter((entry) =>
       entry.hooks.some((hook) => hook.command.includes("hook --agent claude-code")),
     );
@@ -697,7 +697,9 @@ test("uninstall: clears our entries from every Claude hook event, not just Sessi
 
   await install(h.deps, { agents: ["claude-code"] });
   const installed = JSON.parse(readFileSync(settings, "utf8"));
-  assert.ok(installed.hooks.PostToolUse, "install wires PostToolUse");
+  // Simulate a legacy subscription so uninstall still proves it cleans every event.
+  installed.hooks.PostToolUse = [{ hooks: [{ type: "command", command: "/old/37soul hook --agent claude-code --event PostToolUse" }] }];
+  writeFileSync(settings, JSON.stringify(installed));
 
   await uninstall(h.deps);
   const document = JSON.parse(readFileSync(settings, "utf8"));

@@ -18,15 +18,30 @@ export function claudeInstructionsPath(home: string): string {
 
 export const CLAUDE_HOOK_EVENTS = CLAUDE_CODE_HOOK_EVENTS;
 
+/** Remove only our command, including mixed user/managed hook groups. */
+function withoutSoulHooks(list: any[]): any[] {
+  return list.flatMap((entry) => {
+    if (!Array.isArray(entry?.hooks)) return [entry];
+    const hooks = entry.hooks.filter((hook: any) => !(typeof hook?.command === "string"
+      && hook.command.includes("hook --agent claude-code")));
+    if (hooks.length === entry.hooks.length) return [entry];
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
+}
+
 async function configureClaude(deps: HostInstallDeps, token: string): Promise<HostInstallResult> {
   const settings = claudeSettingsPath(deps.home);
   await editJsonFile(settings, (document) => {
     document.hooks = document.hooks ?? {};
+    for (const retired of ["PostToolUse", "PostToolUseFailure"]) {
+      if (!Array.isArray(document.hooks[retired])) continue;
+      const keep = withoutSoulHooks(document.hooks[retired]);
+      if (keep.length) document.hooks[retired] = keep;
+      else delete document.hooks[retired];
+    }
     for (const { event, matcher } of CLAUDE_HOOK_EVENTS) {
       const list: any[] = Array.isArray(document.hooks[event]) ? document.hooks[event] : [];
-      const own = (entry: any) =>
-        Array.isArray(entry?.hooks) && entry.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("hook --agent claude-code"));
-      const withoutOurs = list.filter((entry) => !own(entry));
+      const withoutOurs = withoutSoulHooks(list);
       const entry: Record<string, any> = {
         hooks: [{ type: "command", command: hookCommand(deps, "claude-code", event), shell: "bash", async: false }]
       };
@@ -93,10 +108,8 @@ async function uninstall(deps: HostInstallDeps, removed: string[]): Promise<void
       let changed = false;
       for (const event of Object.keys(document.hooks)) {
         const list: any[] = Array.isArray(document.hooks[event]) ? document.hooks[event] : [];
-        const keep = list.filter(
-          (entry) => !(Array.isArray(entry?.hooks) && entry.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("hook --agent claude-code"))),
-        );
-        if (keep.length === list.length) continue;
+        const keep = withoutSoulHooks(list);
+        if (keep.length === list.length && keep.every((entry, index) => entry === list[index])) continue;
         changed = true;
         if (keep.length === 0) delete document.hooks[event];
         else document.hooks[event] = keep;

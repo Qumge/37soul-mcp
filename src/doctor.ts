@@ -116,8 +116,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
     const store=await openStore(root,localProfile.profile_id);
     try{const snap=await store.read();const pendingMemory=Object.values(snap.extraction_watermarks).filter(w=>!w.completed);
       const stale=pendingMemory.filter(w=>!Object.values(snap.bindings).some(b=>!b.retired&&b.state==="bound"&&b.binding_uid===w.request.binding_uid&&b.revision===w.request.binding_revision)).length;
+      if(snap.extraction_usage!==undefined&&(!snap.extraction_usage||typeof snap.extraction_usage!=="object"||Array.isArray(snap.extraction_usage)))throw new Error("resource_budget_corrupt");
       const usage=snap.extraction_usage?.[new Date().toISOString().slice(0,10)];const n=(v:unknown)=>typeof v==="number"&&Number.isSafeInteger(v)&&v>=0?v:0;
-      checks.push({name:"memory resources",ok:true,detail:`${pendingMemory.length} pending, ${stale} stale_binding retained; today ${n(usage?.calls)}/40 native calls, reserved_units ${n(usage?.reserved_units)}/200000; ordinary work batches at 3 turns or about 90–120s`});
+      const oversized=pendingMemory.filter(w=>w.last_error==="source_input_too_large").length;
+      const reason=oversized?`; source_input_too_large ${oversized} (retained: shorten an oversized remembered message)`:"";
+      checks.push({name:"memory resources",ok:true,detail:`${pendingMemory.length} pending, ${stale} stale_binding retained; today ${n(usage?.calls)}/40 native call reservations, reserved_units ${n(usage?.reserved_units)}/200000; ordinary work batches at 3 turns or about 90–120s${reason}`});
     }catch{checks.push({name:"memory resources",ok:true,detail:"resource accounting unavailable; existing local data is preserved"});}
     finally{await store.close();}
   }

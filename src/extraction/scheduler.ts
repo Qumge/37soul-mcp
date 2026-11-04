@@ -32,6 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import type {
   BindingSnapshot,
+  PreparedExtraction,
   ExtractionRequest,
   ExtractionResult,
   RuntimeAdapter,
@@ -204,7 +205,7 @@ export async function runExtraction(
 
 // --- write paths: every snapshot write goes through the single writer --------------
 
-type ExtractionCommand = "reserve_extraction_batch" | "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
+type ExtractionCommand = "defer_extraction" | "reserve_extraction_batch" | "begin_extraction" | "commit_extraction" | "fail_extraction" | "resolve_source_capture";
 
 /**
  * Send a writer command, retrying through a transient in-process writer when no
@@ -800,6 +801,18 @@ registerWriterCommand("fail_extraction", async ({ root, request }) => {
  */
 type PendingJob={binding:BindingSnapshot;range:SourceRange;request:ExtractionRequest;queued_at?:string;attempts?:number};
 
+registerWriterCommand("defer_extraction",async({root,request})=>{
+ const binding=request.payload.binding,range=request.payload.range;
+ const reasons=["source_input_too_large","source_unavailable","source_preparation_failed","batch_source_unavailable"];
+ if(!isBindingSnapshot(binding)||!isSourceRange(range)||binding.profile_id!==request.profile_id)throw new StoreError("invalid_payload","Invalid deferred extraction");
+ const reason=typeof request.payload.reason==="string"&&reasons.includes(request.payload.reason)?request.payload.reason:"source_preparation_failed";
+ const store=await openStore(root,request.profile_id);
+ try{const snap=await store.read(),key=watermarkKey(binding,range),wm=snap.extraction_watermarks[key];
+  if(!isCurrentBinding(snap,binding)||!wm||wm.completed||wm.state==="running"||wm.last_error===reason)return {recorded:false};
+  await store.transact(d=>{d.extraction_watermarks[key].last_error=reason;});return {recorded:true};
+ }finally{await store.close();}
+});
+
 registerWriterCommand("reserve_extraction_batch",async({root,request})=>{
  const jobs=request.payload.jobs as PendingJob[];const units=request.payload.reserved_units;
  if(!Array.isArray(jobs)||jobs.length<1||jobs.length>3||typeof units!=="number"||!Number.isSafeInteger(units)||units<1||units>25600||jobs.some(j=>!isBindingSnapshot(j?.binding)||!isSourceRange(j?.range)||j.binding.profile_id!==request.profile_id))throw new StoreError("invalid_payload","Invalid extraction reservation");
@@ -818,7 +831,7 @@ registerWriterCommand("reserve_extraction_batch",async({root,request})=>{
   catch{return {claimed:false,reason:"resource_budget_corrupt"};}
   await store.transact(d=>{
    d.extraction_usage=reserve(d.extraction_usage,first,units);
-   for(const key of keys){const wm=d.extraction_watermarks[key];wm.state="running";wm.attempts++;wm.claimed_at=new Date().toISOString();}
+   for(const key of keys){const wm=d.extraction_watermarks[key];wm.state="running";wm.attempts++;wm.last_error=null;wm.claimed_at=new Date().toISOString();}
   });return {claimed:true};
  }finally{await store.close();}
 });
@@ -839,7 +852,24 @@ export async function drainPendingExtractions(
   }}finally{await store.close();}
   const groups=new Map<string,PendingJob[]>();
   for(const job of pending){const id=JSON.stringify([job.binding.binding_uid,job.binding.revision]);const group=groups.get(id)??[];group.push(job);groups.set(id,group);}
-  for(const group of groups.values()){
+  const ordered=[...groups.values()];
+  const ready=new Map<PendingJob[],Array<{job:PendingJob;meta:PreparedExtraction}>>();
+  for(const group of ordered){
+   const adapter=adapters[group[0].request.runtime_kind];if(!adapter?.prepare)continue;
+   const budgetStore=await openStore(rootDir,profileId,{fs});let hasBudget=false;
+   try{const current=await budgetStore.read();try{hasBudget=canReserve(current.extraction_usage,group[0].binding,1);}catch{hasBudget=false;}}
+   finally{await budgetStore.close();}
+   if(!hasBudget){resource.budget_deferred+=group.length;continue;}
+   const prepared:Array<{job:PendingJob;meta:PreparedExtraction}>=[];
+   for(const job of group){
+    let meta:PreparedExtraction;try{meta=await adapter.prepare(job.request);}catch{meta={available:false,urgent:false,input_bytes:0,error_code:"source_preparation_failed"};}
+    if(meta.available)prepared.push({job,meta});
+    else{resource.source_deferred++;await sendWriterCommand(rootDir,profileId,"defer_extraction",{binding:job.binding,range:job.range,reason:meta.error_code??"source_preparation_failed"});}
+   }ready.set(group,prepared);
+  }
+  // A different session's ordinary backlog must not consume the final shared allowance first.
+  ordered.sort((a,b)=>Number(ready.get(b)?.some(r=>r.meta.urgent)??false)-Number(ready.get(a)?.some(r=>r.meta.urgent)??false));
+  for(const group of ordered){
    const adapter=adapters[group[0].request.runtime_kind];if(!adapter)continue;
    if(!adapter.prepare){
     // Keep the direct/injected adapter API immediate; production adapters are wrapped.
@@ -849,13 +879,7 @@ export async function drainPendingExtractions(
      finally{unregisterInternalJob(job.request.job_uid);}
     }continue;
    }
-   // Budget exhaustion must also stop expensive local source preparation.
-   const budgetStore=await openStore(rootDir,profileId,{fs});let hasBudget=false;
-   try{const current=await budgetStore.read();try{hasBudget=canReserve(current.extraction_usage,group[0].binding,1);}catch{hasBudget=false;}}
-   finally{await budgetStore.close();}
-   if(!hasBudget){resource.budget_deferred+=group.length;continue;}
-   const prepared=[];
-   for(const job of group){try{const meta=await adapter.prepare(job.request);if(meta.available)prepared.push({job,meta});else resource.source_deferred++;}catch{resource.source_deferred++;}}
+   const prepared=ready.get(group);if(!prepared)continue;
    while(prepared.length){
     const urgent=prepared.findIndex(row=>row.meta.urgent);if(urgent>0)prepared.unshift(...prepared.splice(urgent,1));
     const oldest=Math.min(...prepared.map(row=>row.job.queued_at?Date.parse(row.job.queued_at):0));

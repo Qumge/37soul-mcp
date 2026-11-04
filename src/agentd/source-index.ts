@@ -198,21 +198,32 @@ export async function pruneSourcePointers(root: string, profileId: string, sessi
     return;
   }
 
+  // Deferred/running jobs need their immutable source refs beyond the normal pointer window.
+  const protectedPaths=new Set<string>();
+  try{
+    const snapshot=JSON.parse(await readFile(path.join(root,"profiles",profileId,"snapshot.json"),"utf8"));
+    if(!snapshot.extraction_watermarks||typeof snapshot.extraction_watermarks!=="object")return;
+    for(const wm of Object.values(snapshot.extraction_watermarks) as Array<{completed?:boolean;request?:{source_event_refs?:unknown}}>)if(!wm.completed){
+      if(!Array.isArray(wm.request?.source_event_refs))return;
+      for(const ref of wm.request.source_event_refs)if(typeof ref==="string"&&isSafeEventRef(ref))protectedPaths.add(path.join(dir,ref+".json"));
+    }
+  }catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")return;}
   const now = Date.now();
   const rows: Array<{ full: string; record: SourcePointerRecord; mtimeMs: number }> = [];
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
     const full = path.join(dir, name);
+    if(protectedPaths.has(full))continue;
     try {
       const record = JSON.parse(await readFile(full, "utf8")) as SourcePointerRecord;
       if (typeof record.path !== "string" || typeof record.native_session_id !== "string") {
-        await rm(full, { force: true }).catch(() => {});
+        if(!protectedPaths.has(full))await rm(full, { force: true }).catch(() => {});
         continue;
       }
       const info = await stat(full);
       rows.push({ full, record, mtimeMs: info.mtimeMs });
     } catch {
-      await rm(full, { force: true }).catch(() => {});
+      if(!protectedPaths.has(full))await rm(full, { force: true }).catch(() => {});
     }
   }
 
@@ -224,7 +235,11 @@ export async function pruneSourcePointers(root: string, profileId: string, sessi
   for (const row of rows) {
     if (now - row.mtimeMs > MAX_POINTER_AGE_MS) drop.add(row.full);
   }
-  for (const full of drop) await rm(full, { force: true }).catch(() => {});
+  const awaiting=new Set(rows.filter(row=>row.record.turn_capture?.state==="awaiting").map(row=>row.full));
+  for (const full of drop) {
+    if(protectedPaths.has(full)||awaiting.has(full))continue;
+    await rm(full, { force: true }).catch(() => {});
+  }
 }
 
 /** Find only this exact native session's hook-provided source; never infer from cwd. */

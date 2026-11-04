@@ -16,7 +16,7 @@ test('lightweight batch: three prepared native turns use one model call and pres
  const {adapter,calls}=fixture();for(const n of [1,2,3]){const metadata=await adapter.prepare(req(n));assert.equal(metadata.urgent,true);}assert.equal(calls.length,0,'preparation is local');
  const results=await adapter.extractBatch([req(1),req(2),req(3)]);assert.equal(calls.length,1);assert.ok(Buffer.byteLength(calls[0].input)<=24576);
  for(let i=0;i<3;i++){assert.equal(results[i].proposals[0].content,'Preference '+(i+1));assert.equal(results[i].proposals[0].source.event_ref,'u'+(i+1));}
- const schema=JSON.parse(calls[0].args[calls[0].args.indexOf('--json-schema')+1]);assert.ok(schema.properties.jobs);assert.deepEqual(calls[0].args.slice(0,5),['-p','--output-format','json','--tools','']);
+ const schema=JSON.parse(calls[0].args[calls[0].args.indexOf('--json-schema')+1]);assert.ok(schema.properties.jobs);assert.equal(calls[0].args[calls[0].args.indexOf('--output-format')+1],'stream-json');assert.equal(calls[0].args[calls[0].args.indexOf('--tools')+1],'');
 });
 test('lightweight batch: missing result stays an explicit failure, never completed empty memory',async()=>{
  const {adapter}=fixture(()=>({jobs:[{job_uid:'job-1',proposals:[]}]}));const results=await adapter.extractBatch([req(1),req(2)]);assert.deepEqual(results[0],{proposals:[]});assert.equal(results[1].error.code,'batch_result_missing');
