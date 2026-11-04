@@ -36,3 +36,6 @@ test('lightweight native: extraction alone disables thinking and caps Claude out
  const invoke=native.createNativeInvoker(undefined,(_command,_args,options,callback)=>{seen=options.env;callback(null,'{"proposals":[]}','');return {stdin:{write(){},end(){}},kill(){}};});
  await invoke('claude-code',['-p'],'synthetic','internal-job');assert.equal(seen.CLAUDE_CODE_MAX_OUTPUT_TOKENS,'1024');assert.equal(seen.CLAUDE_CODE_DISABLE_THINKING,'1');assert.equal(process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS,before);
 });
+test('lightweight native: report observed token usage separately without trusting CLI dollar estimates or leaking provider fields',async()=>{
+ const logs=[];const invoke=native.createNativeInvoker({info:s=>logs.push(s),error:()=>{}},(_command,_args,_options,cb)=>{cb(null,JSON.stringify({usage:{input_tokens:120,output_tokens:20,cache_read_input_tokens:40},total_cost_usd:9,secret:'PRIVATE-CANARY'}),'');return {stdin:{write(){},end(){}},kill(){}};});await invoke('claude-code',['-p'],'synthetic','j');assert.ok(logs.some(s=>/input 120.*output 20.*cache_read 40/.test(s)));assert.ok(!logs.join('').includes('PRIVATE-CANARY'));assert.ok(!logs.join('').includes('$9'));
+});

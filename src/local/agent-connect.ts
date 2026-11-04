@@ -6,8 +6,8 @@ import {openStore, StoreError} from './store.js';
 import {readAccountsIndex} from './profiles.js';
 import {assertProfileCloudIssuer, requireCloudIssuer} from './profile-issuer.js';
 
-export async function readLocalIdentity(root: string, profileId: string, hostId: number, runtime: RuntimeKind | undefined,
-  deps: {apiBase: string; fetch: typeof fetch}): Promise<Record<string, unknown>> {
+export async function prepareLocalIdentity(root: string, profileId: string, hostId: number, runtime: RuntimeKind | undefined,
+  deps: {apiBase: string; fetch: typeof fetch}): Promise<() => Promise<Record<string, unknown>>> {
   const base = requireCloudIssuer(deps.apiBase);
   const currentAccess = async () => {
     const config = await loadConfig(root);
@@ -48,6 +48,7 @@ export async function readLocalIdentity(root: string, profileId: string, hostId:
       Number(((body as Record<string, unknown>).host as {id?: unknown} | undefined)?.id) !== hostId) {
     throw new StoreError('identity_mismatch', 'The server did not return the requested Soul. No session was changed.');
   }
+  return async () => {
   // The request can outlive a local revocation or account/device reassociation.
   // Re-read authority immediately before exposing any response to the agent.
   const current = await currentAccess();
@@ -55,7 +56,7 @@ export async function readLocalIdentity(root: string, profileId: string, hostId:
     throw new StoreError("active_profile_changed", "The account or device changed during identity lookup. Retry with current hook context.");
   }
   const categories = current.categories;
-  const identity = body as Record<string, unknown>;
+  const identity = structuredClone(body) as Record<string, unknown>;
   // Also guard older servers until their authoritative endpoint is deployed:
   // callbacks and mood may embed relationship facts even without a facts field.
   if (!categories.includes("relationship")) {
@@ -63,4 +64,9 @@ export async function readLocalIdentity(root: string, profileId: string, hostId:
   }
   if (!categories.includes("experience")) delete identity.recent_work;
   return identity;
+  };
+}
+
+export async function readLocalIdentity(root: string, profileId: string, hostId: number, runtime: RuntimeKind | undefined, deps: {apiBase: string; fetch: typeof fetch}): Promise<Record<string, unknown>> {
+  return (await prepareLocalIdentity(root,profileId,hostId,runtime,deps))();
 }

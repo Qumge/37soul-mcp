@@ -2,7 +2,8 @@
 import {ownedHosts} from './local/cloud-account.js';
 import {configureCloudSelectionHttp} from './local/cloud-selection.js';
 import {sessionSourceBoundary} from './agentd/source-index.js';
-import {readLocalIdentity} from './local/agent-connect.js';
+import {readLocalIdentity,prepareLocalIdentity} from './local/agent-connect.js';
+import {compactConnectionIdentity} from './local/compact-identity.js';
 import {readAvatarFile} from './local/avatars.js';
 /**
  * `37soul` CLI（设计 §6.1）：install / doctor / status / uninstall / pause / resume，
@@ -875,6 +876,9 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
     const latest = await loadConfig(root);
     if ((latest?.active_profile_id !== undefined && latest.active_profile_id !== profile) || resolveLocalAssetsProfileSync(root)?.profile_id !== profile) throw new StoreError("active_profile_changed", "The active account/profile changed. Retry the connection using the current native hook context.");
   };
+  let prefetch: {hostId:number;controller:AbortController;read:Promise<{recheck?:()=>Promise<Record<string,unknown>>;error?:unknown}>} | undefined;
+  let upstreamSignal:AbortSignal|undefined;
+  let abortUpstream:(()=>void)|undefined;
   try {
     let directoryTarget: {id:number;soul_uid:string} | undefined;
     if (attach) {
@@ -883,11 +887,21 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
       const source = await sessionSourceBoundary(root, {profile_id: profile,device_id: deviceId,runtime_kind: runtime as RuntimeKind,native_session_id: session!});
       if (!source) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message; never guess a different terminal.");
       if (name) {
+        const localStore=await openStore(root,profile);let candidate:number|undefined;
+        try{const local=await localStore.read();const matches=Object.values(local.souls).filter(s=>s.identity.name.trim().toLowerCase()===name.toLowerCase());
+          if(matches.length===1){const soul=matches[0],consent=local.consents[`${local.cloud_device_uid}:${soul.soul_uid}`];if(soul.legacy_host_id&&consent?.enabled&&consent.categories.includes("identity"))candidate=soul.legacy_host_id;}}
+        finally{await localStore.close();}
+        if(candidate){
+          const controller=new AbortController();
+          const fetcher:typeof fetch=(input,init)=>{upstreamSignal=init?.signal??undefined;abortUpstream=()=>controller.abort();if(upstreamSignal?.aborted)controller.abort();else upstreamSignal?.addEventListener("abort",abortUpstream,{once:true});return deps.fetch(input,{...init,signal:controller.signal});};
+          prefetch={hostId:candidate,controller,read:prepareLocalIdentity(root,profile,candidate,runtime as RuntimeKind,{...deps,fetch:fetcher}).then(recheck=>({recheck}),error=>({error}))};
+        }
         const directory = await ownedHosts(root, profile, runtime as RuntimeKind, {name,limit:2}, deps);
         const matches = directory.hosts.filter(host => host.nickname.trim().toLowerCase() === name.toLowerCase());
         if (matches.length === 0) throw new StoreError("unknown_soul", "No owned Soul with that name was found. List 37soul hosts; do not create a replacement.");
         if (matches.length !== 1 || directory.pagination.total !== 1 || directory.pagination.has_more) throw new StoreError("ambiguous_soul", `Multiple Souls share that name. Ask which Host ID: ${matches.map(host=>host.id).join(", ")}.`);
         hostId = matches[0].id; directoryTarget = matches[0];
+        if(prefetch&&prefetch.hostId!==hostId)prefetch.controller.abort();
       }
       const store = await openStore(root, profile); let ready: boolean;
       try {
@@ -909,7 +923,9 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
         if (synced.error) throw new StoreError("restore_pending", "This Soul was selected but its download is pending. Retry 37soul connect; account login is already complete.");
       }
     }
-    const identity = await readLocalIdentity(root, profile, hostId, runtime as RuntimeKind | undefined, deps);
+    let recheck: (()=>Promise<Record<string,unknown>>)|undefined;
+    if(prefetch?.hostId===hostId){const prepared=await prefetch.read;if(prepared.error)throw prepared.error;recheck=prepared.recheck;}
+    const identity = recheck ? await recheck() : await readLocalIdentity(root, profile, hostId, runtime as RuntimeKind | undefined, deps);
     if (attach || !rest.includes("--profile")) await requireActive();
     if (attach) {
       const store = await openStore(root, profile);let snap;
@@ -920,8 +936,9 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
       if (!result.ok) throw new StoreError(result.error.code,result.error.message);
       await requireActive();identity.connection={...(result.result as Record<string,unknown>),state:"attached"};
     }
-    io.stdout(`${JSON.stringify(identity,null,2)}\n`);return 0;
+    io.stdout(`${JSON.stringify(attach?compactConnectionIdentity(identity):identity,null,2)}\n`);return 0;
   } catch(error) {io.stderr(`${error instanceof StoreError ? error.message : "Could not connect the selected Soul. Retry locally without remote OAuth."}\n`);return 1;}
+  finally{prefetch?.controller.abort();if(upstreamSignal&&abortUpstream)upstreamSignal.removeEventListener("abort",abortUpstream);}
 }
 
 export async function bindCommand(root: string, rest: string[], io: CliIO, detach: boolean): Promise<number> {

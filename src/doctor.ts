@@ -112,6 +112,16 @@ export async function runDoctor(deps: DoctorDeps): Promise<{ checks: DoctorCheck
       : `assets_only mode — ${pending} pending change(s), ${conflicts} quarantined; ${credentials.length} locally scoped credential(s) (not server-validated)${unavailableProfiles > 0 ? `; login required for ${unavailableProfiles} profile(s)` : ""}`,
   });
 
+  if(localProfile){
+    const store=await openStore(root,localProfile.profile_id);
+    try{const snap=await store.read();const pendingMemory=Object.values(snap.extraction_watermarks).filter(w=>!w.completed);
+      const stale=pendingMemory.filter(w=>!Object.values(snap.bindings).some(b=>!b.retired&&b.state==="bound"&&b.binding_uid===w.request.binding_uid&&b.revision===w.request.binding_revision)).length;
+      const usage=snap.extraction_usage?.[new Date().toISOString().slice(0,10)];const n=(v:unknown)=>typeof v==="number"&&Number.isSafeInteger(v)&&v>=0?v:0;
+      checks.push({name:"memory resources",ok:true,detail:`${pendingMemory.length} pending, ${stale} stale_binding retained; today ${n(usage?.calls)}/40 native calls, reserved_units ${n(usage?.reserved_units)}/200000; ordinary work batches at 3 turns or about 90–120s`});
+    }catch{checks.push({name:"memory resources",ok:true,detail:"resource accounting unavailable; existing local data is preserved"});}
+    finally{await store.close();}
+  }
+
   // Iterate over every *installed* agent (from the manifest), not over tokens:
   // anonymous-first install has no tokens, but the hook/plugin state must still be
   // reported honestly. Legacy token keys identify diagnostics only, never auth.

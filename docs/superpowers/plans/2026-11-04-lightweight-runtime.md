@@ -40,7 +40,7 @@ Only runtime worktree; preserve all auth/consents/source boundaries/hosts, no ra
 - [ ] Run new and existing hook/context fixtures GREEN; commit.
 
 ### Task4: Compact connection output and bounded diagnostics
-**Files:** create src/local/compact-identity.ts,test/lightweight-connect.test.mjs; modify src/cli.ts,README.md,README.zh-CN.md,README.ja.md.
+**Files:** create src/local/compact-identity.ts,test/lightweight-connect.test.mjs; modify src/cli.ts,src/local/agent-connect.ts,src/doctor.ts,src/agentd/native-invoker.ts,README.md,README.zh-CN.md,README.ja.md.
 **Interfaces:** compactConnectionIdentity(identity) preserves authority/requiredpersona and returns only connection necessities; whoami unchanged. Existing doctor gets aggregate pending/budget counters, no private text.
 - [ ] Write real CLI connect tests RED: compact result contains attached/basic persona/mood, omits rich media/long feed; whoami full; revoked/auth/racing-profile tests unchanged.
 - [ ] Implement projection and honest docs explaining delay/budgets/locality.

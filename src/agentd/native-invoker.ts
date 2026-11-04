@@ -79,6 +79,15 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
         (error, stdout, stderr) => {
           const exitCode = (error as { code?: unknown } | null)?.code;
           const code = error ? (typeof exitCode === "number" ? exitCode : 1) : 0;
+          // Provider-reported tokens are distinct from our reservations and unknown CLI dollar estimates.
+          try {
+            const report=JSON.parse(stdout);let input=0,output=0,cache=0,seen=false;
+            const n=(v:unknown)=>typeof v==="number"&&Number.isSafeInteger(v)&&v>=0?v:0;
+            if(report.modelUsage&&typeof report.modelUsage==="object"){
+              for(const value of Object.values(report.modelUsage) as Record<string,unknown>[]){if(!value||typeof value!=="object")continue;input+=n(value.inputTokens);output+=n(value.outputTokens);cache+=n(value.cacheReadInputTokens);seen=true;}
+            }else if(report.usage&&typeof report.usage==="object"){input=n(report.usage.input_tokens);output=n(report.usage.output_tokens);cache=n(report.usage.cache_read_input_tokens);seen=true;}
+            if(seen)log?.info(`native ${runtime} reported tokens: input ${input}, output ${output}, cache_read ${cache}`);
+          }catch{/* Missing usage is unknown, never a fabricated zero-cost result. */}
           // execFile errors can embed stderr, arguments or provider credentials.
           if (error) log?.error(`native ${runtime} exited ${code}`);
           resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });

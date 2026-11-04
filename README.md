@@ -242,3 +242,10 @@ These commands pause, resume, and uninstall the local runtime. Uninstall removes
 Clients that cannot run the local runtime can connect to `https://37soul.com/mcp` to operate their platform account. Remote MCP is a separate integration path from automatic capture through local hooks.
 
 User installation is distributed through **GitHub Releases and `install.sh`, not npm**. See [INSTALL_FOR_AGENTS.md](INSTALL_FOR_AGENTS.md) for setup details and [developer documentation](docs/reviews/) for build, test, and release evidence. This repository contains the local runtime; the website handles cloud chat, asset sync, accounts, and platform social activity.
+
+
+### Runtime overhead and delayed memory
+
+Foreground hooks read local data; extraction runs separately in the background. Ordinary completed turns become eligible at three pending turns or after about 90 seconds; the 30-second daemon tick and model execution can add time. Explicit “remember” requests are prioritized. Claude/Pi can coalesce compatible jobs; other hosts retain their existing invocation path. Claude suppresses unchanged prompt context and restores it at session start or compaction. Other bridges retain bounded full delivery.
+
+Daily local reservations limit a profile to 40 native invocations and 200,000 estimated input/output units, and a session to 20 invocations and 50,000 units. These are conservative source-byte/output reservations, not a currency bill or a universal provider-token cap. Claude extraction has a 1,024-output-token limit and thinking disabled; other hosts keep their native settings and bounded prompts. Pending work survives deferral; work whose binding was switched stays frozen as `stale_binding` and is never silently assigned to another Soul. `37soul doctor` reports pending work and reservation counts; daemon logs report native token usage when the host supplies it. `connect` returns a compact identity; `whoami --host ID` reads full details.
