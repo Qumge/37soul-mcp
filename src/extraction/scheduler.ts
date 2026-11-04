@@ -1,3 +1,4 @@
+import {rememberPendingSessionSource} from "../agentd/session-source-hints.js";
 /**
  * Task 4: bounded extraction scheduling.
  *
@@ -642,6 +643,11 @@ registerWriterCommand("runtime_event", async ({ root, request }) => {
     }
   }
   const candidate = extractTranscriptPath(request.payload);
+  if (candidate !== null && (event.kind === "resume" || event.kind === "request")) {
+    // First-prompt hooks may finish before the host creates its transcript. This
+    // metadata cannot become an extraction source; connect validates it later.
+    await rememberPendingSessionSource(root, event.key, candidate);
+  }
   if (binding?.source_boundary && (candidate === null || !(await sourceMatchesBoundary(candidate, binding.source_boundary)))) {
     // Keep only the new hook's path so an explicit reattach can establish a fresh
     // boundary after compaction. This event must never schedule old source.

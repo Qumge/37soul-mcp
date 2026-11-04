@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, writeFile, readFile, rm, appendFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, rm, appendFile, readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -8,7 +8,7 @@ import {main} from '../dist/cli.js';
 import {deviceLogin} from '../dist/install.js';
 import {openStore} from '../dist/local/store.js';
 import {resolveBinding, bindingKey, assertBindingCurrent} from '../dist/local/bindings.js';
-import {captureSourcePointer, readSourceRefs} from '../dist/agentd/source-index.js';
+import {captureSourcePointer, readSourceRefs, sessionSourceBoundary} from '../dist/agentd/source-index.js';
 import {runHookCommand} from '../dist/hook.js';
 import {startWriter, sendWriter} from '../dist/local/writer.js';
 
@@ -119,4 +119,67 @@ test('whoami rechecks identity consent after a pending server response',async t=
 });
 test('whoami filters using categories narrowed while identity response was pending',async t=>{
  const {root}=await fixture(t);globalThis.fetch=async()=>{const store=await openStore(root,'p1');await store.transact(d=>{d.consents[`cloud-device:${uid}`].categories=['identity'];});await store.close();return new Response(JSON.stringify({...identity,relationship:{facts:['PRIVATE-AFTER-REVOKE']},recent_work:'PRIVATE-WORK-AFTER-REVOKE',upcoming:[{bring_back:'PRIVATE-AFTER-REVOKE'}]}));};const output=io();assert.equal(await main(['whoami',...argv],output),0);assert.ok(!output.out.stdout.includes('PRIVATE-'));assert.equal(JSON.parse(output.out.stdout).host.id,277);
+});
+
+async function firstMessageHook(home, root, file, nativeSession = key.native_session_id) {
+ const writer = await startWriter(root);
+ try {
+  let output = '';
+  await runHookCommand({home, agentKind:'claude-code', event:'UserPromptSubmit', stdin:JSON.stringify({session_id:nativeSession, transcript_path:file, prompt:'Connect the explicitly chosen Soul'}), stdout:t=>output+=t, stderr:()=>{}, fetch:async()=>{throw Error('hook must stay local');}});
+  assert.match(output, /37soul connect/);
+ } finally { await writer.close(); }
+}
+
+test('first-message: native transcript created after the first hook still permits connect in the same turn', async t => {
+ const {root,home}=await fixture(t);cloudRead();
+ const file=path.join(home,'not-created-until-after-hook.jsonl');
+ await firstMessageHook(home,root,file);
+ assert.equal(await sessionSourceBoundary(root,key),null,'an absent file is not yet usable');
+ assert.equal(Object.keys((await snapshot(root)).extraction_watermarks).length,0);
+ const prefix='first user request and tool trace before explicit attachment\n';
+ await writeFile(file,prefix);
+ const result=io();
+ assert.equal(await main(['connect',...argv,'--session',key.native_session_id],result),0,result.out.stderr);
+ const binding=(await snapshot(root)).bindings[bindingKey(key)];
+ assert.equal(binding.soul_uid,uid);
+ assert.equal(binding.source_boundary.start_offset,Buffer.byteLength(prefix),'capture the actual connect-time cutoff, never replay earlier content');
+ assert.equal(JSON.parse(result.out.stdout).connection.state,'attached');
+ assert.ok(!result.out.stdout.includes(token));
+});
+
+test('first-message: a prospective source never guesses another native session or an absent file', async t => {
+ const {root,home}=await fixture(t);cloudRead();
+ const file=path.join(home,'still-absent.jsonl');
+ await firstMessageHook(home,root,file);
+ const other=path.join(home,'other-session.jsonl');await writeFile(other,'different session private history\n');
+ await firstMessageHook(home,root,other,'different-native-session');
+ const result=io();
+ assert.equal(await main(['connect',...argv,'--session',key.native_session_id],result),1);
+ assert.match(result.out.stderr,/hook source context/);
+ assert.equal(Object.keys((await snapshot(root)).extraction_watermarks).length,0);
+});
+
+test('prospective source: a newer native file hint prevents attachment to an older transcript', async t => {
+ const {root,home}=await fixture(t);cloudRead();
+ const previous=path.join(home,'old-source.jsonl');await writeFile(previous,'old source must not be chosen\n');
+ await captureSourcePointer(root,'p1',randomUUID(),{runtime_kind:key.runtime_kind,native_session_id:key.native_session_id,path:previous,captured_at:'2026-11-01T00:00:00.000Z'});
+ const next=path.join(home,'new-source-created-later.jsonl');
+ await firstMessageHook(home,root,next);
+ const absent=io();assert.equal(await main(['connect',...argv,'--session',key.native_session_id],absent),1,'do not silently use an older source while the new native source is missing');
+ await writeFile(next,'new native source\n');
+ const ready=io();assert.equal(await main(['connect',...argv,'--session',key.native_session_id],ready),0,ready.out.stderr);
+ assert.equal((await snapshot(root)).bindings[bindingKey(key)].source_boundary.path,next);
+});
+
+test('first-message: pending source metadata never copies extra event-key conversation fields', async t => {
+ const {root,home}=await fixture(t);const writer=await startWriter(root);
+ try {
+  const result=await sendWriter(root,{request_uid:randomUUID(),profile_id:'p1',command:'runtime_event',payload:{event:{key:{...key,raw_conversation:'SYNTHETIC-RAW-KEY-CANARY'},event_ref:randomUUID(),kind:'request',internal_job_uid:null},source_path:path.join(home,'later.jsonl')}});
+  assert.equal(result.ok,true);
+  const dir=path.join(root,'session-source-hints','p1');const files=await readdir(dir);
+  assert.equal(files.length,1);
+  const saved=await readFile(path.join(dir,files[0]),'utf8');
+  assert.ok(!saved.includes('SYNTHETIC-RAW-KEY-CANARY'),'only known path/session metadata may be saved');
+  assert.equal(Object.keys((await snapshot(root)).extraction_watermarks).length,0);
+ } finally {await writer.close();}
 });

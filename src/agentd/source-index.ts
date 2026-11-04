@@ -22,6 +22,7 @@
  *    MAX_POINTER_AGE_MS) so it cannot grow without limit.
  */
 import { constants } from "node:fs";
+import {pendingSessionSource} from "./session-source-hints.js";
 import {createHash} from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
@@ -238,8 +239,10 @@ export async function sessionSourceBoundary(root: string, key: NativeSessionKey)
       if (record.runtime_kind === key.runtime_kind && record.native_session_id === key.native_session_id) records.push(record);
     } catch { /* Corrupt pointers are not evidence. */ }
   }
+  const pending = await pendingSessionSource(root, key);
   records.sort((a, b) => String(b.captured_at).localeCompare(String(a.captured_at)));
-  const record = records[0];
+  const latest = records[0];
+  const record = pending && (!latest || pending.captured_at >= latest.captured_at) ? pending : latest;
   if (!record || !path.isAbsolute(record.path)) return null;
   let handle: FileHandle | null = null;
   try {
