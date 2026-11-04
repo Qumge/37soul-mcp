@@ -29,7 +29,7 @@ export interface HookDeps {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   getGitState?: (cwd: string) => Promise<GitStateResult>;
-  /** 整体预算，默认 300ms（设计 §6.3；内部实现留 50ms 收尾余量）。 */
+  /** Whole-hook processing budget; defaults to 300ms for context/completion events, 50ms otherwise. */
   timeoutMs?: number;
 }
 
@@ -45,9 +45,16 @@ export async function runHook(deps: HookDeps): Promise<number> {
 }
 
 /** 给整体调用加预算；超时抛错，由调用方保持静默。 */
+class HookBudgetExceeded extends Error {}
+
+interface HookBudget {
+  check(): void;
+  remaining(): number;
+}
+
 function withBudget<T>(ms: number, work: () => Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`hook budget of ${ms}ms exceeded`)), ms);
+    const timer = setTimeout(() => reject(new HookBudgetExceeded(`hook budget of ${ms}ms exceeded`)), ms);
     work().then(
       (value) => {
         clearTimeout(timer);
@@ -63,8 +70,8 @@ function withBudget<T>(ms: number, work: () => Promise<T>): Promise<T> {
 
 // ── v2：`37soul hook --agent <kind> --event <事件名>`（设计 §6.3） ─────────────
 //
-// 除 SessionStart（以及 UserPromptSubmit 通道的首轮注入）外，必须在 50ms 内退出：
-// 只解析载荷并提交本地 runtime event/source pointer，不发旧协议请求。
+// Context delivery and durable Stop boundaries share a 300ms processing deadline.
+// Other lifecycle notifications use 50ms; no hook waits for cloud/model work.
 
 export interface HookCommandDeps extends HookDeps {
   event: string;
@@ -72,7 +79,35 @@ export interface HookCommandDeps extends HookDeps {
 }
 
 export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
+  const defaultMs = ["SessionStart", "UserPromptSubmit", "Stop"].includes(deps.event) ? 300 : 50;
+  const ms = typeof deps.timeoutMs === "number" && Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0
+    ? deps.timeoutMs : defaultMs;
+  const deadline = performance.now() + ms;
+  let active = true;
+  const budget: HookBudget = {
+    check() {
+      if (!active || performance.now() >= deadline) throw new HookBudgetExceeded("hook budget exceeded");
+    },
+    remaining() {
+      this.check();
+      return Math.max(1, Math.ceil(deadline - performance.now()));
+    },
+  };
   try {
+    return await withBudget(ms, () => runWithinBudget(deps, budget));
+  } catch (error) {
+    if (!(error instanceof HookBudgetExceeded)) deps.stderr(`37soul hook: ${(error as Error).message}\n`);
+    return 0;
+  } finally {
+    // In-flight local reads can settle later; they must not deliver stale output
+    // or initiate another IPC request after the host has continued.
+    active = false;
+  }
+}
+
+async function runWithinBudget(deps: HookCommandDeps, budget: HookBudget): Promise<number> {
+  try {
+    budget.check();
     let payload: Record<string, any>;
     try {
       payload = JSON.parse(deps.stdin) as Record<string, any>;
@@ -84,6 +119,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     const root = dataRoot(deps.home);
     // Global pause exits before local runtime events or context injection.
     const state = await loadState(root);
+    budget.check();
     if (state.paused) return 0;
 
     const host = hostSpec(deps.agentKind);
@@ -121,13 +157,15 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
         // A missing/unreadable transcript leaves the old event-ref range intact.
       }
     }
+    budget.check();
     const runtimeEvent = emitRuntimeEvent(
-      root, deps.agentKind, deps.event, sessionId, sourcePath, sourceTurnRefs, sourceEndOffset, sourceObservation,
+      root, deps.agentKind, deps.event, sessionId, budget, sourcePath, sourceTurnRefs, sourceEndOffset, sourceObservation,
     ).catch(() => {});
     // SessionStart needs the binding before injecting. Stop is the completed-turn
     // event whose source pointer must reach the writer before the host exits.
     if (deps.event === "SessionStart" || deps.event === "Stop" || deps.event === "UserPromptSubmit") await runtimeEvent;
     else void runtimeEvent;
+    budget.check();
 
     const channel = host?.hook.injectionChannel ?? "none";
     const assetsForHint = resolveLocalAssetsProfileSync(root);
@@ -136,6 +174,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       : "";
     let delivered = false;
     const deliver = (text: string) => {
+      budget.check();
       const document = JSON.parse(text);
       if (hint) document.hookSpecificOutput.additionalContext += `\n\n${hint}`;
       delivered = true;
@@ -143,6 +182,7 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       deps.stdout(`${host?.hook.formatContext ? host.hook.formatContext(output.additionalContext, output.hookEventName) : JSON.stringify(document)}\n`);
     };
     const deliverHint = (event: "SessionStart" | "UserPromptSubmit") => {
+      budget.check();
       if (!delivered && hint) deps.stdout(`${host?.hook.formatContext ? host.hook.formatContext(hint, event) : wrapAdditionalContext(hint, event)}\n`);
     };
     if (deps.event === "SessionStart" && channel === "SessionStart") {
@@ -153,9 +193,9 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       // recorded through the writer only after actual stdout delivery.
       const assets = resolveLocalAssetsProfileSync(root);
       if (assets) {
-        const allowHint = await withBudget(deps.timeoutMs ?? 300, () =>
-          injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deliver, "session", "SessionStart"),
-        ).catch(() => false);
+        const allowHint = await injectSoulContext(
+          root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, "session", "SessionStart",
+        );
         if (allowHint) deliverHint("SessionStart");
         return 0;
       }
@@ -168,9 +208,9 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
       if (assets) {
         const prompt = parsed.prompt ?? "";
         if (prompt.trim() !== "") {
-          const allowHint = await withBudget(deps.timeoutMs ?? 300, () =>
-            injectSoulContext(root, deps.home, assets, deps.agentKind, sessionId, deliver, prompt, "UserPromptSubmit"),
-          ).catch(() => false);
+          const allowHint = await injectSoulContext(
+            root, deps.home, assets, deps.agentKind, sessionId, deliver, budget, prompt, "UserPromptSubmit",
+          );
           if (allowHint) deliverHint("UserPromptSubmit");
           return 0;
         }
@@ -178,7 +218,10 @@ export async function runHookCommand(deps: HookCommandDeps): Promise<number> {
     }
     return 0; // 其余事件：stdout 必须为空
   } catch (error) {
-    deps.stderr(`37soul hook: ${(error as Error).message}\n`);
+    if (!(error instanceof HookBudgetExceeded)) {
+      budget.check();
+      deps.stderr(`37soul hook: ${(error as Error).message}\n`);
+    }
     return 0;
   }
 }
@@ -195,13 +238,15 @@ const RUNTIME_EVENT_KINDS: Record<string, RuntimeEventKind> = {
  * Assets-mode runtime-event emission（Task 4）。只在 accounts index 里有
  * `soul_sync_mode === "assets_only"` 的单一本地 profile、且确有 session id 时才发；
  * 事件带 `SOUL37_INTERNAL_JOB_UID`（内部提炼任务标记），writer 用它防递归。
- * 全程 fire-and-forget：writer 不在也不影响会话。
+ * Context/completion events wait only within the shared foreground budget.
+ * Requests already accepted by the writer may commit after the hook exits.
  */
 async function emitRuntimeEvent(
   root: string,
   agentKind: string,
   hookEvent: string,
   sessionId: string,
+  budget: HookBudget,
   sourcePath: string | null,
   sourceTurnRefs?: string[],
   sourceEndOffset?: number,
@@ -239,7 +284,7 @@ async function emitRuntimeEvent(
       ...(hookEvent === "Stop" && hostSpec(agentKind)?.hook.observeTurn ? {completion_capture_required: true} : {}),
       ...(sourceObservation ? {source_observation: sourceObservation} : {}),
     },
-  });
+  }, { timeoutMs: budget.remaining() });
 }
 
 /**
@@ -261,12 +306,16 @@ async function injectSoulContext(
   agentKind: string,
   sessionId: string,
   stdout: (text: string) => void,
+  budget: HookBudget,
   taskHint = "session",
   outputEvent: "SessionStart" | "UserPromptSubmit" = "SessionStart",
 ): Promise<boolean> {
+  budget.check();
   const store = await openStore(root, assets.profile_id);
   try {
+    budget.check();
     const snap = await store.read();
+    budget.check();
     const key = bindingKey({
       profile_id: assets.profile_id,
       device_id: assets.device_id,
@@ -286,6 +335,7 @@ async function injectSoulContext(
       throw error;
     }
     const bundle = selectContext(input);
+    budget.check();
     if (typeof bundle.rendered_text !== "string" || bundle.rendered_text.trim() === "") return true;
 
     // Deliver first, then record the receipt — an injected receipt must only exist
@@ -296,7 +346,7 @@ async function injectSoulContext(
       profile_id: assets.profile_id,
       command: "record_receipt",
       payload: { binding, bundle, stage: "injected" },
-    });
+    }, { timeoutMs: budget.remaining() });
     return true;
   } finally {
     await store.close();

@@ -178,7 +178,7 @@ const createArgs = home => ['soul', 'create', '--name', 'Active Local', '--sex',
 function recallAsset(uid, content) {
   return { asset_uid: uid, soul_uid: 's1', kind: 'relationship', trait: 'preference', content, applicability: '', tags: [], evidence: 'explicit_user_statement', verification: 'unverified', sensitivity: 'normal', state: 'active', revision: 1, supersedes_uid: null, pinned: false, source: { runtime_kind: 'pi', session_ref: 'fake', event_ref: 'fake', occurred_at: '2026-11-02T00:00:00Z' }, sync_state: 'local_only', cloud_revision: null };
 }
-test('install -> login work -> no-flag create/recall/select/sync and Pi hook all use the adopted profile', async () => {
+test('install -> login work -> no-profile-flag create/scoped-recall/select/sync and Pi hook use the adopted profile', async () => {
   await fixture(async ({ home, root, deps, io }) => {
     await install(deps, { agents: ['pi'], installService: false });
     assert.equal(await loginCommand(root, ['--profile', 'work'], io, deps), 0);
@@ -192,7 +192,11 @@ test('install -> login work -> no-flag create/recall/select/sync and Pi hook all
     assert.equal(created.code, 0, created.stderr);
     assert.equal(Object.keys((await read(root, 'work')).souls).length, 2);
     assert.deepEqual((await read(root, 'default')).souls, {});
-    const recall = await invokeCli(home, ['recall']);
+    const ambiguousRecall = await invokeCli(home, ['recall']);
+    assert.notEqual(ambiguousRecall.code, 0, 'multiple Souls require a role choice, even in the active profile');
+    assert.equal(ambiguousRecall.stdout, '');
+    assert.doesNotMatch(ambiguousRecall.stderr, /ACTIVE_PROFILE_FACT|OTHER_ACCOUNT_CANARY/);
+    const recall = await invokeCli(home, ['recall', '--soul', 's1']);
     assert.equal(recall.code, 0, recall.stderr);
     assert.match(recall.stdout, /ACTIVE_PROFILE_FACT/);
     assert.doesNotMatch(recall.stdout, /OTHER_ACCOUNT_CANARY/);
