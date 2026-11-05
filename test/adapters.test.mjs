@@ -464,8 +464,10 @@ test("codex: structured extraction uses bounded source refs", async () => {
   assert.deepEqual(reads[0], ["rollout-marker"]);
 
   // The native command is isolated in one builder and invoked only via deps.invoke.
-  assert.deepEqual(buildCodexExtractionInvocation(request, "turn text").args, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"]);
-  assert.deepEqual(invokeArgs, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"]);
+  // Extraction caps output at ~1024 tokens, so the user's interactive reasoning
+  // effort (xhigh here) would only burn time; the per-call override keeps it low.
+  assert.deepEqual(buildCodexExtractionInvocation(request, "turn text").args, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-c", 'model_reasoning_effort="low"']);
+  assert.deepEqual(invokeArgs, ["exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-c", 'model_reasoning_effort="low"']);
   assert.equal(invokeRuntime, "codex", "the native tool is codex");
   assert.equal(invokeJobUid, "codex-job-1", "the model call is tagged with the job uid");
 

@@ -49,8 +49,17 @@ test("native-invoker: maps runtime kind to the concrete CLI binary and tags the 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "codex", "the only place the binary spelling lives");
   assert.deepEqual(calls[0].args, ["exec", "--output-format", "json"]);
-  assert.equal(calls[0].options.timeout, 60_000, "spawn is bounded, never hangs the drain");
+  assert.equal(calls[0].options.timeout, 120_000, "codex may spend longer than claude-code on a cold model start, but stays bounded");
   assert.equal(calls[0].options.env.SOUL37_INTERNAL_JOB_UID, "job-123", "internal job uid rides in the env so the hook can tag its session");
+});
+
+test("native-invoker: the timeout is per runtime — claude-code keeps the 60s bound", async () => {
+  const { calls, spawn } = recordingSpawn();
+  const invoke = createNativeInvoker(undefined, spawn);
+
+  await invoke("claude-code", ["-p"], "prompt", "job-1");
+
+  assert.equal(calls[0].options.timeout, 60_000);
 });
 
 test("native-invoker: a failed spawn resolves with a non-zero code instead of rejecting/hanging", async () => {
@@ -128,3 +137,37 @@ test("extract-adapters: all registered runtimes are wired, and extract short-cir
   assert.match(logs.join("\n"), /native codex exited 7/);
   assert.doesNotMatch(logs.join("\n"), /SECRET_CANARY|PRIVATE_STDERR_CANARY|PRIVATE_INPUT_CANARY/);
  });
+
+test("native-invoker: a timeout is named in the log instead of leaving a bare exit code", async () => {
+  const logs = [];
+  const invoke = createNativeInvoker({info: value => logs.push(value), error: value => logs.push(value)}, (_command, _args, _options, callback) => {
+    // Same shape execFile reports when its `timeout` fires: killed by SIGTERM, no exit code.
+    callback(Object.assign(new Error("Command failed"), {code: null, killed: true, signal: "SIGTERM"}), "", "PRIVATE_STDERR_CANARY");
+    return {stdin: {write() {}, end() {}}, kill() {}};
+  });
+  const result = await invoke("codex", ["exec"], "", "job-timeout");
+  assert.equal(result.code, 1);
+  assert.match(logs.join("\n"), /native codex exited 1 \(timeout after 120000ms\)/);
+  assert.doesNotMatch(logs.join("\n"), /PRIVATE_STDERR_CANARY/);
+});
+
+test("native-invoker: failure classes come from a fixed allowlist, never raw stderr", async () => {
+  const classes = [
+    ["429 Too Many Requests: rate limit exceeded", "rate_limited", "HTTP 429 Too Many Requests"],
+    ["Error: not logged in. Run codex login", "auth", "not logged in"],
+    ["stream error: ECONNRESET socket hang up", "network", "ECONNRESET"],
+    ["error: unexpected argument '--nope' found", "usage", "unexpected argument"],
+    ["something entirely private: PRIVATE_STDERR_CANARY", "other", null],
+  ];
+  for (const [stderr, expected, rawFragment] of classes) {
+    const logs = [];
+    const invoke = createNativeInvoker({info: value => logs.push(value), error: value => logs.push(value)}, (_command, _args, _options, callback) => {
+      callback(Object.assign(new Error("Command failed"), {code: 1}), "", stderr);
+      return {stdin: {write() {}, end() {}}, kill() {}};
+    });
+    await invoke("codex", ["exec"], "", "job-class");
+    const line = logs.join("\n");
+    assert.match(line, new RegExp(`native codex exited 1 \\(stderr ${expected}, \\d+ bytes\\)`), stderr);
+    if (rawFragment !== null) assert.ok(!line.includes(rawFragment), `raw stderr must not be logged: ${rawFragment}`);
+  }
+});

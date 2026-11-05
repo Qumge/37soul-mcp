@@ -50,13 +50,42 @@ const defaultSpawn: SpawnFn = (command, args, options, callback) =>
  * Spawn the native CLI (never a shell) and pipe `input` to its stdin. The internal
  * job uid travels in `SOUL37_INTERNAL_JOB_UID` so the runtime-side hook can tag any
  * session it opens and the scheduler can exclude it from recursive extraction.
- * A fixed timeout bounds the wait; a killed process still resolves (code 124-style)
- * rather than hanging the drain. `spawn` is injectable for tests.
+ * A per-runtime timeout bounds the wait; a killed process still resolves (code
+ * 124-style) rather than hanging the drain. `spawn` is injectable for tests.
  */
 export interface NativeExecutionOptions {
   home?: string;
   nodePath?: string;
   env?: NodeJS.ProcessEnv;
+}
+
+/** Codex can spend a long time on a cold model start; everything else keeps the 60s bound. */
+const NATIVE_TIMEOUT_MS: Partial<Record<RuntimeKind, number>> = { codex: 120_000 };
+const NATIVE_TIMEOUT_DEFAULT_MS = 60_000;
+
+/**
+ * Fixed classification allowlist for child stderr. Only the class name and byte
+ * count reach the log: raw stderr can embed prompts, arguments or provider
+ * credentials, so it is never interpolated.
+ */
+const STDERR_CLASSES: ReadonlyArray<readonly [string, RegExp]> = [
+  ["rate_limited", /rate.?limit|too many requests|\b429\b/i],
+  ["quota", /quota|usage limit|insufficient_quota|billing/i],
+  ["auth", /unauthori[sz]ed|forbidden|\b401\b|\b403\b|invalid api key|not logged in|login required|please (?:run |log ?in)/i],
+  ["network", /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|getaddrinfo/i],
+  ["usage", /unexpected argument|unknown (?:option|argument)|invalid (?:value|argument)|usage:/i],
+];
+
+function classifyNativeStderr(stderr: string): string {
+  for (const [name, pattern] of STDERR_CLASSES) if (pattern.test(stderr)) return name;
+  return "other";
+}
+
+function failureDetail(error: unknown, stderr: string, timeoutMs: number): string {
+  const killed = (error as { killed?: unknown } | null)?.killed;
+  if (killed === true) return ` (timeout after ${timeoutMs}ms)`;
+  if (stderr === "") return "";
+  return ` (stderr ${classifyNativeStderr(stderr)}, ${Buffer.byteLength(stderr, "utf8")} bytes)`;
 }
 
 export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = defaultSpawn, options?: NativeExecutionOptions): NativeInvoker {
@@ -74,9 +103,10 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
     }
     const command = resolvePaths ? await resolveNativeExecutable(spec, home, executionPath) : spec.binary;
     if (!command) return { code: 1, stdout: "", stderr: `native ${runtime} executable unavailable; install the current host CLI` };
+    const timeoutMs = NATIVE_TIMEOUT_MS[runtime] ?? NATIVE_TIMEOUT_DEFAULT_MS;
     const run = (argv: readonly string[], stdin: string) => new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(command, argv,
-        { timeout: 60_000, env: { ...env, ...(runtime === "claude-code" ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_DISABLE_THINKING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"} : {}), SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
+        { timeout: timeoutMs, env: { ...env, ...(runtime === "claude-code" ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_DISABLE_THINKING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"} : {}), SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
         (error, stdout, stderr) => {
           const exitCode = (error as { code?: unknown } | null)?.code;
           const code = error ? (typeof exitCode === "number" ? exitCode : 1) : 0;
@@ -91,7 +121,7 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
           }catch{/* Missing usage is unknown, never a fabricated zero-cost result. */}
           // execFile errors can embed stderr, arguments or provider credentials.
           const result=runtime==="claude-code"?normalizeClaudeExtraction(code,stdout??"",argv):{code,stdout:stdout??""};
-          if(result.code!==0)log?.error(`native ${runtime} exited ${result.code}`);
+          if(result.code!==0)log?.error(`native ${runtime} exited ${result.code}${failureDetail(error, stderr ?? "", timeoutMs)}`);
           else if(code!==0)log?.info(`native ${runtime} reused complete JSON at the one-turn boundary`);
           resolve({ ...result, stderr: stderr ?? "" });
         });

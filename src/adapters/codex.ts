@@ -288,7 +288,10 @@ export function buildCodexExtractionInvocation(
   // Codex's non-interactive surface is `codex exec --json` (JSONL events), not
   // `--output-format`. Read-only + skip-git-repo-check keeps this a text task and
   // works from agentd's non-repository cwd; the prompt is piped on stdin.
-  return { args: ["exec", "--json", "--skip-git-repo-check", "-s", "read-only"], input };
+  // Extraction output is capped at ~1024 tokens, so the user's configured
+  // reasoning effort (often xhigh) buys nothing and costs latency; override it
+  // for this internal call only.
+  return { args: ["exec", "--json", "--skip-git-repo-check", "-s", "read-only", "-c", 'model_reasoning_effort="low"'], input };
 }
 
 export function createCodexAdapter(deps: AdapterDeps): RuntimeAdapter {
