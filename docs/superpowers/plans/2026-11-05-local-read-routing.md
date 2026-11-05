@@ -24,5 +24,5 @@ Stale post timestamps; absent vs empty fields; photo viewing vs paid generation;
 - [x] Verify full Skill checks and named public-doc spec; independent review.
 
 ### Task 3: Delivery
-- [ ] Release, install and verify approved patch updates; preserve account/Soul/assets and foreign hooks.
-- [ ] Report live read evidence and model-evaluation limits separately; clean task worktrees after merge/push.
+- [x] Release, install and verify approved patch updates; preserve account/Soul/assets and foreign hooks.
+- [x] Report live read evidence and model-evaluation limits separately; clean task worktrees after merge/push.
