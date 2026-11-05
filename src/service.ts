@@ -19,12 +19,60 @@ export interface ServiceSpec {
   logPath: string;
   /** Explicit PATH only; never serialize the parent environment or secrets. */
   executionPath?: string;
+  /** Vetted, non-secret proxy values captured from the installing shell. */
+  proxyEnvironment?: Readonly<Record<string, string>>;
   platform?: NodeJS.Platform;
   uid?: number;
   /** Backoff clock for transient launchd registration errors. */
   sleep?: (ms: number) => Promise<void>;
   /** 固定 runtime 的启动器：优先用它当命令（运行期解析 node）。 */
   launcherPath?: string;
+}
+
+export interface ProxyEnvironmentCapture {
+  environment: Record<string, string>;
+  /** Keys left out because the value embeds credentials. */
+  skipped: string[];
+}
+
+/** The only environment keys a service definition may carry besides PATH. */
+const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] as const;
+
+/**
+ * Proxy URLs with `user:pass@` never reach a service file: launchd plists and
+ * systemd units are plaintext. The user is told which key was skipped, never its
+ * value. Everything outside these four keys is left in the installing shell.
+ */
+function proxyHasCredentials(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.username !== "" || url.password !== "";
+  } catch {
+    // Not a parseable URL: only the conservative @ test can decide.
+    return value.includes("@");
+  }
+}
+
+export function captureProxyEnvironment(source: NodeJS.ProcessEnv): ProxyEnvironmentCapture {
+  const environment: Record<string, string> = {};
+  const skipped: string[] = [];
+  for (const key of PROXY_ENV_KEYS) {
+    const value = (source[key] ?? source[key.toLowerCase()] ?? "").trim();
+    if (value === "") continue;
+    if (key !== "NO_PROXY" && proxyHasCredentials(value)) {
+      skipped.push(key);
+      continue;
+    }
+    environment[key] = value;
+  }
+  return { environment, skipped };
+}
+
+function environmentEntries(spec: ServiceSpec): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  if (spec.executionPath !== undefined) entries.push(["PATH", spec.executionPath]);
+  const proxy = Object.entries(spec.proxyEnvironment ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  return [...entries, ...proxy];
 }
 
 export type RunCommand = (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -54,6 +102,13 @@ export function renderPlist(spec: ServiceSpec): string {
   const args = serviceArgs(spec)
     .map((argument) => `        <string>${escapeXml(argument)}</string>`)
     .join("\n");
+  const environment = environmentEntries(spec);
+  const environmentBlock = environment.length === 0 ? "" : `    <key>EnvironmentVariables</key>
+    <dict>
+${environment.map(([key, value]) => `      <key>${escapeXml(key)}</key>
+      <string>${escapeXml(value)}</string>`).join("\n")}
+    </dict>
+`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -64,12 +119,7 @@ export function renderPlist(spec: ServiceSpec): string {
     <array>
 ${args}
     </array>
-${spec.executionPath === undefined ? "" : `    <key>EnvironmentVariables</key>
-    <dict>
-      <key>PATH</key>
-      <string>${escapeXml(spec.executionPath)}</string>
-    </dict>
-`}    <key>RunAtLoad</key>
+${environmentBlock}    <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
@@ -85,7 +135,11 @@ ${spec.executionPath === undefined ? "" : `    <key>EnvironmentVariables</key>
 export function renderSystemdUnit(spec: ServiceSpec): string {
   // systemd 的引用规则：ExecStart 按 shell 风格分词，带空格/引号的参数要用双引号包住。
   const quote = (value: string) => `"${value.replace(/[\\"]/g, "\\$&")}"`;
-  const environment = spec.executionPath === undefined ? "" : `Environment="PATH=${spec.executionPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t")}"\n`;
+  const systemdValue = (value: string) =>
+    value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+  const environment = environmentEntries(spec)
+    .map(([key, value]) => `Environment="${systemdValue(key)}=${systemdValue(value)}"\n`)
+    .join("");
   return `[Unit]
 Description=37Soul local agent capture (agentd)
 After=network-online.target

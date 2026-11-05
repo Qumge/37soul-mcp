@@ -235,6 +235,7 @@ These commands pause, resume, and uninstall the local runtime. Uninstall removes
 | Login cannot select a valid active profile | Run `37soul login` and review its reconnection confirmation. Existing local data stays separate and is not copied or merged. After account approval, use `37soul hosts`, then have the Agent select the Soul with `37soul connect` and its exact native hook session flags. A noninteractive terminal prints a concrete separate-profile command instead. |
 | Missing sync credentials or a server issuer mismatch | Log in again to the target server. For a separate profile, use `37soul login --profile new-profile-name`. |
 | Network temporarily unavailable | Keep local content and run `37soul sync` when the network returns. Do not delete profiles or queues to reset them. |
+| Proxy configured only in your shell | The installer copies `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` from that shell into the background service; URLs carrying credentials are refused. Re-run the installer after changing proxies. |
 | No long-term memories yet | Complete a full turn with a durable preference; check the model, background service, and host loading in `doctor`. |
 
 ### Remote MCP and development

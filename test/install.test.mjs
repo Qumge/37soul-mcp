@@ -123,6 +123,7 @@ function harness(overrides = {}) {
     cliScriptPath: "/opt/37soul/dist/cli.js",
     agentdScriptPath: "/opt/37soul/dist/cli.js",
     platform: overrides.platform ?? "darwin",
+    env: overrides.env ?? {},
     runtimeSourceRoot: overrides.runtimeSourceRoot ?? fakeSourceRoot(),
     runtimeVersion: "0.11.0",
     openBrowser: overrides.openBrowser ?? false,
@@ -262,6 +263,54 @@ test("install: writes the macOS LaunchAgent pointing at the fixed runtime launch
   const escaped = renderPlist({ home: h.home, nodePath: "/n & n", scriptPath: "/s <x>", launcherPath: "/l & <l>", logPath: "/tmp/l" });
   assert.ok(escaped.includes("<string>/l &amp; &lt;l&gt;</string>"));
   h.cleanup();
+});
+
+test("install: proxy settings from the installing shell reach the background service, and only those", async () => {
+  const h = harness({
+    env: {
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      no_proxy: "localhost,127.0.0.1",
+      SECRET_TOKEN: "must-not-be-persisted",
+    },
+  });
+  await install(h.deps, { agents: ["claude-code"] });
+
+  const plist = readFileSync(plistPath(h.home), "utf8");
+  assert.ok(plist.includes("<key>HTTPS_PROXY</key>"));
+  assert.ok(plist.includes("<string>http://127.0.0.1:7890</string>"));
+  assert.ok(plist.includes("<key>NO_PROXY</key>"), "lowercase spellings are normalized");
+  assert.ok(!plist.includes("SECRET_TOKEN"), "nothing outside the proxy keys is serialized");
+  const logs = h.logs.join("\n");
+  assert.match(logs, /HTTPS_PROXY/);
+  assert.ok(!logs.includes("127.0.0.1:7890"), "the value itself is never logged");
+  h.cleanup();
+});
+
+test("install: a proxy URL with credentials is not persisted and only its key is named", async () => {
+  const h = harness({ env: { HTTPS_PROXY: "http://user:secret@proxy.example:8080" } });
+  await install(h.deps, { agents: ["claude-code"] });
+
+  const plist = readFileSync(plistPath(h.home), "utf8");
+  assert.ok(!plist.includes("proxy.example"), "credentialed URLs never reach the service file");
+  assert.ok(!plist.includes("secret"));
+  const logs = h.logs.join("\n");
+  assert.match(logs, /HTTPS_PROXY/);
+  assert.ok(!logs.includes("secret") && !logs.includes("proxy.example"));
+  h.cleanup();
+});
+
+test("install --plan: proxy keys are reported by name only", async () => {
+  const h = harness({ env: { HTTPS_PROXY: "http://127.0.0.1:7890", NO_PROXY: "localhost" } });
+  const plan = await planInstall(h.deps, { agents: ["claude-code"] });
+  assert.deepEqual(plan.proxy, ["HTTPS_PROXY", "NO_PROXY"]);
+  assert.deepEqual(plan.proxySkipped, []);
+
+  const skipped = harness({ env: { HTTP_PROXY: "http://user:secret@proxy.example:8080" } });
+  const skippedPlan = await planInstall(skipped.deps, { agents: ["claude-code"] });
+  assert.deepEqual(skippedPlan.proxy, []);
+  assert.deepEqual(skippedPlan.proxySkipped, ["HTTP_PROXY"]);
+  h.cleanup();
+  skipped.cleanup();
 });
 
 test("install: writes a systemd user unit on Linux and enables it", async () => {

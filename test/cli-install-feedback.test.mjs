@@ -39,3 +39,23 @@ for (const command of [['soul', 'list'], ['sync']]) {
     });
   }
 }
+
+test('install --plan names the proxy keys it would persist, never the values', async () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'plan-proxy-'));
+  const keys = ['SOUL37_HOME', 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+  const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    for (const key of keys) delete process.env[key];
+    process.env.SOUL37_HOME = home;
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
+    let output = '';
+    await main(['install', '--plan'], { stdout: t => { output += t; }, stderr: () => {}, stdin: async () => '' });
+    assert.match(output, /would persist proxy: HTTPS_PROXY/);
+    assert.ok(!output.includes('127.0.0.1:7890'), 'the proxy value must not be printed');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+});

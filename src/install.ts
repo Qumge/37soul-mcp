@@ -8,7 +8,7 @@
 import { chmod, cp, lstat, mkdir, readdir, readFile, readlink, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readJsonFile, writeJsonFile } from "./config-editor.js";
-import { installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
+import { captureProxyEnvironment, installService, plistPath, removeService, systemdPath, type RunCommand, type ServiceSpec } from "./service.js";
 import { configPath, emptyState, loadConfig, loadState, saveConfig, saveState, type AgentConfig } from "./agentd/state.js";
 import { sendWriter, startWriter } from "./local/writer.js";
 import { buildExecutionPath } from "./agentd/native-executable.js";
@@ -34,6 +34,8 @@ export interface InstallDeps {
   cliScriptPath: string;
   agentdScriptPath: string;
   platform?: NodeJS.Platform;
+  /** Environment of the installing shell; proxy settings are captured from it. */
+  env?: NodeJS.ProcessEnv;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
@@ -71,6 +73,10 @@ export interface InstallPlan {
   serviceFile: string | null;
   /** Detected hosts we cannot capture yet — callers must print these. */
   unsupported: string[];
+  /** Proxy keys that would be written into the service definition (names only). */
+  proxy: string[];
+  /** Proxy keys refused because the value embeds credentials. */
+  proxySkipped: string[];
 }
 
 export function installManifestPath(home: string): string {
@@ -94,6 +100,7 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
 
   const platform = deps.platform ?? process.platform;
   const serviceFile = platform === "darwin" ? plistPath(deps.home) : platform === "linux" ? systemdPath(deps.home) : null;
+  const proxy = serviceFile === null ? { environment: {}, skipped: [] } : captureProxyEnvironment(deps.env ?? process.env);
   return {
     detected,
     agents,
@@ -101,6 +108,8 @@ export async function planInstall(deps: InstallDeps, opts: { agents?: string[] }
     serviceFile,
     // 检测到但采集未实现：调用方必须打印出来，别让用户以为装上了。
     unsupported: detected.filter((kind) => !SUPPORTED_AGENTS.includes(kind)),
+    proxy: Object.keys(proxy.environment),
+    proxySkipped: proxy.skipped,
   };
 }
 
@@ -626,19 +635,32 @@ export async function install(
 
   let serviceFile: string | null = null;
   if (opts.installService !== false && (deps.platform ?? process.platform) !== "win32") {
+    const installEnv = deps.env ?? process.env;
+    // launchd/systemd jobs never see the shell's proxy exports; carry the vetted
+    // proxy keys into the service definition so native children inherit them.
+    const proxy = captureProxyEnvironment(installEnv);
     const spec: ServiceSpec = {
       home: deps.home,
       nodePath: deps.nodePath,
-      executionPath: buildExecutionPath(deps.home, deps.nodePath, process.env.PATH),
+      executionPath: buildExecutionPath(deps.home, deps.nodePath, installEnv.PATH),
       scriptPath: runtime.launcher,
       launcherPath: runtime.launcher,
       logPath: path.join(root, "agentd.log"),
       platform: deps.platform,
+      ...(Object.keys(proxy.environment).length > 0 ? { proxyEnvironment: proxy.environment } : {}),
     };
     try {
       const service = await installService(spec, deps.runCommand);
       serviceFile = service.serviceFile;
       log(`  background capture installed (${service.serviceFile})`);
+      const persisted = Object.keys(proxy.environment);
+      if (persisted.length > 0) {
+        // Keys only: a proxy URL can embed a credential even when capture refused it.
+        log(`  background capture proxy: ${persisted.join(", ")} (from the installing shell; values not logged)`);
+      }
+      if (proxy.skipped.length > 0) {
+        log(`  proxy not persisted for ${proxy.skipped.join(", ")}: the value carries credentials and service files are plaintext`);
+      }
     } catch (error) {
       log(`  background capture could not be installed: ${(error as Error).message}`);
       log("  local capture stays off until the service runs; start it or run `37soul doctor` for the exact state.");

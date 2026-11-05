@@ -151,6 +151,10 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
         }
         io.stdout(`would touch:\n${plan.files.map((file) => `  ${file}`).join("\n")}\n`);
         if (plan.serviceFile) io.stdout(`would install the background service: ${plan.serviceFile}\n`);
+        if (plan.proxy.length > 0) io.stdout(`would persist proxy: ${plan.proxy.join(", ")}\n`);
+        if (plan.proxySkipped.length > 0) {
+          io.stdout(`proxy not persisted for ${plan.proxySkipped.join(", ")}: the value carries credentials\n`);
+        }
         return 0;
       }
       const result = await install(deps, { agents, fallback });
