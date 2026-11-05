@@ -22,8 +22,16 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
-import { createNativeInvoker, createExtractAdapters } from "../dist/agentd/native-invoker.js";
+import {
+  createNativeInvoker,
+  createExtractAdapters,
+  readSystemProxyEnv,
+  systemProxyEnvironment,
+} from "../dist/agentd/native-invoker.js";
 
 const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi", "gemini-cli", "cursor"];
 
@@ -49,7 +57,7 @@ test("native-invoker: maps runtime kind to the concrete CLI binary and tags the 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "codex", "the only place the binary spelling lives");
   assert.deepEqual(calls[0].args, ["exec", "--output-format", "json"]);
-  assert.equal(calls[0].options.timeout, 120_000, "codex may spend longer than claude-code on a cold model start, but stays bounded");
+  assert.equal(calls[0].options.timeout, 180_000, "codex may spend longer than claude-code on a cold or slow-route start, but stays bounded");
   assert.equal(calls[0].options.env.SOUL37_INTERNAL_JOB_UID, "job-123", "internal job uid rides in the env so the hook can tag its session");
 });
 
@@ -147,7 +155,7 @@ test("native-invoker: a timeout is named in the log instead of leaving a bare ex
   });
   const result = await invoke("codex", ["exec"], "", "job-timeout");
   assert.equal(result.code, 1);
-  assert.match(logs.join("\n"), /native codex exited 1 \(timeout after 120000ms\)/);
+  assert.match(logs.join("\n"), /native codex exited 1 \(timeout after 180000ms\)/);
   assert.doesNotMatch(logs.join("\n"), /PRIVATE_STDERR_CANARY/);
 });
 
@@ -170,4 +178,107 @@ test("native-invoker: failure classes come from a fixed allowlist, never raw std
     assert.match(line, new RegExp(`native codex exited 1 \\(stderr ${expected}, \\d+ bytes\\)`), stderr);
     if (rawFragment !== null) assert.ok(!line.includes(rawFragment), `raw stderr must not be logged: ${rawFragment}`);
   }
+});
+
+test("native-invoker: the macOS system proxy is parsed into child proxy variables", () => {
+  // Verbatim shape of `scutil --proxy` on a machine behind a local HTTP/SOCKS proxy.
+  const dump = `<dictionary> {
+  ExceptionsList : <array> {
+    0 : 127.0.0.1
+    1 : 192.168.0.0/16
+    2 : *.local
+    3 : <local>
+  }
+  FTPPassive : 1
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  ProxyAutoConfigEnable : 0
+  SOCKSEnable : 1
+  SOCKSPort : 7890
+  SOCKSProxy : 127.0.0.1
+}`;
+
+  assert.deepEqual(systemProxyEnvironment(dump), {
+    HTTP_PROXY: "http://127.0.0.1:7890",
+    HTTPS_PROXY: "http://127.0.0.1:7890",
+    ALL_PROXY: "socks5://127.0.0.1:7890",
+    // `*.local` keeps its suffix semantics; `<local>` has no environment spelling.
+    NO_PROXY: "127.0.0.1,192.168.0.0/16,.local",
+  });
+});
+
+test("native-invoker: disabled or absent system proxies inject nothing", () => {
+  assert.deepEqual(systemProxyEnvironment(`<dictionary> {
+  HTTPEnable : 0
+  HTTPProxy : 127.0.0.1
+  HTTPPort : 7890
+  SOCKSEnable : 0
+}`), {});
+  assert.deepEqual(systemProxyEnvironment(""), {});
+});
+
+test("native-invoker: only darwin reads system proxy state, and only through scutil", async () => {
+  let seen = [];
+  const read = async (command, args) => {
+    seen.push([command, ...args]);
+    return { stdout: "<dictionary> {\n  HTTPEnable : 1\n  HTTPProxy : 127.0.0.1\n  HTTPPort : 7890\n}" };
+  };
+
+  const linux = await readSystemProxyEnv("linux", read);
+  assert.deepEqual(linux, {}, "there is no portable system proxy reader off darwin");
+  assert.deepEqual(seen, [], "must not run a macOS-only command on another platform");
+
+  const darwin = await readSystemProxyEnv("darwin", read);
+  assert.deepEqual(seen, [["/usr/sbin/scutil", "--proxy"]]);
+  assert.equal(darwin.HTTP_PROXY, "http://127.0.0.1:7890");
+
+  // A failed or missing reader degrades to "no proxy", never to a failed invocation.
+  const failed = await readSystemProxyEnv("darwin", async () => { throw new Error("no scutil"); });
+  assert.deepEqual(failed, {});
+});
+
+async function nativeInvokerFixture(run) {
+  const home = await mkdtemp(path.join(os.tmpdir(), "native-proxy-"));
+  const launcher = path.join(home, ".local/bin/codex");
+  await mkdir(path.dirname(launcher), { recursive: true });
+  await writeFile(launcher, "#!/bin/sh\nexit 0\n");
+  await chmod(launcher, 0o700);
+  try {
+    await run(home);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+test("native-invoker: a launchd-spawned child receives the system proxy without overriding explicit env", async () => {
+  await nativeInvokerFixture(async home => {
+    const calls = [];
+    const spawn = (command, args, options, callback) => {
+      calls.push({ command, args, options });
+      callback(null, "[]", "");
+      return { stdin: { write() {}, end() {} }, kill() {} };
+    };
+    const invoke = createNativeInvoker(undefined, spawn, {
+      home,
+      nodePath: process.execPath,
+      env: { PATH: path.join(home, "old/bin"), HTTPS_PROXY: "http://explicit.example:1" },
+      systemProxy: async () => ({
+        HTTP_PROXY: "http://127.0.0.1:7890",
+        HTTPS_PROXY: "http://127.0.0.1:7890",
+        NO_PROXY: "127.0.0.1",
+      }),
+    });
+
+    await invoke("codex", ["exec"], "prompt", "job-proxy");
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.env.HTTP_PROXY, "http://127.0.0.1:7890");
+    assert.equal(calls[0].options.env.HTTPS_PROXY, "http://explicit.example:1", "an explicit proxy setting wins");
+    assert.equal(calls[0].options.env.NO_PROXY, "127.0.0.1");
+    assert.equal(calls[0].options.env.SOUL37_INTERNAL_JOB_UID, "job-proxy");
+  });
 });

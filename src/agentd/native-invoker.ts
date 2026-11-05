@@ -57,11 +57,68 @@ export interface NativeExecutionOptions {
   home?: string;
   nodePath?: string;
   env?: NodeJS.ProcessEnv;
+  /** OS-level proxy settings for children that did not inherit the user's shell. */
+  systemProxy?: () => Promise<NodeJS.ProcessEnv>;
 }
 
-/** Codex can spend a long time on a cold model start; everything else keeps the 60s bound. */
-const NATIVE_TIMEOUT_MS: Partial<Record<RuntimeKind, number>> = { codex: 120_000 };
+/**
+ * Codex can spend a long time on a cold model start, and a slow-route turn was
+ * measured at 115s; everything else keeps the 60s bound.
+ */
+const NATIVE_TIMEOUT_MS: Partial<Record<RuntimeKind, number>> = { codex: 180_000 };
 const NATIVE_TIMEOUT_DEFAULT_MS = 60_000;
+
+/** One read-only system query, injectable so proxy parsing stays testable. */
+type SystemCommand = (command: string, args: readonly string[]) => Promise<{ stdout: string }>;
+
+const runSystemCommand: SystemCommand = (command, args) => new Promise((resolve, reject) => {
+  execFile(command, [...args], { timeout: 2_000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+    if (error) reject(error);
+    else resolve({ stdout: stdout ?? "" });
+  });
+});
+
+/**
+ * macOS keeps the user's proxy in SystemConfiguration, not in the process
+ * environment. A launchd agent never sees the shell's HTTP(S)_PROXY exports, so
+ * a native CLI it spawns falls back to a direct connection — on a proxied route
+ * that turned one extraction into a 115s turn, past the previous 120s bound.
+ * Only darwin has a supported system reader; elsewhere this is an honest no-op.
+ */
+export function systemProxyEnvironment(output: string): NodeJS.ProcessEnv {
+  const field = (key: string) => output.match(new RegExp(`^\\s*${key}\\s*:\\s*(.+?)\\s*$`, "m"))?.[1];
+  const url = (scheme: string, hostKey: string, portKey: string) => {
+    const host = field(hostKey);
+    const port = field(portKey);
+    return host && port ? `${scheme}://${host}:${port}` : undefined;
+  };
+  const env: NodeJS.ProcessEnv = {};
+  const add = (name: string, value: string | undefined) => { if (value) env[name] = value; };
+  if (field("HTTPEnable") === "1") add("HTTP_PROXY", url("http", "HTTPProxy", "HTTPPort"));
+  if (field("HTTPSEnable") === "1") add("HTTPS_PROXY", url("http", "HTTPSProxy", "HTTPSPort"));
+  if (field("SOCKSEnable") === "1") add("ALL_PROXY", url("socks5", "SOCKSProxy", "SOCKSPort"));
+  const block = output.match(/ExceptionsList\s*:\s*<array>\s*\{([\s\S]*?)\n\s*\}/)?.[1] ?? "";
+  const exceptions = block
+    .split("\n")
+    .map(line => line.replace(/^\s*\d+\s*:\s*/, "").trim())
+    .filter(entry => entry !== "" && entry !== "<local>")
+    // NoProxy matches by suffix; `*.local` already means every *.local host.
+    .map(entry => (entry.startsWith("*.") ? entry.slice(1) : entry));
+  if (exceptions.length > 0) env.NO_PROXY = exceptions.join(",");
+  return env;
+}
+
+export async function readSystemProxyEnv(
+  platform: NodeJS.Platform = process.platform,
+  run: SystemCommand = runSystemCommand,
+): Promise<NodeJS.ProcessEnv> {
+  if (platform !== "darwin") return {};
+  try {
+    return systemProxyEnvironment((await run("/usr/sbin/scutil", ["--proxy"])).stdout);
+  } catch {
+    return {};
+  }
+}
 
 /**
  * Fixed classification allowlist for child stderr. Only the class name and byte
@@ -96,6 +153,8 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
   const inherited = options?.env ?? process.env;
   const executionPath = buildExecutionPath(home, options?.nodePath ?? process.execPath, inherited.PATH);
   const env = { ...inherited, PATH: executionPath };
+  // Virtual spawns in tests stay hermetic; a real execution reads the OS setting.
+  const systemProxy = options?.systemProxy ?? (resolvePaths ? () => readSystemProxyEnv() : async () => ({}));
   return async (runtime, args, input, internal_job_uid) => {
     const spec = HOSTS.find(host => host.kind === runtime)?.invoke;
     if (!spec) {
@@ -104,9 +163,12 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
     const command = resolvePaths ? await resolveNativeExecutable(spec, home, executionPath) : spec.binary;
     if (!command) return { code: 1, stdout: "", stderr: `native ${runtime} executable unavailable; install the current host CLI` };
     const timeoutMs = NATIVE_TIMEOUT_MS[runtime] ?? NATIVE_TIMEOUT_DEFAULT_MS;
-    const run = (argv: readonly string[], stdin: string) => new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+    const run = async (argv: readonly string[], stdin: string) => {
+      // The system proxy fills gaps only: a proxy the environment already names wins.
+      const proxyEnv = await systemProxy();
+      return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
       const child = spawn(command, argv,
-        { timeout: timeoutMs, env: { ...env, ...(runtime === "claude-code" ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_DISABLE_THINKING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"} : {}), SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
+        { timeout: timeoutMs, env: { ...proxyEnv, ...env, ...(runtime === "claude-code" ? {CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_DISABLE_THINKING: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"} : {}), SOUL37_INTERNAL_JOB_UID: internal_job_uid } },
         (error, stdout, stderr) => {
           const exitCode = (error as { code?: unknown } | null)?.code;
           const code = error ? (typeof exitCode === "number" ? exitCode : 1) : 0;
@@ -127,7 +189,8 @@ export function createNativeInvoker(log?: NativeInvokerLog, spawn: SpawnFn = def
         });
       if (child.stdin) { child.stdin.write(stdin); child.stdin.end(); }
       else { log?.error(`native ${runtime} spawn produced no stdin pipe`); child.kill(); }
-    });
+      });
+    };
     if (resolvePaths && spec.requiredMajor !== undefined) {
       const version = await run(["--version"], "");
       const major = version.stdout.trim().match(/^(?:opencode\s+)?v?(\d+)\./i)?.[1];
