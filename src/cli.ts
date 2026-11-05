@@ -5,7 +5,7 @@ import {ownedHosts} from './local/cloud-account.js';
 import {configureCloudSelectionHttp} from './local/cloud-selection.js';
 import {sessionSourceBoundary} from './agentd/source-index.js';
 import {readLocalIdentity,prepareLocalIdentity} from './local/agent-connect.js';
-import {compactConnectionIdentity} from './local/compact-identity.js';
+import {compactConnectionIdentity,localReadCapabilities} from './local/compact-identity.js';
 import {readAvatarFile} from './local/avatars.js';
 /**
  * `37soul` CLI（设计 §6.1）：install / doctor / status / uninstall / pause / resume，
@@ -87,7 +87,7 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
   37soul login [--host <id>] [--profile <id>]                  login to your account; choose a Soul later in your Agent
   37soul hosts [--name <name>] [--limit <n>] [--offset <n>]   list your owned Souls
-  37soul whoami --host <id> [--agent <kind>]    read identity using this local login
+  37soul whoami --host <id> [--agent <kind>]    read profile, recent life, public media and circle using this login
   37soul connect --name <name>|--host <id> [--agent <kind> --session <native-id>]   Codex resolves its native session automatically
   37soul context                               restore this Codex session’s selected Soul locally
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
@@ -866,8 +866,11 @@ async function currentContextCommand(root: string, rest: string[], io: CliIO): P
     const key = {profile_id: profile, device_id: snap.device_id, runtime_kind: "codex" as const, native_session_id: session};
     const binding = snap.bindings[bindingKey(key)];
     if (!binding || binding.state !== "bound" || binding.retired) {io.stderr("This Codex session has no selected Soul. Use 37soul connect with the chosen name or Host ID.\n"); return 1;}
-    const bundle = selectContext({...ownerContextInput(snap, binding.soul_uid, binding, "session"), budgetBytes: 4096}, {identityBudgetBytes: 2048});
-    io.stdout(bundle.rendered_text + "\n"); return 0;
+    const input=ownerContextInput(snap,binding.soul_uid,binding,"session");
+    const reads=localReadCapabilities(snap.souls[binding.soul_uid]?.legacy_host_id,binding.runtime_kind);
+    const readHint=reads?"\n[Local reads for this Soul]\n"+JSON.stringify(reads):"";
+    const bundle = selectContext({...input, budgetBytes: 4096-Buffer.byteLength(readHint,"utf8")}, {identityBudgetBytes: 2048});
+    io.stdout(bundle.rendered_text + readHint + "\n"); return 0;
   } catch (error) {io.stderr(error instanceof StoreError ? error.message + "\n" : "Could not read this session's local Soul context.\n"); return 1;}
   finally {await store.close();}
 }

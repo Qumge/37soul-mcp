@@ -19,7 +19,7 @@ export async function prepareLocalIdentity(root: string, profileId: string, host
       if (!credential) throw new StoreError('login_required', 'No credential for this account/server/runtime. Run 37soul login, then choose a Soul in your Agent.');
       const soul = Object.values(snap.souls).find(candidate => candidate.legacy_host_id === hostId);
       const consent = soul ? snap.consents[`${snap.cloud_device_uid}:${soul.soul_uid}`] : undefined;
-      if (!soul || !consent) throw new StoreError("soul_not_selected", `This Soul is not connected yet. Use 37soul connect --host ${hostId} with the native session flags; your account login can be reused.`);
+      if (!soul || !consent) throw new StoreError("soul_not_selected", `This Soul is not connected yet. Use 37soul connect --host ${hostId} for the explicitly chosen Soul; Codex resolves its native session automatically, while other hosts use their verified native context. Your account login can be reused.`);
       if (!consent.enabled || !consent.categories.includes("identity")) throw new StoreError("identity_not_authorized", 'This Soul has revoked or disabled identity consent. Re-enable it explicitly; do not repeat account login as a role selection.');
       return {token: credential.token, owner: snap.owner_id, device: snap.cloud_device_uid, soul: soul.soul_uid, categories: [...consent.categories]};
     } finally { await store.close(); }
