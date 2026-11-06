@@ -76,6 +76,15 @@ test('retrying an interrupted first restore keeps the pull checkpoint instead of
  failPull=false;const out=output();assert.equal(await main(['connect','--name','Sophia Ramirez',...flags],out),0,out.out.stderr);assert.equal(resumedCursor,'resume-42');
 });
 
+test('Kiro connects a chosen Soul from an existing native session without a transcript path',async t=>{
+ const f=await fixture(t);f.config.credentials[0].runtime_kind='kiro';await writeFile(path.join(f.root,'config.json'),JSON.stringify(f.config));
+ const session='sess_10000000-0000-4000-8000-000000000001';const out=output();
+ assert.equal(await main(['connect','--name','Sophia Ramirez','--agent','kiro','--session',session],out),0,out.out.stderr);
+ assert.equal(JSON.parse(out.out.stdout).connection.state,'attached');
+ const b=Object.values((await read(f.root)).bindings).find(x=>!x.retired);
+ assert.equal(b.runtime_kind,'kiro');assert.equal(b.native_session_id,session);assert.equal(b.source_boundary,undefined);
+});
+
 test('Codex connects a chosen Soul from its native environment without any hook or source pointer',async t=>{
  const f=await fixture(t);const old=process.env.CODEX_THREAD_ID;const sid='10000000-0000-4000-8000-000000000001';process.env.CODEX_THREAD_ID=sid;
  t.after(()=>{if(old===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=old;});

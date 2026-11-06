@@ -22,6 +22,9 @@ export const host: HostSpec = {
     events: KIRO_HOOK_EVENTS,
     injectionChannel: "SessionStart",
     emitsRuntimeEvents: true,
+    // Kiro has no documented transcript path; an explicit connect can bind an
+    // existing session without a byte boundary. Extraction stays blocked.
+    sourceBoundary: "optional",
     parsePayload: parseKiroPayload,
     // Kiro CLI adds command stdout to the session context as plain text.
     formatContext: text => text,

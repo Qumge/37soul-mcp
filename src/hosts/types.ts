@@ -82,6 +82,12 @@ export interface HostHookSpec {
   events: ReadonlyArray<{ event: string; matcher?: string }>;
   injectionChannel: InjectionChannel;
   emitsRuntimeEvents: boolean;
+  /**
+   * "optional" means this host has no native transcript source, so an explicit
+   * connect may bind the session without a byte boundary. Extraction stays
+   * disabled by the adapter; the boundary is only local provenance.
+   */
+  sourceBoundary?: "required" | "optional";
   parsePayload(payload: Record<string, any>): HostHookPayload;
   completedTurnRefs?(transcript: string): string[];
   /** Native completion inspector for a pinned Stop witness, including deferred flushes. */

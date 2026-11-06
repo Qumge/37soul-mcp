@@ -42,6 +42,7 @@ import {selectContext} from "./assets/context.js";
 import {ownerContextInput} from "./sync/client.js";
 import {bindingKey} from "./local/bindings.js";
 import { setAccountDefaultSoul, setToolDefault, validatePublicProfile } from "./local/bindings.js";
+import { hostSpec } from "./hosts/registry.js";
 import type { HttpFetch, ProfileId, RuntimeAdapter } from "./adapters/types.js";
 import type { RuntimeKind } from "./assets/protocol.js";
 import { RUNTIME_KINDS } from "./assets/protocol.js";
@@ -923,6 +924,9 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
   let abortUpstream:(()=>void)|undefined;
   try {
     let directoryTarget: {id:number;soul_uid:string} | undefined;
+    // Identity-only hosts (no native transcript) may bind a chosen Soul without
+    // a byte boundary; their adapter still refuses automatic extraction.
+    const sourceOptional = hostSpec(runtime ?? "")?.hook.sourceBoundary === "optional";
     if (attach) {
       await requireActive();
       const deviceId = await readProfileDeviceId(root, profile);
@@ -932,7 +936,7 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
         await captureSourcePointer(root, profile, randomUUID(), {runtime_kind: "codex", native_session_id: session!, path: file, captured_at: new Date().toISOString()});
       }
       const source = await sessionSourceBoundary(root, {profile_id: profile,device_id: deviceId,runtime_kind: runtime as RuntimeKind,native_session_id: session!});
-      if (!source) throw new StoreError("session_context_unavailable", nativeContextRecoveryMessage("The current session has no valid hook source context yet.", hostId, name));
+      if (!source && !sourceOptional) throw new StoreError("session_context_unavailable", nativeContextRecoveryMessage("The current session has no valid hook source context yet.", hostId, name));
       if (name) {
         const localStore=await openStore(root,profile);let candidate:number|undefined;
         try{const local=await localStore.read();const matches=Object.values(local.souls).filter(s=>s.identity.name.trim().toLowerCase()===name.toLowerCase());
@@ -979,7 +983,7 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
       try {snap=await store.read();} finally {await store.close();}
       const soul = Object.values(snap.souls).find(s=>s.legacy_host_id===hostId);
       if (!soul) throw new StoreError("restore_pending", "The selected Soul has not downloaded. Retry 37soul connect; do not log in again.");
-      const result = await runWriterCommand(root, profile, "connect_session", {device_id:snap.device_id,runtime_kind:runtime,native_session_id:session,soul_uid:soul.soul_uid,...(runtime === "codex" && nativeSession === session ? {source_mode:"codex-native"} : {})});
+      const result = await runWriterCommand(root, profile, "connect_session", {device_id:snap.device_id,runtime_kind:runtime,native_session_id:session,soul_uid:soul.soul_uid,...(sourceOptional ? {source_boundary_optional:true} : {}),...(runtime === "codex" && nativeSession === session ? {source_mode:"codex-native"} : {})});
       if (!result.ok) throw new StoreError(result.error.code,result.error.message);
       await requireActive();identity.connection={...(result.result as Record<string,unknown>),state:"attached"};
     }

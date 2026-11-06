@@ -799,13 +799,21 @@ registerWriterCommand("connect_session", async ({root, request}) => {
     const existing = snap.bindings[k];
     const boundary = await sessionSourceBoundary(root, key);
     const nativeMode = p.source_mode === "codex-native" && key.runtime_kind === "codex";
+    // Identity-only hosts (Kiro, Gemini CLI, Cursor) have no native transcript,
+    // so an explicit connect may bind the chosen Soul without a byte boundary.
+    // Automatic extraction stays disabled by their adapter.
+    const boundaryOptional = p.source_boundary_optional === true;
     if (nativeMode && (!boundary || !await verifyCodexRollout(boundary.path, key.native_session_id))) throw new StoreError("session_context_unavailable", "Codex rollout does not match the exact native session.");
-    if (existing?.state === "bound" && existing.soul_uid === soulUid && existing.source_boundary && boundary?.path === existing.source_boundary.path && await sourceMatchesBoundary(boundary.path, existing.source_boundary)) {
-      if (nativeMode && existing.source_mode !== "codex-native") await store.transact(d => {d.bindings[k].source_mode = "codex-native"; d.bindings[k].codex_cursor = {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line}; d.bindings[k].codex_consent_revision = consent.revision;});
+    const nativeBoundary = nativeMode ? boundary! : undefined;
+    if (existing?.state === "bound" && existing.soul_uid === soulUid && (
+      (existing.source_boundary && boundary?.path === existing.source_boundary.path && await sourceMatchesBoundary(boundary.path, existing.source_boundary)) ||
+      (boundaryOptional && !existing.source_boundary && !boundary)
+    )) {
+      if (nativeBoundary && existing.source_mode !== "codex-native") await store.transact(d => {d.bindings[k].source_mode = "codex-native"; d.bindings[k].codex_cursor = {offset: nativeBoundary.start_offset, size: nativeBoundary.start_offset, discard_line: !nativeBoundary.starts_line}; d.bindings[k].codex_consent_revision = consent.revision;});
       return toBinding(existing);
     }
-    if (!boundary) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message so its managed hook can report the native session; never choose another terminal by recency.");
-    const next: BindingSnapshot = {...createBinding(key, soulUid), source_boundary: boundary, ...(nativeMode ? {source_mode: "codex-native", codex_consent_revision: consent.revision, codex_cursor: {offset: boundary.start_offset, size: boundary.start_offset, discard_line: !boundary.starts_line}} : {})};
+    if (!boundary && !boundaryOptional) throw new StoreError("session_context_unavailable", "The current session has no valid hook source context yet. Send another message so its managed hook can report the native session; never choose another terminal by recency.");
+    const next: BindingSnapshot = {...createBinding(key, soulUid), ...(boundary ? {source_boundary: boundary} : {}), ...(nativeBoundary ? {source_mode: "codex-native", codex_consent_revision: consent.revision, codex_cursor: {offset: nativeBoundary.start_offset, size: nativeBoundary.start_offset, discard_line: !nativeBoundary.starts_line}} : {})};
     const op = bindingOutboxOp(next, "bound", 0, []);
     await store.transact(draft => {
       // Keep the old cloud state and frozen provenance resolvable for pending

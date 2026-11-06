@@ -42,6 +42,17 @@ do not produce a valid completed-session identity.
 `user_email`, assistant response bodies, and tool payloads are not returned by
 the parser. Missing transcript paths remain null; no path is guessed from cwd.
 
+Kiro is an **identity/context host**: `HostHookSpec.sourceBoundary` is
+`"optional"`. An explicit `37soul connect --host <id> --agent kiro --session
+<sess_…>` may bind a chosen Soul from an existing native session without a byte
+boundary, and a repeated connect is idempotent while no boundary exists. The
+binding therefore carries no `source_boundary`, and automatic extraction stays
+blocked by the adapter (`kiro_tool_free_extraction_unavailable`). Hosts whose
+spec leaves `sourceBoundary` unset keep the existing rule: a connect without a
+valid hook source pointer fails with `session_context_unavailable`. A connect
+never invents a native session ID; the value must come from the host context or
+local session records.
+
 Cursor's generation ID is local completion provenance, **not a claim that the
 transcript contains an equivalent record ID**. Gemini's completed-turn helper
 recognizes legacy JSON `messages[].id` and simple message JSONL, and rejects
@@ -217,7 +228,9 @@ push/merge/release, or raw transcript upload was performed.
 The new host tests cover 46 cases: 41 host/config/adapter cases and five real
 local-writer integration cases. Kiro's share covers config preservation and
 uninstall, doctor states, native-payload parsing, plain-text `SessionStart`
-injection, and the tool-free extraction blocker. They pass with zero skips.
+injection, and the tool-free extraction blocker. A separate account-first CLI
+case covers identity-only connect from an existing `sess_…` native session
+without a transcript path. They pass with zero skips.
 TypeScript build and bundled runtime build also pass. The original Gemini/Cursor
 host tests were observed red before implementation (0/21); the later empty-source
 contract change was observed red before its implementation (22/26, four failures).

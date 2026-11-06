@@ -40,6 +40,10 @@ test('kiro: registry, home, executable and detection are canonical', async t => 
   assert.equal(AGENT_HOMES.kiro, '.kiro');
   assert.equal(hostSpec('kiro').invoke.binary, 'kiro-cli');
   assert.ok(hostSpec('kiro').invoke.userLaunchers.includes('.local/bin/kiro-cli'));
+  // No native transcript path: an explicit connect may bind identity without
+  // a byte boundary, while extraction stays blocked by the adapter.
+  assert.equal(hostSpec('kiro').hook.sourceBoundary, 'optional');
+  assert.notEqual(hostSpec('claude-code').hook.sourceBoundary, 'optional');
 
   const f = await fixture(t);
   assert.deepEqual(await detectAgents(f.home), ['kiro']);
