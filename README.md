@@ -8,9 +8,17 @@ Give your local agent a lasting identity, long-term memory, and a relationship w
 
 [What is it?](#1-what-is-37soul) · [Why use it?](#2-why-use-it) · [Get started](#3-how-to-get-started)
 
+**Start here:**
+
+| If you… | Do this |
+| --- | --- |
+| Want to try it on this machine, with no account | [Install](#step-1-install-the-local-runtime), then [create a Soul locally](#path-a-no-account-local-only). Nothing is uploaded. |
+| Already have a 37Soul account | [Install](#step-1-install-the-local-runtime), then [log in](#path-b-you-already-have-an-account) and ask your agent to connect your Soul. |
+| Do not have an account yet | [Create one at 37soul.com](https://37soul.com), confirm your email, then follow the [account path](#path-b-you-already-have-an-account). |
+
 ## 1. What is 37Soul?
 
-37Soul is an open-source local runtime that connects **Claude Code, Codex, OpenCode, Hermes, and Pi** to a persistent Soul.
+37Soul is an open-source local runtime that connects **Claude Code, Codex, OpenCode, Hermes, and Pi** to a persistent Soul, with automatic long-term memory extraction. **Gemini CLI and Cursor** are also wired in for identity and context, but their automatic extraction is currently disabled.
 
 A Soul brings three things to your agent:
 
@@ -21,6 +29,8 @@ A Soul brings three things to your agent:
 | **Experience** | Reusable methods learned from past work, with their conditions and evidence. |
 
 Your model provides the reasoning. Your agent provides tools and executes tasks. The Soul provides continuity: **who it is, who you are, and what it has learned about working with you.**
+
+**A note on words:** a **Soul** is the persona; the website also calls it a *host* or *character*. A **host** in the install table below means your local agent (Claude Code, Codex, and so on). `37soul hosts` lists the Souls you own, not the agents.
 
 The runtime uses your host's configured model to extract bounded long-term memories from completed turns and brings relevant active memories into later sessions. You can begin entirely as a local user, without a 37Soul account. To carry selected memories to the website or another computer, log in and explicitly authorize synchronization.
 
@@ -44,7 +54,7 @@ You spend less time repeating how you want work done. You can build a working re
 | --- | --- |
 | **Your computer** | Run the local agent on a supported macOS or Linux machine you choose. Another authorized machine can restore the same Soul's synced memories. |
 | **Your model** | Use a model supported by your host. Changing the host's model does not require creating a new Soul. Model credentials, costs, and provider rules still apply. |
-| **Your agent** | Carry the same Soul across the five supported hosts, with each host's normal loading and approval steps. |
+| **Your agent** | Carry the same Soul across the supported hosts, with each host's normal loading and approval steps. |
 | **Your place to chat** | Use a connected local agent, or chat on the website with memories already synced there. |
 
 This gives you more choice across model providers while keeping a continuing identity and relationship. 37Soul does not supply a model subscription or automatically change your host's model settings.
@@ -57,7 +67,7 @@ Two characters with the same name are still different Souls: bind the same **Sou
 
 WhatsApp and other messaging bridges need their own verified integration and user-to-Soul mapping; this runtime does not include a ready-to-use WhatsApp connector. If the computer running your local agent is off, its local execution stops. Website chat can still use memories that reached the cloud before shutdown.
 
-Website chat currently uses the last 30 days of memories for free accounts and long-term memory for subscribers. Older memories are retained for viewing and export; this is a recall window, not deletion.
+Website chat currently uses the last 30 days of memories for free accounts and long-term memory for subscribers. Older memories are retained for viewing and export; this is a recall window, not deletion. See [pricing](https://37soul.com/pricing) for paid plans.
 
 ## 3. How to get started
 
@@ -84,27 +94,15 @@ To preview the changes without writing them:
 curl -fsSL https://37soul.com/install.sh | bash -s -- --plan
 ```
 
-### Step 2: Log in to your account, then choose in your Agent
+### Step 2: Pick your starting path
 
-```bash
-37soul login
-```
+Both paths work. Path A keeps everything on this machine. Path B uses your 37Soul
+account and can sync to the website and other computers later.
 
-Open the link, verify the short code and approve this computer. You do not choose a
-Soul during account login. It gives this device access to your owned-Soul directory.
-Then tell your local Agent: **“Connect Sophia Ramirez.”** It lists your roles and uses
-the same login to select and restore that one Soul. A duplicate name requires you to
-choose which role; a missing role is never recreated automatically. Switching to
-another owned Soul reuses this login. Raw conversations stay local.
+#### Path A: no account (local only)
 
-The Agent uses `37soul hosts` and `37soul connect --name NAME` (or `--host ID`) with
-its exact native hook session flags. Only `connection.state: attached` confirms that
-session's attachment. `whoami` reads identity after selection. Account login does not
-automatically select or download every Soul, and does not need a second remote OAuth.
-Previously revoked permissions require explicit reauthorization; narrower permissions
-are preserved. Reinstalling with a valid account reuses its existing local profile.
-
-#### Want to create a Soul locally first? No account needed
+You do not need to sign up. Create and grow a Soul entirely on this machine. Nothing
+is uploaded until you log in and explicitly authorize it in Step 5.
 
 Choose the identity fields and an actual local photo: **JPEG, PNG, or WebP, up to 5 MiB**. Every new local Soul requires a photo; there is no default-avatar fallback. Fill all placeholders with your chosen values before running:
 
@@ -130,9 +128,42 @@ SOUL_UID='<actual Soul UID from the creation result>'
 37soul soul select "$SOUL_UID"
 ```
 
-The CLI keeps a managed copy of the photo, so moving or deleting the original does not break it. If you need a photo, the website lets you upload or generate one. After signup and email confirmation, the existing 18-credit bonus covers 3 images at 6 credits each; this is not an additional grant. Download your chosen image before creating the local Soul. Local creation itself makes no cloud generation or credit request.
+The CLI keeps a managed copy of the photo, so moving or deleting the original does not break it. If you do not have a suitable photo, create an account at [37soul.com](https://37soul.com), confirm your email, and upload or generate one there; the existing signup bonus covers three 6-credit images and is not extra credit for this flow. Download the image, then come back here.
+
+Skip to [Step 3](#step-3-load-the-connection-in-your-host). You can add an account later and authorize sync in [Step 5](#step-5-optionally-sync-to-the-website-and-another-computer).
+
+#### Path B: you already have an account
+
+```bash
+37soul login
+```
+
+The command prints a link and a short code, and opens your browser:
+
+```text
+  Open:  https://37soul.com/cli/approve?...
+  Code:  <the short code shown by the command>
+```
+
+Open the link if the browser did not, check that the code matches, and approve this computer. Login is account-only. **You do not choose a Soul during account login**, and nothing is uploaded. It gives this device access to your owned-Soul directory.
+
+If you do not have a 37Soul account yet, create one at [37soul.com](https://37soul.com) and confirm your email first. Then run `37soul login`. See [pricing](https://37soul.com/pricing) for paid plans; the free account is enough to start.
+
+Then tell your local Agent: **“Connect Sophia Ramirez.”** It lists your roles and uses
+the same login to select and restore that one Soul. A duplicate name requires you to
+choose which role; a missing role is never recreated automatically. Switching to
+another owned Soul reuses this login. Raw conversations stay local.
+
+The Agent uses `37soul hosts` and `37soul connect --name NAME` (or `--host ID`) with
+its exact native hook session flags. Only `connection.state: attached` confirms that
+session's attachment. `whoami` reads identity after selection. Account login does not
+automatically select or download every Soul, and does not need a second remote OAuth.
+Previously revoked permissions require explicit reauthorization; narrower permissions
+are preserved. Reinstalling with a valid account reuses its existing local profile.
 
 ### Step 3: Load the connection in your host
+
+The first five rows below extract long-term memories automatically. Gemini CLI and Cursor currently provide identity and context only; their automatic extraction is disabled.
 
 | Host | What to do after installation |
 | --- | --- |
@@ -169,7 +200,9 @@ In a new host session, explicitly state a long-term preference, such as:
 
 > From now on, whenever you finish work on any of my projects, write a handoff document.
 
-Complete the conversation turn and allow the runtime to extract the memory. Inspect what it learned:
+Complete the conversation turn, then wait. Extraction is not instant: a turn becomes eligible after three pending turns or about 90 seconds, and the background check plus model time usually adds another 1–3 minutes. An empty `37soul recall` immediately after the turn is normal; run it again after a few minutes.
+
+Inspect what it learned:
 
 ```bash
 37soul recall
@@ -191,11 +224,11 @@ Terms use AND matching. `--kind` accepts `relationship` or `experience`; `--hist
 
 Then open a fresh session bound to the same Soul and give it a relevant task. An extracted memory is evidence that extraction worked; the agent's actual behavior shows whether it used that memory. Temporary requests and one-off tasks may not produce long-term memories.
 
-In `doctor`, installed files, host loading or approval, observed events, and completed extraction are separate states. Follow the action shown beside a waiting or failed check. Extraction and retries use your host's model quota; completion depends on the model and network.
+`37soul doctor` prints one line per check: ✓ means working, ✗ means an action is needed (the line says which), and … means the check is waiting for the host's first use. Installed files, host loading or approval, observed events, and completed extraction are separate states. Extraction and retries use your host's model quota; completion depends on the model and network.
 
 ### Step 5: Optionally sync to the website and another computer
 
-For a locally created Soul, log in and explicitly authorize the categories you want to sync:
+For a locally created Soul, log in and explicitly authorize the categories you want to sync. If you do not have an account yet, create one at [37soul.com](https://37soul.com) and confirm your email first:
 
 ```bash
 37soul login
