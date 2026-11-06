@@ -77,7 +77,7 @@ export function agentdExtractAdapters(
 
 const USAGE = `37soul — local capture + continuity for your 37Soul character.
 
-  37soul install [--agents claude-code,codex,opencode,hermes,pi,gemini-cli,cursor] [--plan] [--fallback codex]
+  37soul install [--agents claude-code,codex,opencode,hermes,pi,gemini-cli,cursor,kiro] [--plan] [--fallback codex]
                                                 connect the agents on this machine
   37soul doctor                                  check configuration and credentials
   37soul status                                  show machine, credentials and Soul sync state

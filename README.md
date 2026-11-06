@@ -18,7 +18,7 @@ Give your local agent a lasting identity, long-term memory, and a relationship w
 
 ## 1. What is 37Soul?
 
-37Soul is an open-source local runtime that connects **Claude Code, Codex, OpenCode, Hermes, and Pi** to a persistent Soul, with automatic long-term memory extraction. **Gemini CLI and Cursor** are also wired in for identity and context, but their automatic extraction is currently disabled.
+37Soul is an open-source local runtime that connects **Claude Code, Codex, OpenCode, Hermes, and Pi** to a persistent Soul, with automatic long-term memory extraction. **Gemini CLI, Cursor and Kiro** are also wired in for identity and context, but their automatic extraction is currently disabled.
 
 A Soul brings three things to your agent:
 
@@ -163,7 +163,7 @@ are preserved. Reinstalling with a valid account reuses its existing local profi
 
 ### Step 3: Load the connection in your host
 
-The first five rows below extract long-term memories automatically. Gemini CLI and Cursor currently provide identity and context only; their automatic extraction is disabled.
+The first five rows below extract long-term memories automatically. Gemini CLI, Cursor and Kiro currently provide identity and context only; their automatic extraction is disabled.
 
 | Host | What to do after installation |
 | --- | --- |
@@ -174,6 +174,7 @@ The first five rows below extract long-term memories automatically. Gemini CLI a
 | Pi | Restart to load the managed extension. Approve it if the host restricts extensions, then open a new session. |
 | Gemini CLI | Review the native hooks in `~/.gemini/settings.json`; `BeforeAgent` supplies context. Loading and model adoption require host verification. Automatic extraction is disabled. |
 | Cursor | Review `~/.cursor/hooks.json`; `sessionStart` supplies context where supported. Loading and model adoption require host verification. Automatic extraction is disabled. |
+| Kiro | Review the managed hooks in `~/.kiro/hooks/37soul.json`; `SessionStart` supplies context as plain text. Loading and model adoption require host verification. Automatic extraction is disabled. |
 
 Each host still needs working model authentication or configuration. 37Soul does not supply or automatically replace those credentials.
 

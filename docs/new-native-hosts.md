@@ -1,9 +1,9 @@
-# Gemini CLI and Cursor native hosts
+# Gemini CLI, Cursor and Kiro native hosts
 
 Runtime host order is canonical in `src/hosts/registry.ts`: Claude Code, Codex,
-OpenCode, Hermes, Pi, Gemini CLI, Cursor. The protocol has seven runtime kinds.
-Both new hosts are partial integrations: identity/context hooks and native-payload parsing only. They must not be advertised as full Agent support or local memory growth.
-**Neither new host currently supports automatic model extraction.** They never
+OpenCode, Hermes, Pi, Gemini CLI, Cursor, Kiro. The protocol has eight runtime kinds.
+The three newer hosts are partial integrations: identity/context hooks and native-payload parsing only. They must not be advertised as full Agent support or local memory growth.
+**None of the three currently supports automatic model extraction.** They never
 fall back to another CLI, a direct provider API, or a cloud model.
 
 ## Native protocol
@@ -18,16 +18,24 @@ fall back to another CLI, a direct provider API, or a cloud model.
 | Cursor | same | `beforeSubmitPrompt` | `--event UserPromptSubmit` |
 | Cursor | same | `stop` | `--event Stop` |
 | Cursor | same | `preCompact` | `--event PreCompact` |
+| Kiro | `~/.kiro/hooks/37soul.json`, version `v1` | `SessionStart` | `--event SessionStart` |
+| Kiro | same | `UserPromptSubmit` | `--event UserPromptSubmit` |
 
 Gemini hooks use event arrays containing `{hooks:[{type:"command",…}]}`.
 Cursor hooks use event arrays containing `{type:"command",command:…}` directly.
-Gemini timeouts are milliseconds (5000); Cursor timeouts are seconds (5).
-Commands invoke the fixed runtime launcher, or the provided Node/CLI paths, with
-POSIX shell quoting. There is no native model call in installation.
+Kiro hooks use a root object whose `hooks` array contains
+`{name,trigger,action:{type:"command",command},timeout,enabled}`, with PascalCase
+triggers. Gemini timeouts are milliseconds (5000); Cursor timeouts are seconds (5);
+Kiro timeouts are seconds (30). Commands invoke the fixed runtime launcher, or the
+provided Node/CLI paths, with POSIX shell quoting. There is no native model call in
+installation.
 
 Gemini uses `session_id`, `cwd`, `prompt`, and the supplied `transcript_path`.
 Cursor uses `conversation_id` (or `session_id`), `workspace_roots[0]`/`cwd`,
 `prompt`, `transcript_path`, and the completed stop's `generation_id`.
+Kiro uses `session_id`, `cwd`, and `prompt` (or `user_prompt`); its hook payload
+has no documented `transcript_path`, so the parser returns null rather than
+guessing one.
 Cursor conversation_id takes precedence over session_id; their equality is not
 enforced. Empty/non-string identities and stop statuses other than `completed`
 do not produce a valid completed-session identity.
@@ -59,6 +67,11 @@ then emit this native response:
   formatter returns `{}` at this point. The parent must gate injection and
   injection receipts on `event === host.hook.injectionChannel`; request-event
   emission can still happen.
+- Kiro `SessionStart` -> plain text. For CLI V3, Kiro adds `SessionStart` stdout
+  to the session context directly; it does not use Claude's
+  `hookSpecificOutput` envelope. Kiro's `UserPromptSubmit` is installed so the
+  session and prompt events are observed, but the parent emits no stdout there
+  because the injection channel is `SessionStart`.
 
 `HostHookPayload.sourceTurnRefs?: string[]` supplies Cursor's completed
 `[generation_id]`. At canonical Stop the parent should start with this value and
@@ -105,8 +118,8 @@ our config write as runtime evidence.
 
 ## Extraction blocker and bounded validation
 
-The canonical native invokers are **`gemini`** and **`cursor-agent`**. The generic
-`agent` executable is never considered a Cursor candidate.
+The canonical native invokers are **`gemini`**, **`cursor-agent`** and **`kiro-cli`**.
+The generic `agent` executable is never considered a Cursor candidate.
 
 Gemini's documented headless shape is `gemini -p … --output-format json`, whose
 result envelope contains `response`, `stats`, and optionally `error`.
@@ -159,7 +172,15 @@ that tools are disabled. The adapter returns
 a nonempty local source and before invocation. Empty source instead returns
 `source_unavailable` with `retryable:true`. It does not silently return successful empty proposals.
 
-Both probes retain `0.0.0-unverified` and false capability flags; config writes
+Kiro's standalone hooks are file-based; the installed CLI has no `hook`
+subcommand, so hook installation does not make a later `kiro-cli` job tool-free.
+Its interactive and headless invocations expose shell and MCP tools, and no
+verified non-interactive option disables all of them for one job. The adapter
+therefore returns `kiro_tool_free_extraction_unavailable` with `retryable:false`,
+after resolving a nonempty local source and before invoking the CLI. Empty source
+returns `source_unavailable` with `retryable:true`.
+
+All three probes retain `0.0.0-unverified` and false capability flags; config writes
 do not change them. Adapter injection returns delivered:false/unverified; the
 native hook stdout path is the implemented injection surface.
 
@@ -169,6 +190,8 @@ On 2026-11-03 this machine was checked with bounded commands only:
 - `cursor-agent --help`: print supports `text|json|stream-json`; write/bash tools
   remain available. This old CLI's help does not advertise current hook support.
 - `command -v gemini`: not found. No installation attempted.
+- `kiro-cli --version`: `3.1.0`. Its help has no `hook` subcommand; hooks are the
+  standalone files under `~/.kiro/hooks/`.
 
 No real host session, hook load/trust, native context adoption, or model
 extraction was exercised. No paid model call, user configuration change,
@@ -185,25 +208,32 @@ push/merge/release, or raw transcript upload was performed.
 - [Cursor native hooks](https://cursor.com/docs/hooks)
 - [Cursor CLI parameters](https://cursor.com/docs/cli/reference/parameters)
 - [Cursor headless CLI](https://cursor.com/docs/cli/headless)
+- [Kiro CLI hooks](https://kiro.dev/docs/cli/v3/hooks/)
+- [Kiro hook migration reference](https://kiro.dev/docs/cli/v3/hooks-migration/)
+- [Kiro hooks overview](https://kiro.dev/docs/cli/hooks/)
 
 ## Offline verification
 
-The new host tests cover 32 cases: 28 host/config/adapter cases and four real
-local-writer integration cases. They pass with zero skips. The combined focused
-registry/install/hook/native-invoker/source-output regression run passes 129/129.
-TypeScript build and bundled runtime build also pass. The original host tests
-were observed red before implementation (0/21); the later empty-source contract
-change was observed red before its implementation (22/26, four failures).
+The new host tests cover 46 cases: 41 host/config/adapter cases and five real
+local-writer integration cases. Kiro's share covers config preservation and
+uninstall, doctor states, native-payload parsing, plain-text `SessionStart`
+injection, and the tool-free extraction blocker. They pass with zero skips.
+TypeScript build and bundled runtime build also pass. The original Gemini/Cursor
+host tests were observed red before implementation (0/21); the later empty-source
+contract change was observed red before its implementation (22/26, four failures).
 
 The integration drain does not invent successful growth: Gemini's synthetic
 JSONL source resolves and records `gemini_cli_tool_free_extraction_unverified`;
 Cursor's generation ID has no assumed transcript-record mapping and records
-`source_unavailable`. Both remain incomplete/error, with zero completed model
-extractions. Separate nonempty-source seam tests verify Cursor's explicit tool
-safety blocker. This is offline evidence, not live host/model acceptance.
+`source_unavailable`. Kiro registers no `Stop` event, so its live-hook fixture
+schedules no extraction watermark at all; a separate nonempty-source seam test
+verifies its explicit tool-safety blocker. All paths remain incomplete/error,
+with zero completed model extractions. Separate nonempty-source seam tests also
+verify Cursor's explicit tool safety blocker. This is offline evidence, not live
+host/model acceptance.
 
 Post-review verification also covers preserving a renamed or unnamed disabled Gemini
 hook across launcher upgrades, and matching disabled identities using Gemini's exact
 `name || command` rule. Both regressions failed before the fix in `08351cc` and pass
-after it. The final packaged full suite has 698 tests: 697 pass, 0 fail, and one
+after it. The final full suite on this tree has 984 tests: 983 pass, 0 fail, and one
 local Node 18 availability skip; the MCP smoke checks pass.

@@ -18,7 +18,7 @@
 
 ## 1. 这是什么？
 
-37Soul 是一个开源的本地运行时，把 **Claude Code、Codex、OpenCode、Hermes 和 Pi** 连接到一个持续存在的 Soul，并自动提炼长期记忆。**Gemini CLI 与 Cursor** 也已接入身份与上下文，但暂不自动提炼记忆。
+37Soul 是一个开源的本地运行时，把 **Claude Code、Codex、OpenCode、Hermes 和 Pi** 连接到一个持续存在的 Soul，并自动提炼长期记忆。**Gemini CLI、Cursor 与 Kiro** 也已接入身份与上下文，但暂不自动提炼记忆。
 
 一个 Soul 为你的 Agent 带来三样东西：
 
@@ -153,7 +153,7 @@ Agent 内部使用 `37soul hosts` 查看目录，再用 `37soul connect --name �
 
 ### 第三步：让宿主加载连接
 
-下表前五种宿主会自动提炼长期记忆；Gemini CLI 与 Cursor 目前只提供身份与上下文，暂不自动提炼。
+下表前五种宿主会自动提炼长期记忆；Gemini CLI、Cursor 与 Kiro 目前只提供身份与上下文，暂不自动提炼。
 
 | 宿主 | 安装后需要做什么 |
 | --- | --- |
@@ -164,8 +164,9 @@ Agent 内部使用 `37soul hosts` 查看目录，再用 `37soul connect --name �
 | Pi | 重启以加载受管扩展；如果宿主限制扩展，先批准，再开新会话。 |
 | Gemini CLI | 查看 `~/.gemini/settings.json` 的原生 hooks；通过 `BeforeAgent` 提供上下文。加载与模型采用情况需由宿主验证，自动记忆提炼暂不启用。 |
 | Cursor | 查看 `~/.cursor/hooks.json`；在支持的 `sessionStart` 阶段提供上下文。加载与模型采用情况需由宿主验证，自动记忆提炼暂不启用。 |
+| Kiro | 查看受管的 `~/.kiro/hooks/37soul.json`；通过 `SessionStart` 以纯文本提供上下文。加载与模型采用情况需由宿主验证，自动记忆提炼暂不启用。 |
 
-Gemini CLI 与 Cursor 目前提供原生 hook 和身份接入，暂不自动提炼记忆，详见[能力与验证边界](docs/new-native-hosts.md)。
+Gemini CLI、Cursor 与 Kiro 目前提供原生 hook 和身份接入，暂不自动提炼记忆，详见[能力与验证边界](docs/new-native-hosts.md)。
 
 每个宿主仍需要可用的模型登录或配置。37Soul 不提供或自动替换这些凭证。
 

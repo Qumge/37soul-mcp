@@ -9,14 +9,14 @@ import { detectAgents, planInstall } from "../dist/install.js";
 import { createExtractAdapters } from "../dist/agentd/native-invoker.js";
 
 const LEGACY_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi"];
-const KINDS = [...LEGACY_KINDS, "gemini-cli", "cursor"];
+const KINDS = [...LEGACY_KINDS, "gemini-cli", "cursor", "kiro"];
 
 test("hosts: registry covers the protocol in order with unique homes and complete dispatch", () => {
   assert.deepEqual(HOSTS.map((host) => host.kind), KINDS);
   assert.deepEqual(HOSTS.map((host) => host.kind), RUNTIME_KINDS);
   assert.deepEqual(SUPPORTED_AGENTS, RUNTIME_KINDS);
-  assert.equal(new Set(HOSTS.map((host) => host.home)).size, 7);
-  assert.deepEqual(Object.values(AGENT_HOMES), [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".gemini", ".cursor"]);
+  assert.equal(new Set(HOSTS.map((host) => host.home)).size, 8);
+  assert.deepEqual(Object.values(AGENT_HOMES), [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".gemini", ".cursor", ".kiro"]);
   for (const host of HOSTS) {
     assert.equal(hostSpec(host.kind), host);
     for (const method of ["plan", "configure", "uninstall"]) assert.equal(typeof host.install[method], "function");
@@ -24,6 +24,7 @@ test("hosts: registry covers the protocol in order with unique homes and complet
     assert.equal(typeof host.doctor, "function");
   }
   assert.equal(hostSpec("gemini-cli").kind, "gemini-cli");
+  assert.equal(hostSpec("kiro").kind, "kiro");
   assert.equal(hostSpec("unknown"), undefined);
 });
 
@@ -32,7 +33,7 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
   t.after(() => rm(home, { recursive: true, force: true }));
   await mkdir(path.join(home, ".gemini"));
   assert.deepEqual(await detectAgents(home), ["gemini-cli"]);
-  for (const dir of [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".cursor"]) {
+  for (const dir of [".claude", ".codex", ".config/opencode", ".hermes", ".pi", ".cursor", ".kiro"]) {
     await mkdir(path.join(home, dir), { recursive: true });
   }
   assert.deepEqual(await detectAgents(home), KINDS);
@@ -46,6 +47,7 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
     [".pi/agent/extensions/37soul-soul.ts"],
     [".gemini/settings.json"],
     [".cursor/hooks.json"],
+    [".kiro/hooks/37soul.json"],
   ];
   const commonFiles = [".37soul/config.json", ".37soul/install-manifest.json", ".37soul/runtime/0.13.2", ".local/bin/37soul"];
   const absolute = (files) => files.map((file) => path.join(home, file));
@@ -58,7 +60,7 @@ test("hosts: detection keeps Gemini visible and plan preserves the existing file
   assert.deepEqual((await planInstall(deps, { agents: [...KINDS].reverse() })).files, plan.files);
 });
 
-test("hosts: extraction constructs all seven registered adapters", () => {
+test("hosts: extraction constructs all eight registered adapters", () => {
   const adapters = createExtractAdapters("/unused-host-registry-home");
   assert.deepEqual(Object.keys(adapters), KINDS);
   for (const kind of KINDS) assert.equal(adapters[kind].runtime_kind, kind);

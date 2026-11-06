@@ -159,7 +159,7 @@ test("cli: agentdExtractAdapters gates the runtime adapters on assets mode", () 
   // through the local path-pointer index); legacy mode passes nothing.
   const assets = agentdExtractAdapters("/home/x", true, logger, root);
   assert.ok(assets, "assets mode returns adapters, not undefined");
-  assert.deepEqual(Object.keys(assets).sort(), ["claude-code", "codex", "cursor", "gemini-cli", "hermes", "opencode", "pi"]);
+  assert.deepEqual(Object.keys(assets).sort(), ["claude-code", "codex", "cursor", "gemini-cli", "hermes", "kiro", "opencode", "pi"]);
 
   const legacy = agentdExtractAdapters("/home/x", false, logger, root);
   assert.equal(legacy, undefined, "legacy mode keeps its transcript-upload path and gets no extraction adapters");

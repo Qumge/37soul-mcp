@@ -30,7 +30,9 @@ async function fixture(t, kind) {
   await writeFile(source, records.map(record => JSON.stringify(record)).join('\n') + '\n');
   const payload = kind === 'cursor'
     ? { conversation_id: 'cursor-conversation', session_id: 'cursor-conversation', generation_id: 'cursor-generation-7', workspace_roots: [home], transcript_path: source }
-    : { session_id: 'gemini-session', cwd: home, transcript_path: source };
+    : kind === 'kiro'
+      ? { session_id: 'kiro-session', cwd: home }
+      : { session_id: 'gemini-session', cwd: home, transcript_path: source };
   const snap = async () => { const s = await openStore(root, profile); try { return await s.read(); } finally { await s.close(); } };
   const hook = async (event, native, extra = {}) => {
     const stdout = [], stderr = [];
@@ -91,6 +93,31 @@ for (const kind of ['gemini-cli', 'cursor']) {
     } finally { await writer.close(); }
   });
 }
+
+test('new hosts runtime: kiro injects plain SessionStart context and schedules no extraction', async t => {
+  const f = await fixture(t, 'kiro');
+  const writer = await startWriter(f.root);
+  try {
+    const start = await f.hook('SessionStart', 'SessionStart');
+    const prompt = await f.hook('UserPromptSubmit', 'UserPromptSubmit', { prompt: 'A bounded fixture question' });
+    assert.match(start, /Native Test Identity/);
+    assert.match(start, /--agent kiro/);
+    assert.ok(!start.includes('PRIVATE_RAW_CANARY_7'));
+    assert.ok(!start.trimStart().startsWith('{'), 'Kiro consumes plain text, not a JSON envelope');
+    assert.equal(prompt, '');
+    const snapshot = await f.snap();
+    const bindings = Object.values(snapshot.bindings);
+    assert.equal(bindings.length, 1);
+    assert.equal(bindings[0].runtime_kind, 'kiro');
+    assert.equal(bindings[0].native_session_id, 'kiro-session');
+    assert.deepEqual(snapshot.extraction_watermarks, {});
+    assert.ok(Object.values(snapshot.receipts).some(receipt => receipt.stage === 'injected'));
+    const checks = await hostSpec('kiro').doctor({ home: f.home, config: {}, assetsMode: true, nodePath: process.execPath, cliScriptPath: '/runtime/cli.js' });
+    assert.equal(checks.find(c => c.name === 'kiro: hook output').ok, true);
+    assert.equal(checks.find(c => c.name === 'kiro: extraction').ok, false);
+    assert.equal(checks.find(c => c.name === 'kiro: trust/load').ok, false);
+  } finally { await writer.close(); }
+});
 
 test('new hosts runtime: aborted Cursor stop cannot schedule a completed turn', async t => {
   const f = await fixture(t, 'cursor');

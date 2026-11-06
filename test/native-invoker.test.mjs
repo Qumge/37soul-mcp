@@ -33,7 +33,7 @@ import {
   systemProxyEnvironment,
 } from "../dist/agentd/native-invoker.js";
 
-const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi", "gemini-cli", "cursor"];
+const ALL_KINDS = ["claude-code", "codex", "opencode", "hermes", "pi", "gemini-cli", "cursor", "kiro"];
 
 /** A fake spawn that records every call and synchronously invokes its callback. */
 function recordingSpawn(responder = () => ({ stdout: "[]", stderr: "" })) {

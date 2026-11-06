@@ -37,9 +37,17 @@ function quote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-export function nativeHookCommand(deps: Pick<HostInstallDeps, "launcher" | "nodePath" | "cliScriptPath">, spec: NativeHookConfig, event: NativeHookEvent): string {
+export function nativeHookCommandFor(
+  deps: Pick<HostInstallDeps, "launcher" | "nodePath" | "cliScriptPath">,
+  kind: string,
+  event: { event: string; canonical: string },
+): string {
   const prefix = deps.launcher ? quote(deps.launcher) : `${quote(deps.nodePath)} ${quote(deps.cliScriptPath)}`;
-  return `${prefix} hook --agent ${spec.kind} --event ${event.canonical} # 37soul-managed:${spec.kind}:${event.event}:v1`;
+  return `${prefix} hook --agent ${kind} --event ${event.canonical} # 37soul-managed:${kind}:${event.event}:v1`;
+}
+
+export function nativeHookCommand(deps: Pick<HostInstallDeps, "launcher" | "nodePath" | "cliScriptPath">, spec: NativeHookConfig, event: NativeHookEvent): string {
+  return nativeHookCommandFor(deps, spec.kind, event);
 }
 
 function managed(entry: any, spec: NativeHookConfig, event: NativeHookEvent): boolean {

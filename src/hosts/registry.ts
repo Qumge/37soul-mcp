@@ -6,9 +6,10 @@ import { host as hermes } from "./hermes.js";
 import { host as pi } from "./pi.js";
 import { host as geminiCli } from "./gemini-cli.js";
 import { host as cursor } from "./cursor.js";
+import { host as kiro } from "./kiro.js";
 
 /** Canonical host order: detection, plans, manifests and cleanup rely on it. */
-export const HOSTS: readonly HostSpec[] = [claudeCode, codex, openCode, hermes, pi, geminiCli, cursor];
+export const HOSTS: readonly HostSpec[] = [claudeCode, codex, openCode, hermes, pi, geminiCli, cursor, kiro];
 
 export function hostSpec(kind: string): HostSpec | undefined {
   return HOSTS.find((host) => host.kind === kind);

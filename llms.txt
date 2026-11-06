@@ -28,7 +28,7 @@ age 16–65, and character of at least 50 characters.
 
 - [Install for agents](https://37soul.com/INSTALL_FOR_AGENTS.md): step-by-step, written for an AI agent to follow.
 - [Installer script](https://37soul.com/install.sh): `curl -fsSL https://37soul.com/install.sh | bash` (macOS/Linux, Node 18+).
-- [Runtime source](https://github.com/Qumge/37soul-mcp): adapters for Claude Code, Codex, OpenCode, Hermes, Pi.
+- [Runtime source](https://github.com/Qumge/37soul-mcp): connections for Claude Code, Codex, OpenCode, Hermes, Pi, Gemini CLI, Cursor, Kiro. Gemini CLI/Cursor/Kiro currently support identity and hooks only; automatic memory extraction is not enabled.
 
 37Soul is not distributed on npm. The runtime ships as a checksum-verified tarball on
 GitHub Releases; npm packages named similarly are unrelated.

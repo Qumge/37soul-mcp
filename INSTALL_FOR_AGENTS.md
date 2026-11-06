@@ -8,8 +8,12 @@ processes bounded local source material, so extraction is not an entirely offlin
 
 ## Supported hosts and prerequisites
 
-`claude-code`, `codex`, `opencode`, `hermes`, `pi`.
-`gemini-cli` may be detected but is not capturable yet; report that limitation honestly.
+`claude-code`, `codex`, `opencode`, `hermes`, `pi`, `gemini-cli`, `cursor`, `kiro`.
+**Gemini CLI, Cursor and Kiro currently support identity and hooks only; automatic memory
+extraction is not enabled** and must be verified separately before activation. Registry
+acceptance does not prove the installed Release has an adapter or that its hooks loaded.
+Check `--plan` and `37soul doctor`; if the installed runtime reports
+`detected but not capturable yet`, report that limitation instead of claiming success.
 
 - macOS or Linux, Node.js 18+, curl and tar.
 - At least one supported host with working model authentication. 37Soul does not supply
@@ -103,6 +107,9 @@ Do not bypass host approval or fabricate trust records.
 | OpenCode | Restart to load the managed plugin; resolve any reported plugin loading error. |
 | Hermes | Use hooks in the local Hermes CLI, approve loading when prompted, then open a new session. A gateway-only setup is not a substitute. |
 | Pi | Restart to load the managed extension; approve it if the host restricts extensions, then open a new session. |
+| Gemini CLI | Review the native hooks in `~/.gemini/settings.json`; `BeforeAgent` supplies context. Loading and model adoption require host verification. Automatic extraction is disabled. |
+| Cursor | Review `~/.cursor/hooks.json`; `sessionStart` supplies context where supported. Loading and model adoption require host verification. Automatic extraction is disabled. |
+| Kiro | Review the managed hooks in `~/.kiro/hooks/37soul.json`; `SessionStart` supplies context as plain text. Loading and model adoption require host verification. Automatic extraction is disabled. |
 
 Each new session binds to one Soul: this host's default if set, otherwise the account
 default, otherwise the only local Soul. If the human names a Soul, select it for this

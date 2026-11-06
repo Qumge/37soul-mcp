@@ -27,17 +27,19 @@ const mappings = {
   cursor: { sessionStart: 'SessionStart', beforeSubmitPrompt: 'UserPromptSubmit', stop: 'Stop', preCompact: 'PreCompact' },
 };
 
-test('new hosts: canonical registry and native executables cover seven runtimes', () => {
-  assert.equal(HOSTS.length, 7);
+test('new hosts: canonical registry and native executables cover eight runtimes', () => {
+  assert.equal(HOSTS.length, 8);
   assert.deepEqual(SUPPORTED_AGENTS, RUNTIME_KINDS);
   assert.deepEqual(HOSTS.map(h => h.kind), RUNTIME_KINDS);
   assert.equal(hostSpec('cursor').invoke.binary, 'cursor-agent');
   assert.ok(hostSpec('cursor').invoke.userLaunchers.every(p => p.endsWith('/cursor-agent')));
   assert.equal(hostSpec('gemini-cli').invoke.binary, 'gemini');
+  assert.equal(hostSpec('kiro').invoke.binary, 'kiro-cli');
   assert.equal(AGENT_HOMES.cursor, '.cursor');
   assert.equal(AGENT_HOMES['gemini-cli'], '.gemini');
+  assert.equal(AGENT_HOMES.kiro, '.kiro');
   const adapters = createExtractAdapters('/unused-new-hosts-home');
-  for (const kind of kinds) assert.equal(adapters[kind].runtime_kind, kind);
+  for (const kind of [...kinds, 'kiro']) assert.equal(adapters[kind].runtime_kind, kind);
 });
 
 for (const kind of kinds) {

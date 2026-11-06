@@ -23,7 +23,7 @@ function nativeSchema(value:any):any{
 }
 export function withBatchExtraction(factory:(deps:AdapterDeps)=>RuntimeAdapter,deps:AdapterDeps):RuntimeAdapter{
  const base=factory(deps);
- if(typeof base.extract!=="function"||["cursor","gemini-cli"].includes(base.runtime_kind))return base;
+ if(typeof base.extract!=="function"||["cursor","gemini-cli","kiro"].includes(base.runtime_kind))return base;
  const batchSupported=base.runtime_kind==='claude-code'||base.runtime_kind==='pi';
  // Preparation is invocation-local: never cache raw material or failures across drains.
  const prepareInvocation=async(request:ExtractionRequest):Promise<Invocation|ExtractionResult>=>{
