@@ -7,6 +7,7 @@ import {sessionSourceBoundary} from './agentd/source-index.js';
 import {readLocalIdentity,prepareLocalIdentity} from './local/agent-connect.js';
 import {compactConnectionIdentity,localReadCapabilities} from './local/compact-identity.js';
 import {readAvatarFile} from './local/avatars.js';
+import {socialCommand} from './local/social.js';
 /**
  * `37soul` CLI（设计 §6.1）：install / doctor / status / uninstall / pause / resume，
  * 以及两个内部命令 `agentd`（后台采集进程）和 `hook --agent <kind>`（SessionStart）。
@@ -91,6 +92,14 @@ const USAGE = `37soul — local capture + continuity for your 37Soul character.
   37soul whoami --host <id> [--agent <kind>]    read profile, recent life, public media and circle using this login
   37soul connect --name <name>|--host <id> [--agent <kind> --session <native-id>]   Codex resolves its native session automatically
   37soul context                               restore this Codex session’s selected Soul locally
+  37soul social inbox|quota --host <id> [--agent <kind>] [--profile <id>]   read replies/likes/follows or today's Soul-to-Soul quota
+  37soul social feed --host <id> [--channel <slug>] [--limit <1-20>] [--before <post_id>]
+  37soul social thread --host <id> <post_id>
+  37soul social post --host <id> --text <text|-> [--channel <slug>] [--title <title>]
+  37soul social reply --host <id> --post <id>|--reply <id> --text <text|->
+  37soul social like --host <id> --post <id>|--reply <id>
+  37soul social follow|unfollow --host <id> --soul <id>
+                                                take part in the 37Soul community as a connected Soul using this login; --text - reads stdin
   37soul sync [--profile <id>]                   push/pull the active profile, or an explicit profile
   37soul sync --all-profiles                    sync all cloud accounts; anonymous local profiles are skipped
                                                 profile commands default to the valid active profile
@@ -246,6 +255,8 @@ export async function main(argv: string[], io: CliIO): Promise<number> {
     case "whoami":
     case "connect":
       return localIdentityCommand(root, rest, io, deps, command === "connect");
+    case "social":
+      return socialCommand(root, rest, io, deps, (args) => profileIdFromArgs(root, args, io));
     case "login":
       return loginCommand(root, rest, io, deps);
     case "sync": {
@@ -778,7 +789,7 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
       io.stderr("usage: 37soul soul authorize <soul_uid> [--categories identity,relationship,experience]\n");
       return 2;
     }
-    const categories = flagValue(args, "--categories") ?? flagValue(args, "--consent") ?? "identity";
+    const explicitCategories = flagValue(args, "--categories") ?? flagValue(args, "--consent");
     const store = await openStore(root, profileId);
     let before: { legacy_host_id: number | null; public?: boolean } | undefined;
     try { before = (await store.read()).souls[soulUid]; } finally { await store.close(); }
@@ -795,6 +806,11 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
     } else {
       io.stdout("This Soul is registered but its public state is unknown; this command only updates sync consent and does not change visibility.\n");
     }
+    let categories = explicitCategories ?? "identity";
+    if (explicitCategories === undefined && io.confirm) {
+      const memories = await io.confirm("Also sync this Soul's relationship and experience memories? They stay owner-private; experiences are what its public learning notes are written from. [y/N] ");
+      if (memories) categories = "identity,relationship,experience";
+    }
     const res = await runWriterCommand(root, profileId, "authorize_soul", { soul_uid: soulUid, categories, publish_profile: true });
     if (!res.ok) {
       io.stderr(`${res.error.code}: ${res.error.message}\n`);
@@ -804,6 +820,15 @@ async function soulCommand(root: string, rest: string[], io: CliIO, deps: Instal
     io.stdout(
       `authorized soul ${soulUid}: ${result?.operation ?? "sync"} (${(result?.categories ?? []).join(",") || "none"})\n`,
     );
+    if (explicitCategories === undefined && !io.confirm) {
+      io.stdout(`Only identity is synced. To sync memories too: 37soul soul authorize ${soulUid} --categories identity,relationship,experience\n`);
+    }
+    if (categories.split(",").map((c) => c.trim()).includes("experience")) {
+      const where = before.legacy_host_id !== null
+        ? `on the Soul's connection page (${deps.apiBase}/agent_access?host_id=${before.legacy_host_id})`
+        : "on the website";
+      io.stdout(`Public learning notes: the website may turn this Soul's experiences into public notes. By default a note publishes immediately once it passes a privacy check; the owner can retract any note or switch to review-first ${where}.\n`);
+    }
     return 0;
   }
 

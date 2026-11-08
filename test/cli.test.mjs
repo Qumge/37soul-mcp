@@ -621,6 +621,50 @@ test("R2: soul create stays local and soul authorize enqueues explicit consent",
   }
 });
 
+test("authorize without --categories: non-TTY keeps identity and prints the memories hint; TTY yes adds memories and the notes notice", async () => {
+  const home = tempDir();
+  const root = path.join(home, ".37soul");
+  await seed(root, "p1", "dev-1");
+  const previousHome = process.env.SOUL37_HOME;
+  process.env.SOUL37_HOME = home;
+  try {
+    const uids = [];
+    for (const name of ["Quiet", "Open"]) {
+      const created = makeIo();
+      assert.equal(await main(["soul", "create", "--avatar", writeAvatar(home), "--profile", "p1", "--name", name, ...PROFILE_ARGS], created.io), 0, created.out.stderr);
+      uids.push(/created soul ([0-9a-f-]{36})/.exec(created.out.stdout)?.[1]);
+    }
+    const plain = makeIo();
+    assert.equal(await main(["soul", "authorize", uids[0], "--profile", "p1"], plain.io), 0, plain.out.stderr);
+    assert.ok(plain.out.stdout.includes(`Only identity is synced. To sync memories too: 37soul soul authorize ${uids[0]} --categories identity,relationship,experience`));
+    assert.doesNotMatch(plain.out.stdout, /Public learning notes/);
+
+    const asked = makeIo();
+    const prompts = [];
+    asked.io.confirm = async (message) => { prompts.push(message); return true; };
+    assert.equal(await main(["soul", "authorize", uids[1], "--profile", "p1"], asked.io), 0, asked.out.stderr);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /relationship and experience memories\? They stay owner-private/);
+    assert.doesNotMatch(asked.out.stdout, /Only identity is synced/);
+    assert.match(asked.out.stdout, /Public learning notes: .* switch to review-first on the website\./);
+
+    const snap = await readSnap(root, "p1");
+    const ops = Object.values(snap.outbox).filter((entry) => entry.operation_kind === "register_soul");
+    const categoriesFor = (uid) => ops.find((op) => op.request.soul_uid === uid || op.soul_uid === uid)?.request.consent_categories.slice().sort();
+    assert.deepEqual(categoriesFor(uids[0]), ["identity"]);
+    assert.deepEqual(categoriesFor(uids[1]), ["experience", "identity", "relationship"]);
+
+    const explicit = makeIo();
+    explicit.io.confirm = async () => { throw new Error("must not prompt when --categories is given"); };
+    assert.equal(await main(["soul", "authorize", uids[0], "--profile", "p1", "--categories", "identity,experience"], explicit.io), 0, explicit.out.stderr);
+    assert.match(explicit.out.stdout, /Public learning notes/);
+    assert.doesNotMatch(explicit.out.stdout, /Only identity is synced/);
+  } finally {
+    if (previousHome === undefined) delete process.env.SOUL37_HOME;
+    else process.env.SOUL37_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 // F3: an explicit local edit must change what injection actually renders, with a
 // consistent revision (not a local_identity fallback stuck on the original).
