@@ -23,6 +23,13 @@ test('Pi Stop passes native session file and suppresses internal jobs',()=>{
  assert.match(PI_EXTENSION_SOURCE,/transcript_path:/);
  assert.match(PI_EXTENSION_SOURCE,/SOUL37_INTERNAL_JOB_UID/);
 });
+test('Pi may connect before its first Stop boundary; extraction stays enabled',()=>{
+ // Pi only reports its transcript path on Stop. A first-message connect has
+ // no byte boundary yet, so binding must not wait for one; later Stop events
+ // still schedule extraction from their own turn refs.
+ assert.equal(host.hook.sourceBoundary,'optional');
+ assert.equal(typeof host.hook.completedTurnRefs,'function');
+});
 test('Pi selects latest completed turn on active parent chain, excluding sibling and metadata',()=>{
  assert.equal(typeof host.hook.completedTurnRefs,'function');
  assert.deepEqual(host.hook.completedTurnRefs(transcript),['u2','call','result','a2']);

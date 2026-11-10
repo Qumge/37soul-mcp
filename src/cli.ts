@@ -949,8 +949,10 @@ async function localIdentityCommand(root: string, rest: string[], io: CliIO, dep
   let abortUpstream:(()=>void)|undefined;
   try {
     let directoryTarget: {id:number;soul_uid:string} | undefined;
-    // Identity-only hosts (no native transcript) may bind a chosen Soul without
-    // a byte boundary; their adapter still refuses automatic extraction.
+    // Hosts whose transcript boundary may not exist at connect time: identity-only
+    // adapters never produce one, and Pi reports it only on Stop. Bind without a
+    // byte boundary; extraction stays disabled for identity-only adapters and
+    // follows later Stop events for Pi.
     const sourceOptional = hostSpec(runtime ?? "")?.hook.sourceBoundary === "optional";
     if (attach) {
       await requireActive();

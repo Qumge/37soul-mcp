@@ -799,9 +799,10 @@ registerWriterCommand("connect_session", async ({root, request}) => {
     const existing = snap.bindings[k];
     const boundary = await sessionSourceBoundary(root, key);
     const nativeMode = p.source_mode === "codex-native" && key.runtime_kind === "codex";
-    // Identity-only hosts (Kiro, Gemini CLI, Cursor) have no native transcript,
-    // so an explicit connect may bind the chosen Soul without a byte boundary.
-    // Automatic extraction stays disabled by their adapter.
+    // Hosts whose byte boundary may arrive after connect: identity-only adapters
+    // (Kiro, Gemini CLI, Cursor) never produce a transcript, and Pi reports its
+    // transcript path only on Stop. Bind identity now; extraction stays disabled
+    // for identity-only adapters and follows later Stop events for Pi.
     const boundaryOptional = p.source_boundary_optional === true;
     if (nativeMode && (!boundary || !await verifyCodexRollout(boundary.path, key.native_session_id))) throw new StoreError("session_context_unavailable", "Codex rollout does not match the exact native session.");
     const nativeBoundary = nativeMode ? boundary! : undefined;

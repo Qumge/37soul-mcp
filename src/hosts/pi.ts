@@ -72,6 +72,10 @@ export const host: HostSpec = {
     events: [{ event: "SessionStart" }, { event: "UserPromptSubmit" }, { event: "PostToolUse" }, { event: "PostToolUseFailure" }, { event: "Stop" }, { event: "SessionEnd" }],
     injectionChannel: "SessionStart",
     emitsRuntimeEvents: true,
+    // Pi's extension reports the native transcript path only on Stop. A connect
+    // on the session's first message therefore has no byte boundary yet; bind
+    // without one and let later Stop events schedule extraction.
+    sourceBoundary: "optional",
     parsePayload: parseHookPayload,
     completedTurnRefs: latestPiCompletedTurnRefs,
   },

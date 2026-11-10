@@ -83,9 +83,11 @@ export interface HostHookSpec {
   injectionChannel: InjectionChannel;
   emitsRuntimeEvents: boolean;
   /**
-   * "optional" means this host has no native transcript source, so an explicit
-   * connect may bind the session without a byte boundary. Extraction stays
-   * disabled by the adapter; the boundary is only local provenance.
+   * "optional" means the host may not have a native transcript byte boundary
+   * at connect time: identity-only adapters never produce one, and Pi only
+   * reports its transcript path on Stop. An explicit connect may bind without
+   * it. Extraction stays disabled for identity-only adapters; for Pi, later
+   * Stop events schedule extraction from their own turn refs.
    */
   sourceBoundary?: "required" | "optional";
   parsePayload(payload: Record<string, any>): HostHookPayload;

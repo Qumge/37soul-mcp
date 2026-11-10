@@ -53,6 +53,12 @@ valid hook source pointer fails with `session_context_unavailable`. A connect
 never invents a native session ID; the value must come from the host context or
 local session records.
 
+Pi also sets `sourceBoundary: "optional"`, for a different reason: its extension
+reports the transcript path only on Stop, so a connect on the session's first
+message has no boundary yet. The binding is created without one and later Stop
+events schedule extraction from their own completed-turn refs, so Pi's
+extraction capability is unchanged.
+
 Cursor's generation ID is local completion provenance, **not a claim that the
 transcript contains an equivalent record ID**. Gemini's completed-turn helper
 recognizes legacy JSON `messages[].id` and simple message JSONL, and rejects

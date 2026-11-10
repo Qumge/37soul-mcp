@@ -85,6 +85,15 @@ test('Kiro connects a chosen Soul from an existing native session without a tran
  assert.equal(b.runtime_kind,'kiro');assert.equal(b.native_session_id,session);assert.equal(b.source_boundary,undefined);
 });
 
+test('Pi connects on the first message, before a Stop event can record its transcript boundary',async t=>{
+ const f=await fixture(t);f.config.credentials[0].runtime_kind='pi';await writeFile(path.join(f.root,'config.json'),JSON.stringify(f.config));
+ const session='01a1c605-9b9c-74e6-8d3b-620421a9980a';const out=output();
+ assert.equal(await main(['connect','--name','Sophia Ramirez','--agent','pi','--session',session],out),0,out.out.stderr);
+ assert.equal(JSON.parse(out.out.stdout).connection.state,'attached');
+ const b=Object.values((await read(f.root)).bindings).find(x=>!x.retired);
+ assert.equal(b.runtime_kind,'pi');assert.equal(b.native_session_id,session);assert.equal(b.source_boundary,undefined);
+});
+
 test('Codex connects a chosen Soul from its native environment without any hook or source pointer',async t=>{
  const f=await fixture(t);const old=process.env.CODEX_THREAD_ID;const sid='10000000-0000-4000-8000-000000000001';process.env.CODEX_THREAD_ID=sid;
  t.after(()=>{if(old===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=old;});
